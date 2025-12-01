@@ -140,7 +140,6 @@ def plot_farm_deficit_map(wind_farm, x_resolution=100, y_resolution=50, save_pat
 
     T0 = wind_farm.turbines[0]
     D = T0.D
-    Uhub_ref = wind_farm.field_params.Uhub
 
     # 1. Define Visualization Domain (X-Y Plane at Hub Height)
     x_coords = [t.pos[0] for t in wind_farm.turbines]
@@ -150,7 +149,7 @@ def plot_farm_deficit_map(wind_farm, x_resolution=100, y_resolution=50, save_pat
     max_Y = wind_farm.field_params.max_Y * D
     
     x_min = min(x_coords) - max_X  # Start 1D upstream of first turbine
-    x_max = max(x_coords) + max_X # End at max wake length of the last turbine
+    x_max = max(x_coords) + max_X  # End at max wake length of the last turbine
     
     y_min = min(y_coords) - max_Y
     y_max = max(y_coords) + max_Y
@@ -209,7 +208,7 @@ def plot_farm_deficit_map(wind_farm, x_resolution=100, y_resolution=50, save_pat
     else:
         plt.show()
     
-def plot_data(Data, params, pause_interval=0.1, quiver_samples=35, 
+def plot_data(Data, config, pause_interval=0.1, quiver_samples=35, 
               show_streamwise=True, save_path=None, fps=10, dpi=150):
     """
     Main driver to visualize wake data. Coordinates setup, data prep, and animation loop.
@@ -217,8 +216,8 @@ def plot_data(Data, params, pause_interval=0.1, quiver_samples=35,
     plt.close('all')
     
     # 1. Prepare common data and grids
-    grid_info = _get_grid_info(Data[0], params)
-    wake_history = _extract_streamwise_history(Data, params, grid_info) if show_streamwise else None
+    grid_info = _get_grid_info(Data[0], config)
+    wake_history = _extract_streamwise_history(Data, config, grid_info) if show_streamwise else None
     
     # 2. Setup Figure and Axes
     fig, axes_dict = _setup_layout(show_streamwise and wake_history is not None)
@@ -228,25 +227,25 @@ def plot_data(Data, params, pause_interval=0.1, quiver_samples=35,
     plot_state = {'cbar_vort': None, 'cbar_vel': None, 'cbar_wake': None}
 
     def update_frame(entry):
-        _render_snapshot(axes_dict, plot_state, entry, params, grid_info, quiver_samples)
+        _render_snapshot(axes_dict, plot_state, entry, config, grid_info, quiver_samples)
         if wake_history:
-            _render_streamwise(axes_dict, plot_state, entry, params, grid_info, wake_history)
+            _render_streamwise(axes_dict, plot_state, entry, config, grid_info, wake_history)
 
     # Execution
     if save_path:
-        _save_animation(fig, Data, update_frame, save_path, params.yaw, fps, dpi, pause_interval)
+        _save_animation(fig, Data, update_frame, save_path, config.yaw, fps, dpi, pause_interval)
     else:
         _show_live(fig, Data, update_frame, pause_interval)
 
     return fig, axes_dict
 
-def _get_grid_info(data_snapshot, params):
+def _get_grid_info(data_snapshot, config):
     """Normalizes grids and finds indices for hub-height slicing."""
-    yloc = np.asarray(data_snapshot.yloc) / params.D
-    zloc = np.asarray(data_snapshot.zloc) / params.D
+    yloc = np.asarray(data_snapshot.yloc) / config.D
+    zloc = np.asarray(data_snapshot.zloc) / config.D
     
     # Find indices closest to Center/Hub
-    z_target = params.Zhub / params.D
+    z_target = config.Zhub / config.D
     y_center_idx = yloc.shape[0] // 2
     z_hub_idx = np.argmin(np.abs(zloc[0, :] - z_target))
     
@@ -256,12 +255,12 @@ def _get_grid_info(data_snapshot, params):
         'Ny': yloc.shape[0], 'Nz': yloc.shape[1]
     }
 
-def _extract_streamwise_history(Data, params, grid):
+def _extract_streamwise_history(Data, config, grid):
     """Pre-processes the full dataset to extract streamwise evolution arrays."""
     X_pos, U_hub_profiles = [], []
     
     for d in Data:
-        X_pos.append(d.X / params.D)
+        X_pos.append(d.X / config.D)
         # Extract entire Y-profile at hub height Z
         U_hub_profiles.append(np.asarray(d.U)[:, grid['z_hub_idx']])
             
@@ -272,7 +271,7 @@ def _extract_streamwise_history(Data, params, grid):
     
     return {
         'X': np.array(X_pos),
-        'U_hub_2D': np.array(U_hub_profiles).T, # Shape: (Ny, N_snapshots)
+        'U': np.array(U_hub_profiles).T, # Shape: (Ny, N_snapshots)
         'X_grid': X_grid,
         'Y_grid': Y_grid
     }
@@ -288,7 +287,7 @@ def _setup_layout(has_streamwise):
         fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
         return fig, {'vort': axes[0], 'vel': axes[1]}
 
-def _render_snapshot(axes, state, entry, params, grid, q_samples):
+def _render_snapshot(axes, state, entry, config, grid, q_samples):
     """Handles the top row: Contour plots for current timestep."""
     # 1. Vorticity (Top Left)
     ax = axes['vort']
@@ -296,14 +295,14 @@ def _render_snapshot(axes, state, entry, params, grid, q_samples):
     ax.set_aspect('equal', 'box')
     
     omg = np.asarray(entry.OmegaX)
-    norm_factor = params.Uhub / params.D
+    norm_factor = config.Uhub / config.D
     omg_norm = omg / norm_factor
     
     limit = np.nanmax(np.abs(omg_norm)) if np.isfinite(np.nanmax(omg_norm)) else 1.0
     levels = np.linspace(-1, 1, 21) * limit
     
     cf = ax.contourf(grid['yloc'], grid['zloc'], omg_norm, levels=levels, cmap='RdBu_r', extend='both')
-    ax.set_title(f'$\\Omega_x$ (Normalized) at X/D = {entry.X/params.D:.1f}')
+    ax.set_title(f'$\\Omega_x$ (Normalized) at X/D = {entry.X/config.D:.1f}')
     
     if state['cbar_vort'] is None:
         state['cbar_vort'] = ax.figure.colorbar(cf, ax=ax, label='Vorticity')
@@ -318,12 +317,12 @@ def _render_snapshot(axes, state, entry, params, grid, q_samples):
     ax.clear()
     ax.set_aspect('equal', 'box')
 
-    u_def_norm = np.asarray(params.Uin - entry.U) / params.Uhub
+    u_def_norm = np.asarray(entry.U) / config.Uhub
     limit = np.nanmax(np.abs(u_def_norm)) if np.isfinite(np.nanmax(u_def_norm)) else 1.0
 
     cf = ax.contourf(grid['yloc'], grid['zloc'], u_def_norm, levels=21, cmap='turbo')
     cf.set_clim(0, limit)
-    ax.set_title(f'U/Uhub at X/D = {entry.X/params.D:.1f}')
+    ax.set_title(f'U/Uhub at X/D = {entry.X/config.D:.1f}')
     
     if state['cbar_vel'] is None:
         state['cbar_vel'] = ax.figure.colorbar(cf, ax=ax, label='Normalized Streamwise Velocity')
@@ -338,9 +337,9 @@ def _add_quiver(ax, entry, grid, samples):
               np.asarray(entry.V)[sl], np.asarray(entry.W)[sl], 
               color='k', scale=16.0, angles='xy')
 
-def _render_streamwise(axes, state, entry, params, grid, history):
+def _render_streamwise(axes, state, entry, config, grid, history):
     """Handles bottom row: Profiles and Heatmap."""
-    current_x = entry.X / params.D
+    current_x = entry.X / config.D
     
     # 3. Radial Profiles (Bottom Left)
     ax = axes['prof']
@@ -351,15 +350,18 @@ def _render_streamwise(axes, state, entry, params, grid, history):
     indices = np.linspace(0, len(history['X'])-1, num_profs, dtype=int)
     colors = plt.cm.viridis(np.linspace(0, 1, num_profs))
     
+    u_norm = history['U'] / config._init_Uhub()
     for i, idx in enumerate(indices):
-        ax.plot(grid['yloc'][:,0], history['U_hub_2D'][:, idx], 
+        ax.plot(grid['yloc'][:,0], u_norm[:, idx], 
                 color=colors[i], marker='o', ms=3, alpha=0.5, label=f'X/D={history["X"][idx]:.1f}')
         
     # Highlight current profile
     curr_idx = np.argmin(np.abs(history['X'] - current_x))
-    ax.plot(grid['yloc'][:,0], history['U_hub_2D'][:, curr_idx], 'r-', lw=3, label='Current')
+    ax.plot(grid['yloc'][:,0], u_norm[:, curr_idx], 'r-', lw=3, label='Current')
     
     ax.set_title('Hub Height Velocity Profiles')
+    ax.set_ylabel('U/Uhub')
+    ax.set_xlabel('Normalized Cross-stream Distance Y/D')
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
 
@@ -367,13 +369,14 @@ def _render_streamwise(axes, state, entry, params, grid, history):
     ax = axes['wake']
     ax.clear()
     
-    u_norm = -history['U_hub_2D'] / params.Uhub
     mesh = ax.pcolormesh(history['X_grid'], history['Y_grid'], u_norm, cmap='jet', shading='auto')
     ax.axvline(current_x, color='r', ls='--')
     ax.set_title('Wake Evolution (Top Down)')
+    ax.set_xlabel('Streamwise Distance X/D')
+    ax.set_ylabel('Normalized Cross-stream Distance Y/D')
     
     if state['cbar_wake'] is None:
-        state['cbar_wake'] = ax.figure.colorbar(mesh, ax=ax, label='Deficit')
+        state['cbar_wake'] = ax.figure.colorbar(mesh, ax=ax, label='Normalized Velocity U/Uhub')
     else:
         state['cbar_wake'].update_normal(mesh)
 

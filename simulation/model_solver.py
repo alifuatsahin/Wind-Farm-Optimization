@@ -3,13 +3,14 @@ import numpy as np
 def advance_wake_field(data, dt, NuT, config, field_params):
     """Update the streamwise velocity according to transportation-diffusion equations."""
     Uin = config.Uin
-    Uw = data.U.copy()  # Make a copy to avoid modifying original
+    U = data.U.copy()
+    Uw = Uin - U  # Make a copy to avoid modifying original
     V = data.V.copy()
     W = data.W.copy()
     yloc = data.yloc
     zloc = data.zloc
  
-    V_veer = Uin * np.sin(np.deg2rad(field_params.WV * (zloc - config.Zhub)))
+    V_veer = U * np.sin(np.deg2rad(field_params.WV * (zloc - config.Zhub)))
     V += V_veer # total transverse velocity
 
     # estimate mean convection distance
@@ -31,8 +32,9 @@ def advance_wake_field(data, dt, NuT, config, field_params):
     # assemble numerator
     numer = -V * dUdY + W * (-dUdZ + dUin_dZ) + NuT * dSxydY + NuT * dSxzdZ
     denom = Uin - Uw
+    denom_safe = np.maximum(denom, 1e-6)  # prevent division by zero
 
-    dUwpdx = numer / denom
+    dUwpdx = numer / denom_safe
     Uwp = Uw + dUwpdx * dx
     Uwp[:, 0] = 0.0 # no slip at BC
 
@@ -46,9 +48,10 @@ def advance_wake_field(data, dt, NuT, config, field_params):
     _, dSxzdZ = np.gradient(Sxz, yloc[:, 0], zloc[0, :])   # second output = ∂Sxz/∂z
     numer = -V * dUdY + W * (-dUdZ + dUin_dZ) + NuT * dSxydY + NuT * dSxzdZ
     denom = Uin - Uwp
+    denom_safe = np.maximum(denom, 1e-6)  # prevent division by zero
 
-    dUwcdx = numer / denom
+    dUwcdx = numer / denom_safe
     Uw += 0.5 * (dUwpdx + dUwcdx) * dx
     Uw[:, 0] = 0.0 # no slip at BC
     
-    return Uw, data.X + dx
+    return Uin - Uw, data.X + dx

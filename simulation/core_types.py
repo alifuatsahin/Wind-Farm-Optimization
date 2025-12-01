@@ -26,8 +26,10 @@ class Turbine:
         self.vortex_field = None  # to be filled after simulation
         self.wake_field = None  # to be filled after wake calculation
         self.dl = None  # grid spacing in y direction
-        self.Uhub = self._init_Uhub()
         self._initialize_grid()
+
+        self.Uhub = self._init_Uhub()
+        self.Uin = self._init_Uin()
 
     def _initialize_grid(self):
         Ly = self.field_params.max_Y * self.D
@@ -58,8 +60,7 @@ class Turbine:
         Uhub = self.Uh * (np.log(self.Zhub / self.field_params.z0) / np.log(self.Zh / self.field_params.z0))
         return Uhub
 
-    @property
-    def Uin(self):
+    def _init_Uin(self):
         zsafe = np.maximum(self.zloc, self.field_params.z0 + 1e-6)  # avoid log(0) issues
         Uin = self.Uh * (np.log(zsafe / self.field_params.z0) / np.log(self.Zh / self.field_params.z0))
         return Uin
@@ -121,13 +122,13 @@ class Turbine:
         beta = self.beta
         
         self.dl = float(yloc[1, 0] - yloc[0, 0])
-        # U = self.Uin.copy()
-        U = np.zeros_like(yloc)
+        U = self.Uin.copy()
+        # U = np.zeros_like(yloc)
         mask = np.sqrt(((yloc + self.Yoffset)**2) / (np.cos(beta)**2) + (zloc - self.Zhub)**2) <= self.R
-        U[mask] = 2.0 * self.Uhub * self.a
+        U[mask] -= 2.0 * self.Uhub * self.a
 
         hub_mask = (np.abs(yloc) <= self.dl * 1.0) & (zloc < self.Zhub)
-        U[hub_mask] += 0.3 * self.Uhub  # add some velocity deficit at the hub
+        U[hub_mask] -= 0.3 * self.Uhub  # add some velocity deficit at the hub
 
         U_smooth = smooth_2d(U, kernel_size=3)
         self.vortex_field[0].U = U_smooth
@@ -145,8 +146,8 @@ class Turbine:
             NuT = NuT_model(self.wake_field[-1].X, self, self.field_params)
 
             new = interpolate_vec_data(self.vortex_field, self.wake_field[-1].t + dt)
-            Uw, X_new = advance_wake_field(self.wake_field[-1], dt, NuT, self, self.field_params)
-            new.U = Uw
+            U, X_new = advance_wake_field(self.wake_field[-1], dt, NuT, self, self.field_params)
+            new.U = U
             new.X = X_new
             new.t = self.wake_field[-1].t + dt
             self.wake_field.append(new)
@@ -180,22 +181,18 @@ class WindFarm:
 
     def solve_streamwise(self):
         for t in self.turbines:
-            U_local, V_local, W_local = get_local_velocity_field(t, self, self.field_params)
+            U_local, V_local, W_local = get_local_velocity_field(t, self)
 
             # Create a mask for the rotor disk
             R = t.D / 2.0
             dist_from_hub = np.sqrt((t.yloc)**2 + (t.zloc - t.Zhub)**2)
             rotor_mask = dist_from_hub <= R
             
-            if np.any(rotor_mask):
-                t.Uhub = np.mean(U_local[rotor_mask])
-                t.Vhub = np.mean(V_local[rotor_mask])
-                t.Whub = np.mean(W_local[rotor_mask])
-            else:
-                t.Uhub = self.field_params.Uhub # Fallback
-                t.Vhub = 0.0
-                t.Whub = 0.0
-
+            t.Uhub = np.mean(U_local[rotor_mask])
+            t.Vhub = np.mean(V_local[rotor_mask])
+            t.Whub = np.mean(W_local[rotor_mask])
+            t.Uin = U_local
+            
             t.initialize_wake_field()
             t.calculate_deficit_field()
 

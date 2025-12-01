@@ -13,7 +13,7 @@ class TurbineConfig:
 
 @dataclass
 class WindFarmConfig:
-    pos: np.ndarray = field(default_factory=lambda: np.array([[0.0, 0.0, 0.0]]))  # Turbine positions (x, y, z)
+    pos: np.ndarray = field(default_factory=lambda: np.array([[0.0, 0.0, 0.0], [770.0, 0.0, 0.0], [1540.0, 0.0, 0.0]]))  # Turbine positions (x, y, z)
     D: np.ndarray = field(default_factory=lambda: np.array([77.0]))  # Rotor diameter(s)
     Zhub: np.ndarray = field(default_factory=lambda: np.array([80.0]))  # Hub height(s)
     Ct: np.ndarray = field(default_factory=lambda: np.array([0.75]))  # Thrust coefficient(s)
