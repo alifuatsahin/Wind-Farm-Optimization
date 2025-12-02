@@ -1,7 +1,7 @@
-from .utils import smooth_2d, interpolate_vec_data, NuT_model
+from .utils import smooth_2d, NuT_model
 from .vortex_model import simulate_vortex_evolution
 from .model_solver import advance_wake_field
-from .superposition import get_local_velocity_field
+from .superposition import get_local_velocity_field, interpolate_vec_data
 
 import numpy as np
 import pandas as pd
@@ -123,7 +123,6 @@ class Turbine:
         
         self.dl = float(yloc[1, 0] - yloc[0, 0])
         U = self.Uin.copy()
-        # U = np.zeros_like(yloc)
         mask = np.sqrt(((yloc + self.Yoffset)**2) / (np.cos(beta)**2) + (zloc - self.Zhub)**2) <= self.R
         U[mask] -= 2.0 * self.Uhub * self.a
 

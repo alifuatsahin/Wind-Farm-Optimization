@@ -1,6 +1,6 @@
 import numpy as np
 
-from .utils import VortexField
+from .data_structures import VortexField
 
 def simulate_vortex_evolution(config, field_params, total_steps=1000):
     """

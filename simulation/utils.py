@@ -1,106 +1,16 @@
 from scipy.ndimage import uniform_filter, gaussian_filter
 import matplotlib.pyplot as plt
+from matplotlib.animation import PillowWriter
+import matplotlib.patheffects as patheffects
 import numpy as np
 import os
-from dataclasses import dataclass, field
-from matplotlib.animation import PillowWriter
 
-@dataclass
-class VortexField:
-    Y: np.ndarray = field(default_factory=lambda: np.array([]))      # Vortex Y positions
-    Z: np.ndarray = field(default_factory=lambda: np.array([]))      # Vortex Z positions
-    Rv: np.ndarray = field(default_factory=lambda: np.array([]))     # Vortex core radii
-    Circ: np.ndarray = field(default_factory=lambda: np.array([]))   # Vortex circulations
-    yloc: np.ndarray = field(default_factory=lambda: np.array([]))   # For velocity field grid (optional)
-    zloc: np.ndarray = field(default_factory=lambda: np.array([]))   # For velocity field grid (optional)
-    V: np.ndarray = field(default_factory=lambda: np.array([]))      # Velocity field (optional)
-    W: np.ndarray = field(default_factory=lambda: np.array([]))      # Velocity field (optional)
-    U: np.ndarray = field(default_factory=lambda: np.array([]))      # Streamwise velocity field (optional)
-    OmegaX: np.ndarray = field(default_factory=lambda: np.array([])) # Vorticity field (optional)
-    t: float = 0.0
-    X: float = 0.0  # streamwise position
+from .superposition import momentum_conserving_superposition, interpolate_local_velocity_field
 
 def NuT_model(x, config, field_params):
     """Compute the turbulent viscosity Nu_T based on the distance from the hub."""
     NuT_hat = min(field_params.NuT_max, x / (5 * config.D) * field_params.NuT_max)
     return config.a * config.Uhub * config.D * NuT_hat
-
-def interpolate_vec_data(vortex_data_list, t):
-    """
-    Interpolate vortex field at time t from a list of VortexField objects.
-    vortex_data_list must be time-sorted.
-    Caveat: works best when vortex arrays correspond between frames.
-    """
-    times = np.array([v.t for v in vortex_data_list])
-
-    if t <= times[0]:
-        return vortex_data_list[0]
-    if t >= times[-1]:
-        return vortex_data_list[-1]
-    
-    idx = np.searchsorted(times, t)
-    i0 = idx - 1
-    i1 = idx
-    t0, t1 = times[i0], times[i1]
-    # safe alpha (handles zero interval)
-    alpha = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
-
-    d0, d1 = vortex_data_list[i0], vortex_data_list[i1]
-
-    # linear interp of arrays (works when shapes match)
-    V = (1 - alpha) * d0.V + alpha * d1.V
-    W = (1 - alpha) * d0.W + alpha * d1.W
-
-    return VortexField(
-        Y=d0.Y,
-        Z=d0.Z,
-        Rv=d0.Rv,
-        Circ=d0.Circ,
-        yloc=d0.yloc,
-        zloc=d0.zloc,
-        V=V,
-        W=W,
-        OmegaX=d0.OmegaX,
-        t=t
-    )
-
-def interpolate_vortex_fields(vortex_data_list, X):
-    """Interpolate vortex field at position X from a list of VortexField objects."""
-
-    positions = np.array([v.X for v in vortex_data_list])
-
-    if X <= positions[0]:
-        return vortex_data_list[0]
-    if X >= positions[-1]:
-        return vortex_data_list[-1]
-    
-    idx = np.searchsorted(positions, X)
-    i0 = idx - 1
-    i1 = idx
-    X0, X1 = positions[i0], positions[i1]
-    # safe alpha (handles zero interval)
-    alpha = 0.0 if X1 == X0 else (X - X0) / (X1 - X0)
-
-    d0, d1 = vortex_data_list[i0], vortex_data_list[i1]
-
-    # linear interp of arrays (works when shapes match)
-    V = (1 - alpha) * d0.V + alpha * d1.V
-    W = (1 - alpha) * d0.W + alpha * d1.W
-    U = (1 - alpha) * d0.U + alpha * d1.U
-
-    return VortexField(
-        Y=d0.Y,
-        Z=d0.Z,
-        Rv=d0.Rv,
-        Circ=d0.Circ,
-        yloc=d0.yloc,
-        zloc=d0.zloc,
-        V=V,
-        W=W,
-        U=U,
-        OmegaX=d0.OmegaX,
-        X=X
-    )
 
 def smooth_2d(U, kernel_size=3, method='gaussian'):
     """
@@ -120,91 +30,134 @@ def smooth_2d(U, kernel_size=3, method='gaussian'):
     else:
         raise ValueError("method must be one of {'gaussian','uniform'}")
 
-def plot_farm_deficit_map(wind_farm, x_resolution=100, y_resolution=50, save_path=None):
+def plot_farm_deficit_map(wind_farm, x_resolution=200, y_resolution=100, save_path=None):
     """
-    Calculates the combined superposed velocity deficit on an X-Y grid at hub height.
-    Uses a simple sum-of-squares superposition model for visualization purposes.
-    
-    Args:
-        wind_farm (WindFarm): The simulated WindFarm object.
-        x_resolution (int): Number of points in the X-direction.
-        y_resolution (int): Number of points in the Y-direction.
-        save_path (str, optional): Path to save the generated plot. If None, the plot is shown instead.
-
-    Returns:
-        tuple: (X_grid, Y_grid, U_deficit_total_normalized)
+    Calculates the combined superposed velocity field using the custom 
+    Momentum Conserving Superposition function.
     """
     
     if not wind_farm.turbines:
-        return None, None, None
+        print("No turbines found in wind farm.")
+        return
 
-    T0 = wind_farm.turbines[0]
-    D = T0.D
+    print("Generating Momentum Conserving Superposition Map...")
 
-    # 1. Define Visualization Domain (X-Y Plane at Hub Height)
-    x_coords = [t.pos[0] for t in wind_farm.turbines]
-    y_coords = [t.pos[1] for t in wind_farm.turbines]
+    # 1. Define Visualization Domain
+    # ---------------------------------------------------
+    all_x = [t.pos[0] for t in wind_farm.turbines]
+    all_y = [t.pos[1] for t in wind_farm.turbines]
+    D = wind_farm.turbines[0].D
+    Uhub_ref = wind_farm.turbines[0].Uhub
+    Zhub_ref = wind_farm.turbines[0].Zhub
 
-    max_X = wind_farm.field_params.max_X * D
-    max_Y = wind_farm.field_params.max_Y * D
+    max_wake_len = wind_farm.field_params.max_X * D
+    max_wake_wid = wind_farm.field_params.max_Y * D
     
-    x_min = min(x_coords) - max_X  # Start 1D upstream of first turbine
-    x_max = max(x_coords) + max_X  # End at max wake length of the last turbine
-    
-    y_min = min(y_coords) - max_Y
-    y_max = max(y_coords) + max_Y
+    x_min = min(all_x) - 2 * D
+    x_max = max(all_x) + max_wake_len
+    y_min = min(all_y) - max_wake_wid
+    y_max = max(all_y) + max_wake_wid
 
     X_vis = np.linspace(x_min, x_max, x_resolution)
     Y_vis = np.linspace(y_min, y_max, y_resolution)
-    X_grid, Y_grid = np.meshgrid(X_vis, Y_vis, indexing='ij')
     
-    U_deficit_total = np.zeros_like(X_grid)
+    # Single Z height (Hub Height)
+    Z_vis = np.array([Zhub_ref])
 
+    # Result map
+    U_total_map = np.zeros((len(Y_vis), len(X_vis)))
+
+    # 2. Calculate Background Flow
+    # ---------------------------------------------------
+    fp = wind_farm.field_params
+    U_in_val = fp.Uh * (np.log(Zhub_ref / fp.z0) / np.log(fp.Zh / fp.z0))
+
+    # 3. Streamwise Iteration (Column by Column)
+    # ---------------------------------------------------
+    for i, x_global in enumerate(X_vis):
+        
+        # A. Create a vertical slice mesh at this X location
+        # Shape: (Ny, 1)
+        Y_loc, Z_loc = np.meshgrid(Y_vis, Z_vis, indexing='ij')
+        
+        # Background flow array for this slice
+        U_in_slice = np.full_like(Y_loc, U_in_val)
+        
+        # List to store full velocity fields from each turbine
+        U_wake_list = []
+        
+        for t in wind_farm.turbines:
+            # Calculate streamwise distance from turbine to current map slice
+            dist = x_global - t.pos[0]
+            
+            # Check if we are downstream and within wake limit
+            if 0 < dist < (wind_farm.field_params.max_X * D):
+                # 1. Get the Absolute Local Velocity
+                # CRITICAL: We pass 'dist' (local coordinate), not 'x_global'
+                # This ensures the wake shape/narrowing is retrieved correctly.
+                u_local_abs = interpolate_local_velocity_field(
+                    t, dist, Y_loc, Z_loc, default=U_in_slice
+                )
+                
+                # Append to list for the superposition function
+                U_wake_list.append(u_local_abs)
+
+        # C. Apply Momentum Conserving Superposition
+        if len(U_wake_list) > 0:
+            # Your custom function takes (U_in, List_of_Wakes)
+            # It returns U_total, V_total, W_total, Uc
+            if (x_global > 690 and x_global < 710) or (x_global > 0 and x_global < 50):
+                plot_data = True
+            else:
+                plot_data = False
+            U_total_slice, _, _, _ = momentum_conserving_superposition(
+                U_in=U_in_slice, 
+                U_list=U_wake_list,
+                plot=plot_data
+            )
+            
+            # Assign result to map
+            U_total_map[:, i] = U_total_slice[:, 0]
+        else:
+            # No wakes at this X location, just background flow
+            U_total_map[:, i] = U_in_slice[:, 0]
+
+    # 4. Plotting
+    # ---------------------------------------------------
     plt.close('all')
-
-    if X_grid is None:
-        print("No wake data found for plotting the wind farm wake.")
-        return
-
-    # 2. Setup Plot
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(12, 6))
     
-    # Use pcolormesh for a heatmap of the deficit
-    im = ax.pcolormesh(X_grid, Y_grid, U_deficit_total, cmap='seismic', shading='auto', 
-                        vmin=0, vmax=np.nanmax(U_deficit_total)) # Deficit is positive
+    X_grid, Y_grid = np.meshgrid(X_vis, Y_vis)
     
-    # Add colorbar
-    fig.colorbar(im, ax=ax, label='Normalized Velocity Deficit (-U / Uhub)')
+    im = ax.pcolormesh(X_grid, Y_grid, U_total_map / Uhub_ref, 
+                       cmap='bwr', shading='auto')
     
-    # Add turbine locations
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label(r'Normalized Velocity $U / U_{hub}$')
+    
     for i, t in enumerate(wind_farm.turbines):
-        # Plot hub center
-        ax.plot(t.pos[0], t.pos[1], 'o', color='r', markersize=5, alpha=0.7, label=f'T{i} Hub')
-        
-        # Draw a line representing the rotor diameter and yaw direction
-        D = t.D
         yaw_rad = np.deg2rad(t.yaw)
+        dx = (t.D / 2) * np.sin(yaw_rad)
+        dy = (t.D / 2) * np.cos(yaw_rad)
         
-        # Draw a line segment to represent the turbine and its yaw
-        ax.plot([t.pos[0] - D/2 * np.sin(yaw_rad), t.pos[0] + D/2 * np.sin(yaw_rad)],
-                [t.pos[1] - D/2 * np.cos(yaw_rad), t.pos[1] + D/2 * np.cos(yaw_rad)], 
-                '-', color='black', linewidth=3, alpha=0.6)
+        ax.plot([t.pos[0] - dx, t.pos[0] + dx], 
+                [t.pos[1] + dy, t.pos[1] - dy], 
+                color='red', lw=3, solid_capstyle='round')
         
-        ax.text(t.pos[0], t.pos[1] + 0.6 * D, f'T{i}', color='r', ha='center', fontsize=10)
+        ax.text(t.pos[0], t.pos[1] + t.D * 0.6, f"T{i}", color='white', 
+                ha='center', va='center', fontweight='bold',
+                path_effects=[patheffects.withStroke(linewidth=2, foreground="black")])
 
-        grid_info = _get_grid_info(t.wake_field[0], t)
-        history = _extract_streamwise_history(t.wake_field, t, grid_info)
+    ax.set_aspect('equal')
+    ax.set_xlabel('Global Streamwise X (m)')
+    ax.set_ylabel('Global Cross-stream Y (m)')
+    ax.set_title('Wind Farm Velocity Field (Momentum Conserving Superposition)')
     
-    # Set limits and labels
-    ax.set_xlabel('Streamwise Distance X (m)')
-    ax.set_ylabel('Cross-stream Distance Y (m)')
-    ax.set_title(f'Superposed Wind Farm Wake Map (Z={t.Zhub:.1f}m)')
-
-    # 3. Save or Show
-    if save_path is not None:
-        save_path = os.path.join(save_path, f"WindFarm_Wake_Map.png")
-        fig.savefig(save_path, dpi=300)
-        print(f"Saved farm wake visualization to {save_path}")
+    if save_path:
+        if not os.path.exists(os.path.dirname(save_path)) and os.path.dirname(save_path) != '':
+            os.makedirs(os.path.dirname(save_path))
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Saved farm map to {save_path}")
     else:
         plt.show()
     
@@ -216,7 +169,7 @@ def plot_data(Data, config, pause_interval=0.1, quiver_samples=35,
     plt.close('all')
     
     # 1. Prepare common data and grids
-    grid_info = _get_grid_info(Data[0], config)
+    grid_info = _get_grid_info(Data[0], config, config.Zhub)
     wake_history = _extract_streamwise_history(Data, config, grid_info) if show_streamwise else None
     
     # 2. Setup Figure and Axes
@@ -239,13 +192,13 @@ def plot_data(Data, config, pause_interval=0.1, quiver_samples=35,
 
     return fig, axes_dict
 
-def _get_grid_info(data_snapshot, config):
+def _get_grid_info(data_snapshot, config, z_target):
     """Normalizes grids and finds indices for hub-height slicing."""
     yloc = np.asarray(data_snapshot.yloc) / config.D
     zloc = np.asarray(data_snapshot.zloc) / config.D
     
     # Find indices closest to Center/Hub
-    z_target = config.Zhub / config.D
+    z_target = z_target / config.D
     y_center_idx = yloc.shape[0] // 2
     z_hub_idx = np.argmin(np.abs(zloc[0, :] - z_target))
     
