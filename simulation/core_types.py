@@ -68,6 +68,12 @@ class Turbine:
     @property
     def a(self):
         return (1 - np.sqrt(1 - self.Ct / np.cos(self.beta))) / 2
+    
+    @property
+    def Cp(self):
+        # Estimate Power Coefficient from Ct (using Actuator Disk theory approximation)
+        # Cp = 4 * a * (1-a)^2
+        return 4 * self.a * (1 - self.a)**2
 
     @property
     def R(self):
@@ -110,7 +116,10 @@ class Turbine:
         return self._compute_dgamma()
     
     def calculate_power_output(self):
-        P = 0.5 * 1.225 * 0.82 * np.mean(self.wake_field[0].U) ** 2 * (np.pi * (self.R ** 2))
+        # P = 0.5 * rho * A * U^3 * Cp
+        rho = 1.225
+        Area = np.pi * (self.R ** 2)
+        P = 0.5 * rho * Area * (self.Uhub ** 3) * self.Cp
         return P
 
     def simulate_vortex_field(self):
@@ -124,10 +133,10 @@ class Turbine:
         self.dl = float(yloc[1, 0] - yloc[0, 0])
         U = self.Uin.copy()
         mask = np.sqrt(((yloc + self.Yoffset)**2) / (np.cos(beta)**2) + (zloc - self.Zhub)**2) <= self.R
-        U[mask] -= 2.0 * self.Uhub * self.a
+        U[mask] -= 2.0 * U[mask] * self.a
 
         hub_mask = (np.abs(yloc) <= self.dl * 1.0) & (zloc < self.Zhub)
-        U[hub_mask] -= 0.3 * self.Uhub  # add some velocity deficit at the hub
+        U[hub_mask] -= 0.3 * U[hub_mask]  # add some velocity deficit at the hub
 
         U_smooth = smooth_2d(U, kernel_size=3)
         self.vortex_field[0].U = U_smooth
@@ -173,15 +182,10 @@ class WindFarm:
             total_power += t.calculate_power_output()
         return total_power
 
-    def simulate_turbine_vortex_fields(self):
-        for t in self.turbines:
-            print(f"Simulating turbine at pos={t.pos} m, yaw={t.yaw}°")
-            t.simulate_vortex_field()
-
-    def solve_streamwise(self):
+    def solve(self):
         for t in self.turbines:
             U_local, V_local, W_local = get_local_velocity_field(t, self)
-
+            
             # Create a mask for the rotor disk
             R = t.D / 2.0
             dist_from_hub = np.sqrt((t.yloc)**2 + (t.zloc - t.Zhub)**2)
@@ -191,7 +195,17 @@ class WindFarm:
             t.Vhub = np.mean(V_local[rotor_mask])
             t.Whub = np.mean(W_local[rotor_mask])
             t.Uin = U_local
+
+            print(f"Simulating turbine at pos={t.pos} m, yaw={t.yaw}°")
+            t.simulate_vortex_field()            # Create a mask for the rotor disk
+            R = t.D / 2.0
+            dist_from_hub = np.sqrt((t.yloc)**2 + (t.zloc - t.Zhub)**2)
+            rotor_mask = dist_from_hub <= R
             
+            t.Uhub = np.mean(U_local[rotor_mask])
+            t.Vhub = np.mean(V_local[rotor_mask])
+            t.Whub = np.mean(W_local[rotor_mask])
+            t.Uin = U_local
             t.initialize_wake_field()
             t.calculate_deficit_field()
 

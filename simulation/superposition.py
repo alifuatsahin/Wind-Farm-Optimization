@@ -166,131 +166,39 @@ def get_local_velocity_field(config, wind_farm):
 
     return U_total, V_total, W_total
 
-# def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, max_iter=10, tol=1e-3):
-#     """
-#     Momentum-conserving superposition for U, V, W at a single x-plane.
-
-#     Inputs:
-#         U_list: list of 2D arrays (U_i of each turbine at this x-plane)
-#         V_list: list of 2D arrays (V_i of each turbine at this x-plane)
-#         W_list: list of 2D arrays (W_i of each turbine at this x-plane)
-#         U_in : free-stream velocity
-#     Returns:
-#         U_total, V_total, W_total, Uc (combined convection velocity)
-#     """
-
-#     # Convert to arrays
-#     U_list = [np.asarray(U) for U in U_list]
-
-#     # Individual velocity deficits u_i_s = U_in - U
-#     u_s_list = [U_in - U for U in U_list]
-
-#     # # --- Initial convection velocity estimate: Uc_i = mean(U_i) ---
-#     Uc_list = [np.mean(U) for U in U_list]
-#     # Uc_list = []
-#     # for U, u_s in zip(U_list, u_s_list):
-#     #     # Denominator: Total Deficit Integral
-#     #     den = np.sum(u_s)
-        
-#     #     if den < 1e-6:
-#     #         # If there is no wake (deficit is 0), Uc is just freestream
-#     #         Uc_list.append(np.mean(U_in))
-#     #     else:
-#     #         # Numerator: Momentum Flux (U_wake * Deficit)
-#     #         num = np.sum(U * u_s)
-#     #         Uc_val = num / den
-#     #         Uc_list.append(Uc_val)
-
-#     # Initial combined convection velocity: max(Uc_i)
-#     Uc = np.max(Uc_list)
-
-#     # ---- ITERATION LOOP (eq 2.7 & 2.9) ----
-#     for _ in range(max_iter):
-
-#         # eq 2.9: weighted deficit
-#         weights = [Uc_i / Uc for Uc_i in Uc_list]
-#         Us_total = sum(w * u_s for w, u_s in zip(weights, u_s_list))
-
-#         # eq 2.7: update Uc = ∫ Uw * Us / ∫ Us
-#         Uw_total = U_in - Us_total  # reminder: Us = U_inf - U
-#         num = np.sum(Uw_total * Us_total)
-#         den = np.sum(Us_total)
-
-#         if den == 0:
-#             break
-
-#         Uc_new = num / den
-
-#         if np.abs(Uc_new - Uc) / np.abs(Uc_new) < tol:
-#             Uc = Uc_new
-#             break
-
-#         Uc = Uc_new
-
-#     # Recalculate the final weighted deficit (Uw_total_final)
-#     weights = [Uc_i / Uc for Uc_i in Uc_list]
-#     Us_total = sum(w * u_s for w, u_s in zip(weights, u_s_list))
-#     U_total = U_in - Us_total
-
-#     # ---- Transverse velocities: V, W ----
-#     # Use same weights as eq 4.1:   V = Σ (Uc_i / Uc) * V_i
-#     if V_list is not None:
-#         V_list = [np.asarray(V) for V in V_list]
-#         V_total = sum((Uc_i / Uc) * V for Uc_i, V in zip(Uc_list, V_list))
-#     else:
-#         V_total = None
-#     if W_list is not None:
-#         W_list = [np.asarray(W) for W in W_list]
-#         W_total = sum((Uc_i / Uc) * W for Uc_i, W in zip(Uc_list, W_list))
-#     else:
-#         W_total = None
-
-#     return U_total, V_total, W_total, Uc
-
-def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, max_iter=10, tol=1e-3, plot=False):
-    """
-    Momentum-conserving superposition implementing Eq 2.7 and 2.9.
-    """
-
+def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, max_iter=50, tol=1e-3, plot=False):
     # Convert to arrays
     U_list = [np.asarray(U) for U in U_list]
     
     # 1. Calculate Individual Deficits (u_i_s)
+    # Ensure no negative deficits due to numerical noise if U > U_in slightly
     u_s_list = [np.maximum(U_in - U, 0) for U in U_list]
 
     # 2. Calculate Individual Convection Velocities (Uc_i)
     Uc_list = []
     for U, u_s in zip(U_list, u_s_list):
-        
-        # Denominator: Integral of deficit (sum works because dA cancels out in ratio)
         den = np.sum(u_s)
-        
         if den < 1e-8:
-            # If integral is 0 (no wake at this slice), convection velocity is Freestream
             Uc_list.append(np.mean(U_in))
         else:
-            # Numerator: Integral of (Velocity * Deficit)
             num = np.sum(U * u_s)
             Uc_val = num / den
             Uc_list.append(Uc_val)
 
-    # Initial combined convection velocity: max(Uc_i) (As per text)
-    Uc = np.max(Uc_list)
+    Uc = np.max(Uc_list) if Uc_list else np.mean(U_in)
+    Uc_history = [Uc]
+    Us_history = []
 
     # ---- ITERATION LOOP (Eq 2.7 & 2.9) ----
-    for _ in range(max_iter):
-        
-        # Safety check to avoid division by zero if wakes are tiny
+    for i in range(max_iter):
         if Uc < 1e-6: Uc = 1e-6
 
-        # Eq 2.9: Calculate weighted total deficit
-        # Us_total = Sum ( (Uc_i / Uc) * u_i_s )
         weights = [Uc_i / Uc for Uc_i in Uc_list]
         Us_total = sum(w * u_s for w, u_s in zip(weights, u_s_list))
+        Us_total = np.minimum(Us_total, U_in) 
+        Us_total = np.maximum(Us_total, 0)
+        Us_history.append(Us_total)
 
-        # Eq 2.7: Update Combined Convection Velocity (Uc)
-        # Uc = Integral(Uw * Us) / Integral(Us)
-        # Where Uw (Wake Velocity) = U_in - Us_total
         Uw_total = U_in - Us_total
         
         num = np.sum(Uw_total * Us_total)
@@ -300,28 +208,43 @@ def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, ma
             break
 
         Uc_new = num / den
+        Uc_history.append(Uc_new)
 
-        # Check convergence
         if np.abs(Uc_new - Uc) / np.abs(Uc_new) < tol:
             Uc = Uc_new
             break
-
         Uc = Uc_new
 
-    # Recalculate the final weighted deficit with converged Uc
+    # Final calculation
     weights = [Uc_i / Uc for Uc_i in Uc_list]
     Us_total = sum(w * u_s for w, u_s in zip(weights, u_s_list))
-
-    # Final Velocity Field
+    Us_total = np.minimum(Us_total, U_in) 
+    Us_total = np.maximum(Us_total, 0)
     U_total = U_in - Us_total
 
-    # ---- Transverse velocities: V, W ----
-    # (These remain the same)
+    if plot:
+        import matplotlib.pyplot as plt
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
+        ax1.plot(Uc_history, marker='o')
+        ax1.set_xlabel('Iteration')
+        ax1.set_ylabel('Convection Velocity Uc')
+        ax1.set_title('Convection Velocity Convergence')
+        ax1.grid()
+        ax2.plot(Us_history[-1][:, Us_history[-1].shape[1]//2])
+        ax2.set_xlabel('Y Index')
+        ax2.set_ylabel('Final Total Deficit Us')
+        ax2.set_title('Final Total Deficit Profile at Centerline')
+        ax2.grid()
+        plt.tight_layout()
+        plt.show()
+
+    # Transverse
     if V_list is not None:
         V_list = [np.asarray(V) for V in V_list]
         V_total = sum((Uc_i / Uc) * V for Uc_i, V in zip(Uc_list, V_list))
     else:
         V_total = None
+        
     if W_list is not None:
         W_list = [np.asarray(W) for W in W_list]
         W_total = sum((Uc_i / Uc) * W for Uc_i, W in zip(Uc_list, W_list))

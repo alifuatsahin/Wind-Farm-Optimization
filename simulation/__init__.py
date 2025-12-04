@@ -24,5 +24,4 @@ class Simulation:
         plot_farm_deficit_map(self.wind_farm, save_path=save_path)
 
     def run(self):
-        self.wind_farm.simulate_turbine_vortex_fields()
-        self.wind_farm.solve_streamwise()
+        self.wind_farm.solve()

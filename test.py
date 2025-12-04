@@ -1,120 +1,222 @@
-def plot_farm_deficit_map(wind_farm, x_resolution=200, y_resolution=100, save_path=None):
-    """
-    Calculates the combined superposed velocity deficit on an X-Y grid at hub height.
-    Uses a sum-of-squares superposition model.
-    """
-    
-    if not wind_farm.turbines:
-        print("No turbines found in wind farm.")
-        return None, None, None
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import brentq
 
-    # 1. Define Visualization Domain (Global Coordinates)
-    # Gather extents based on all turbines
-    all_x = [t.pos[0] for t in wind_farm.turbines]
-    all_y = [t.pos[1] for t in wind_farm.turbines]
-    
-    # Use field params if available, otherwise guess reasonable bounds
-    max_wake_len = wind_farm.field_params.max_X * wind_farm.turbines[0].D
-    max_wake_wid = wind_farm.field_params.max_Y * wind_farm.turbines[0].D
-    
-    x_min = min(all_x) - 2 * wind_farm.turbines[0].D
-    x_max = max(all_x) + max_wake_len
-    y_min = min(all_y) - max_wake_wid
-    y_max = max(all_y) + max_wake_wid
 
-    X_vis = np.linspace(x_min, x_max, x_resolution)
-    Y_vis = np.linspace(y_min, y_max, y_resolution)
-    X_grid, Y_grid = np.meshgrid(X_vis, Y_vis, indexing='xy') # Shape (Ny, Nx)
+def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, max_iter=50, tol=1e-3, plot=False):
+    # Convert to arrays
+    U_list = [np.asarray(U) for U in U_list]
     
-    U_deficit_sq_total = np.zeros_like(X_grid)
+    # 1. Calculate Individual Deficits (u_i_s)
+    # Ensure no negative deficits due to numerical noise if U > U_in slightly
+    u_s_list = [np.maximum(U_in - U, 0) for U in U_list]
 
-    plt.close('all')
+    # 2. Calculate Individual Convection Velocities (Uc_i)
+    # Uc_list = [np.mean(U) for U in U_list]
+    Uc_list = []
+    for U, u_s in zip(U_list, u_s_list):
+        den = np.sum(u_s)
+        if den < 1e-8:
+            Uc_list.append(np.mean(U_in))
+        else:
+            num = np.sum(U * u_s)
+            Uc_val = num / den
+            Uc_list.append(Uc_val)
 
-    # 2. Loop over turbines to accumulate deficit
-    for i, t in enumerate(wind_farm.turbines):
-        if not t.wake_field:
-            continue
-            
-        # A. Extract the history at Hub Height using existing helpers
-        # grid_info gives us the Z-index for hub height
-        grid_info = _get_grid_info(t.wake_field[0], t, t.Zhub)
-        
-        # history gives us 'U' (shape [Ny, N_snapshots]) and 'X' (1D array)
-        history = _extract_streamwise_history(t.wake_field, t, grid_info)
-        
-        if history is None:
-            continue
-            
-        # B. Calculate Local Deficit
-        # history['U'] is the absolute velocity.
-        U_wake_abs = history['U']
-        # Ensure we don't have negative deficits (accelerations) for this visualization
-        local_deficit = np.maximum(0, t.Uhub - U_wake_abs)
-        
-        # C. Map Local Coordinates to Global for Interpolation
-        # Turbine Local X -> Global X
-        wake_x_global = (history['X'] * t.D) + t.pos[0] 
-        # Turbine Local Y -> Global Y
-        wake_y_local = grid_info['yloc'][:, 0] * t.D
-        wake_y_global = wake_y_local + t.pos[1]
-        
-        # D. Create Interpolator
-        interp = RegularGridInterpolator(
-            (wake_y_global, wake_x_global), 
-            local_deficit, 
-            bounds_error=False, 
-            fill_value=0.0
-        )
-        
-        # E. Interpolate onto the Visualization Grid
-        pts = np.column_stack((Y_grid.ravel(), X_grid.ravel()))
-        deficit_on_grid = interp(pts).reshape(X_grid.shape)
-        
-        # F. Superposition (Sum of Squares)
-        U_deficit_sq_total += deficit_on_grid**2
+    Uc = np.max(Uc_list) if Uc_list else np.mean(U_in)
+    Uc_history = [Uc]
+    Us_history = []
 
-    # 3. Finalize Total Deficit
-    U_deficit_total = np.sqrt(U_deficit_sq_total)
-    
-    # 4. Plotting
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-    # Normalize by the first turbine's Uhub for colorbar
-    Uhub_ref = wind_farm.turbines[0]._init_Uhub()
-    
-    # Plot heatmap
-    im = ax.pcolormesh(X_grid, Y_grid, U_deficit_total / Uhub_ref, 
-                       cmap='bwr', shading='auto', vmin=0)
-    
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label(r'Normalized Velocity Deficit $\Delta U / U_{hub}$')
-    
-    # Overlay Turbines
-    for i, t in enumerate(wind_farm.turbines):
-        yaw_rad = np.deg2rad(t.yaw)
-        
-        # Turbine Blade Line
-        dx = (t.D / 2) * np.sin(yaw_rad)
-        dy = (t.D / 2) * np.cos(yaw_rad)
-        
-        ax.plot([t.pos[0] - dx, t.pos[0] + dx], 
-                [t.pos[1] + dy, t.pos[1] - dy], 
-                color='red', lw=3, solid_capstyle='round')
-        
-        ax.text(t.pos[0], t.pos[1] + t.D * 0.6, f"T{i}", color='white', 
-                ha='center', va='center', fontweight='bold',
-                path_effects=[patheffects.withStroke(linewidth=2, foreground="black")])
+    # ---- ITERATION LOOP (Eq 2.7 & 2.9) ----
+    for i in range(max_iter):
+        if Uc < 1e-6: Uc = 1e-6
 
-    ax.set_aspect('equal')
-    ax.set_xlabel('Global Streamwise X (m)')
-    ax.set_ylabel('Global Cross-stream Y (m)')
-    ax.set_title('Wind Farm Velocity Deficit Map (Hub Height)')
-    
-    if save_path:
-        # Ensure directory exists
-        if not os.path.exists(os.path.dirname(save_path)) and os.path.dirname(save_path) != '':
-            os.makedirs(os.path.dirname(save_path))
-        fig.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Saved farm map to {save_path}")
+        weights = [Uc_i / Uc for Uc_i in Uc_list]
+        Us_total = sum(w * u_s for w, u_s in zip(weights, u_s_list))
+        print(f"weights: {weights}")
+        Us_total = np.minimum(Us_total, U_in) 
+        Us_total = np.maximum(Us_total, 0)
+        Us_history.append(Us_total)
+
+        Uw_total = U_in - Us_total
+        
+        num = np.sum(Uw_total * Us_total)
+        den = np.sum(Us_total)
+
+        if den < 1e-8:
+            break
+
+        Uc_new = num / den
+        # relaxation = 0.3
+        # Uc_new = (1 - relaxation) * Uc + (relaxation * Uc_new)
+        Uc_history.append(Uc_new)
+        print(f"residuals: {np.abs(Uc_new - Uc) / np.abs(Uc_new)}")
+        print("UC update:", Uc, "->", Uc_new)
+
+        if np.abs(Uc_new - Uc) / np.abs(Uc_new) < tol:
+            print(f"Converged in {i+1} iterations. Uc: {Uc_new:.4f}")
+            Uc = Uc_new
+            break
+        Uc = Uc_new
     else:
+        print(f"Max iterations reached. Final Uc: {Uc:.4f}")
+
+    # Final calculation
+    weights = [Uc_i / Uc for Uc_i in Uc_list]
+    Us_total = sum(w * u_s for w, u_s in zip(weights, u_s_list))
+    Us_total = np.minimum(Us_total, U_in) 
+    Us_total = np.maximum(Us_total, 0)
+    U_total = U_in - Us_total
+
+    if plot:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        ax1.plot(Uc_history, marker='o')
+        ax1.set_xlabel("Iteration")
+        ax1.set_ylabel("Convection Velocity Uc")
+        ax1.set_title("Convection Velocity Convergence")
+        ax1.grid(True)
+        for i, Us in enumerate(Us_history):
+            ax2.plot(np.mean(Us, axis=0), label=f"Iter {i+1}")
+        ax2.set_xlabel("Grid Point Index")
+        ax2.set_ylabel("Mean Total Deficit Us")
+        ax2.set_title("Total Deficit Evolution")
+        ax2.legend()
+        ax2.grid(True)
         plt.show()
+
+    # Transverse
+    if V_list is not None:
+        V_list = [np.asarray(V) for V in V_list]
+        V_total = sum((Uc_i / Uc) * V for Uc_i, V in zip(Uc_list, V_list))
+    else:
+        V_total = None
+        
+    if W_list is not None:
+        W_list = [np.asarray(W) for W in W_list]
+        W_total = sum((Uc_i / Uc) * W for Uc_i, W in zip(Uc_list, W_list))
+    else:
+        W_total = None
+
+    return U_total, V_total, W_total, Uc
+
+def gaussian_wake(Y, Z, center_y, center_z, u_inf, sigma, max_deficit):
+    """
+    Generates a simple 2D Gaussian wake field.
+    """
+    r2 = (Y - center_y)**2 + (Z - center_z)**2
+    # Deficit profile
+    deficit = max_deficit * np.exp(-r2 / (2 * sigma**2))
+    # Wake field
+    U_wake = u_inf - deficit
+    return U_wake, deficit
+
+def create_rotational_field(Y, Z, center_y, center_z, strength):
+    """
+    Generates dummy V (y-velocity) and W (z-velocity) for a vortex.
+    """
+    dy = Y - center_y
+    dz = Z - center_z
+    r2 = dy**2 + dz**2 + 1e-5 # avoid div by zero
+    
+    # Simple Rankine-like vortex core
+    V = -strength * dz * np.exp(-r2/1000)
+    W = strength * dy * np.exp(-r2/1000)
+    return V, W
+
+# ==========================================
+# 3. EXECUTION SCRIPT
+# ==========================================
+
+def run_test():
+    # Grid Setup (e.g., a slice of the wind farm)
+    L = 200
+    N = 100
+    y = np.linspace(-L/2, L/2, N)
+    z = np.linspace(-L/2, L/2, N)
+    Y, Z = np.meshgrid(y, z)
+
+    # Freestream velocity
+    U_inf_val = 10.0
+    U_in = np.full_like(Y, U_inf_val)
+
+    print("--- Generating Test Wakes ---")
+    
+    # Wake 1: Centered, deep deficit
+    wake1, def1 = gaussian_wake(Y, Z, center_y=0, center_z=0, u_inf=U_inf_val, sigma=20, max_deficit=7.0)
+    
+    # Wake 2: Slightly offset, overlapping Wake 1
+    wake2, def2 = gaussian_wake(Y, Z, center_y=0, center_z=0, u_inf=U_inf_val, sigma=25, max_deficit=2.0)
+
+    # Transverse fields (just to test V/W logic)
+    V1, W1 = create_rotational_field(Y, Z, -20, 0, 1.0)
+    V2, W2 = create_rotational_field(Y, Z, 20, 0, 1.0)
+
+    # Input lists
+    U_list = [wake1, wake2]
+    V_list = [V1, V2]
+    W_list = [W1, W2]
+
+    # --- Run Momentum Conserving Superposition ---
+    print("\n--- Running Momentum Conserving Superposition ---")
+    U_mc, V_mc, W_mc, Uc_final = momentum_conserving_superposition(
+        U_in, U_list, V_list, W_list, max_iter=50, tol=1e-4, plot=True
+    )
+    # U_mc, V_mc, W_mc, Uc_final = momentum_conserving_superposition_brent(
+    #     U_in, U_list, V_list, W_list, tol=1e-4, plot=True
+    # )
+
+
+    # --- Calculate Standard Linear Superposition (for comparison) ---
+    # Linear: U_total = U_in - sum(deficits)
+    U_linear = U_in - (def1 + def2)
+
+    # ==========================================
+    # 4. VISUALIZATION
+    # ==========================================
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    
+    # Row 1: The Inputs
+    im0 = axes[0, 0].pcolormesh(Y, Z, wake1, shading='auto', vmin=4, vmax=10, cmap='viridis')
+    axes[0, 0].set_title("Input Wake 1")
+    axes[0, 1].pcolormesh(Y, Z, wake2, shading='auto', vmin=4, vmax=10, cmap='viridis')
+    axes[0, 1].set_title("Input Wake 2")
+    
+    # Show overlap area concept
+    axes[0, 2].pcolormesh(Y, Z, def1 + def2, shading='auto', cmap='Reds')
+    axes[0, 2].set_title("Sum of Deficits (Linear)")
+
+    # Row 2: The Results
+    im3 = axes[1, 0].pcolormesh(Y, Z, U_linear, shading='auto', vmin=4, vmax=10, cmap='viridis')
+    axes[1, 0].set_title("Linear Superposition Result")
+    
+    im4 = axes[1, 1].pcolormesh(Y, Z, U_mc, shading='auto', vmin=4, vmax=10, cmap='viridis')
+    axes[1, 1].set_title(f"Momentum Conserving Result\n(Uc = {Uc_final:.2f})")
+
+    # Difference Plot
+    diff = U_mc - U_linear
+    limit = np.max(np.abs(diff))
+    im5 = axes[1, 2].pcolormesh(Y, Z, diff, shading='auto', cmap='coolwarm', vmin=-limit, vmax=limit)
+    axes[1, 2].set_title("Difference (MC - Linear)")
+    plt.colorbar(im5, ax=axes[1, 2], label="Delta Velocity (m/s)")
+
+    plt.tight_layout()
+    plt.show()
+
+    # --- 1D Cross Section Plot ---
+    plt.figure(figsize=(10, 5))
+    mid_idx = N // 2
+    plt.plot(y, U_in[mid_idx, :], 'k--', label="Freestream")
+    plt.plot(y, wake1[mid_idx, :], label="Wake 1 Only", alpha=0.5)
+    plt.plot(y, wake2[mid_idx, :], label="Wake 2 Only", alpha=0.5)
+    plt.plot(y, U_linear[mid_idx, :], 'r--', linewidth=2, label="Linear Sum")
+    plt.plot(y, U_mc[mid_idx, :], 'b-', linewidth=2, label="Momentum Conserving")
+    
+    plt.title(f"Cross Section at Z=0 (Uc={Uc_final:.3f} m/s)")
+    plt.xlabel("Y Position (m)")
+    plt.ylabel("Velocity U (m/s)")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+if __name__ == "__main__":
+    run_test()

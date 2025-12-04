@@ -107,7 +107,7 @@ def plot_farm_deficit_map(wind_farm, x_resolution=200, y_resolution=100, save_pa
             # Your custom function takes (U_in, List_of_Wakes)
             # It returns U_total, V_total, W_total, Uc
             if (x_global > 690 and x_global < 710) or (x_global > 0 and x_global < 50):
-                plot_data = True
+                plot_data = False
             else:
                 plot_data = False
             U_total_slice, _, _, _ = momentum_conserving_superposition(

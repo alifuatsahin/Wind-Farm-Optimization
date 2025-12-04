@@ -141,7 +141,7 @@ def _compute_mutual_induction(vortex_field, gamma0):
     # Avoid division by zero and compute velocity magnitude
     with np.errstate(divide='ignore', invalid='ignore'):
         velocity_magnitude = (Circ_grid / (2 * np.pi * distance) * 
-                            (1 - np.exp(-distance**2 / (0.02*gamma0*t + Rv_grid**2))))
+                            (1 - np.exp(-distance**2 / (Rv_grid**2))))
         velocity_magnitude = np.nan_to_num(velocity_magnitude)
     
     # Compute velocity components
@@ -253,7 +253,7 @@ def _oseenlamb(Circ, Y, Z, Rv, yloc, zloc, gamma0, t):
     r = np.sqrt((yloc - Y) ** 2 + (zloc - Z) ** 2)
     # Avoid division by zero at vortex center
     r_safe = np.where(r == 0.0, 1.0, r)
-    Ut = Circ / (2 * np.pi * r_safe) * (1 - np.exp(-r**2 / (0.02*gamma0*t + Rv**2)))
+    Ut = Circ / (2 * np.pi * r_safe) * (1 - np.exp(-r**2 / Rv**2))
     # Ensure zero velocity at r==0
     Ut = np.where(r == 0.0, 0.0, Ut)
     V = - Ut * (zloc - Z) / r_safe
