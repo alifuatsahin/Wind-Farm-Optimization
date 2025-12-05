@@ -183,7 +183,7 @@ class WindFarm:
 
     def solve(self):
         for t in self.turbines:
-            U_local, V_local, W_local = get_local_velocity_field(t, self, superposition_method='RSS')
+            U_local, V_local, W_local = get_local_velocity_field(t, self, method='RSS')
 
             # Create a mask for the rotor disk
             R = t.D / 2.0

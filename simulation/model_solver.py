@@ -35,7 +35,7 @@ def advance_wake_field(data, dt, NuT, config, field_params):
 
     dUpdx = numer / denom_safe
     Up = U + dUpdx * dx
-    # Up[:, 0] = 0.0 # no slip at BC
+    # Up[:, 0] = Uin[:, 0] # no slip at BC
 
     # correction step
     dUdY, dUdZ = np.gradient(Up, yloc[:, 0], zloc[0, :])   # dUdY = ∂(Up)/∂y, dUdZ = ∂(Up)/∂z
@@ -49,6 +49,6 @@ def advance_wake_field(data, dt, NuT, config, field_params):
 
     dUcdx = numer / denom_safe
     U += 0.5 * (dUpdx + dUcdx) * dx
-    # U[:, 0] = 0.0 # no slip at BC
+    # U[:, 0] = Uin[:, 0] # no slip at BC
     
     return U, data.X + dx

@@ -5,7 +5,7 @@ import matplotlib.patheffects as patheffects
 import numpy as np
 import os
 
-from .superposition import momentum_conserving_superposition, RSS_superposition, interpolate_local_velocity_field
+from .superposition import superpose, interpolate_local_velocity_field
 
 def NuT_model(x, config, field_params):
     """Compute the turbulent viscosity Nu_T based on the distance from the hub."""
@@ -59,7 +59,6 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     Y_vis = np.linspace(y_min, y_max, y_resolution)
     Z_vis = np.linspace(z_min, z_max, z_resolution)
 
-    # [FIX 1] Create 2D meshgrids for slicing logic
     Y_loc, Z_loc = np.meshgrid(Y_vis, Z_vis, indexing='ij')
 
     # 2. Calculate Background Flow
@@ -91,25 +90,18 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
 
         if len(U_wake_list) > 0:
             # Pass 2D background and 2D wake list
-            # U_total_slice, _, _ = momentum_conserving_superposition(
-            #     U_in=U_in, 
-            #     U_list=U_wake_list,
-            # )
-            U_total_slice, _, _ = RSS_superposition(
-                U_in=U_in, 
-                U_list=U_wake_list,
-            )
+            U_total_slice = superpose(U_in, np.array(U_wake_list), method='RSS')[0]
         else:
             U_total_slice = U_in
 
-        
-        # Top View: Take all Y at fixed Z (Hub Height)
-        # We need shape (Y,), so we slice the 2nd dim
+        # Top View: Take all Y at fixed Z (Reference Hub Height)
         U_xy_map[:, i] = U_total_slice[:, z_ref_idx]
         
         # Side View: Take all Z at fixed Y (Centerline)
-        # We need shape (Z,), so we slice the 1st dim
         U_xz_map[:, i] = U_total_slice[y_ref_idx, :]
+
+    U_xy_map = smooth_2d(U_xy_map, method='gaussian')
+    U_xz_map = smooth_2d(U_xz_map, method='gaussian')
 
     # 4. Plotting
     plt.close('all')
@@ -163,8 +155,6 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
                  color='black', lw=2)
         
         # 2. Draw the Rotor (Vertical line at hub height)
-        # In side view, a rotor is a vertical line (Z-axis), 
-        # potentially foreshortened by yaw.
         z_top = t.Zhub + (t.D / 2)
         z_bot = t.Zhub - (t.D / 2)
         
@@ -172,10 +162,9 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
                  [z_bot, z_top], 
                  color='black', lw=4, solid_capstyle='round')
 
-    plt.tight_layout() # Fix overlap
+    plt.tight_layout()
 
     if save_path:
-        # Check if folder exists logic...
         dir_name = os.path.dirname(save_path)
         if dir_name and not os.path.exists(dir_name):
             os.makedirs(dir_name)
@@ -184,7 +173,7 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     else:
         plt.show()
     
-def plot_data(Data, config, pause_interval=0.1, quiver_samples=35, 
+def plot_data(Data, config, pause_interval=0.1, quiver_samples=35,
               show_streamwise=True, save_path=None, fps=10, dpi=150):
     """
     Main driver to visualize wake data. Coordinates setup, data prep, and animation loop.

@@ -27,6 +27,8 @@ class WindFarmConfig:
             return np.full(n, a[0])
         elif len(a) < n:
             return np.tile(a, (n // len(a) + 1))[:n]
+        elif len(a) == n:
+            return a
         raise ValueError(f"Cannot broadcast array of size {a.size} to size {n}.")
 
     def check_consistency(self):
@@ -98,8 +100,8 @@ class FieldConfig:
     WV: float = 0.0 # Vertical wind veer
     NuT_max: float = 0.03 # Maximum turbulence intensity
     Nv: int = 49
-    z0: float = 0.5 # Surface roughness length
-    max_X: float = 20.0 # Maximum downstream distance to simulate (in rotor diameters)
+    z0: float = 0.03 # Surface roughness length (Open sea 0.0002, Flat land 0.03)
+    max_X: float = 10.0 # Maximum downstream distance to simulate (in rotor diameters)
     max_Y: float = 3.0 # Maximum lateral distance to simulate (in rotor diameters)
     max_Z: float = 2.0 # Maximum vertical distance to simulate (in rotor diameters)
     n_grids: int = 20 # Number of grids in each direction

@@ -133,13 +133,13 @@ def _interp_field(field, y_source, z_source, target_yloc, target_zloc, default=N
         result = np.nan_to_num(result, nan=0.0)
     return result
 
-def get_local_velocity_field(config, wind_farm, superposition_method='MCS'):
+def get_local_velocity_field(config, wind_farm, method='MCS'):
     """Compute the combined velocity field at a given downstream turbine plane."""
 
     upstream_turbines = [t for t in wind_farm.turbines if t.pos[0] < config.pos[0]]
 
     # Freestream inflow at that turbine plane
-    U_base = config._init_Uin()
+    U_base = config._init_Uin() # shape (Ny, Nz)
     V_base = np.zeros_like(U_base)
     W_base = np.zeros_like(U_base)
 
@@ -150,122 +150,100 @@ def get_local_velocity_field(config, wind_farm, superposition_method='MCS'):
     wake_fields = [interpolate_vortex_field(t, config.pos[0], config.yloc, config.zloc, config.pos, config._init_Uin()) 
                    for t in upstream_turbines]
 
-    U_list = [wf.U for wf in wake_fields]
-    V_list = [wf.V for wf in wake_fields]
-    W_list = [wf.W for wf in wake_fields]
+    u_yz = np.array([wf.U for wf in wake_fields])
+    v_yz = np.array([wf.V for wf in wake_fields])
+    w_yz = np.array([wf.W for wf in wake_fields])
 
-    if superposition_method == 'MCS':
-        # Momentum-conserving superposition
-        U_wake, V_wake, W_wake = momentum_conserving_superposition(
-            U_in=U_base, U_list=U_list, V_list=V_list, W_list=W_list
-        )
+    # Superpose wakes
+    U, V, W = superpose(U_base, u_yz, v_yz, w_yz, method=method)
+
+    return U, V, W
+
+def superpose(U_in, u_yz, v_yz=None, w_yz=None, method='MCS'):
+    """Superpose multiple wake velocity fields using specified method."""
+    if method == 'MCS':
+        return momentum_conserving_superposition(U_in, u_yz, v_yz, w_yz)
     else:
-        # Root-Sum-Square superposition
-        U_wake, V_wake, W_wake = RSS_superposition(
-            U_in=U_base, U_list=U_list, V_list=V_list, W_list=W_list
-        )
+        return RSS_superposition(U_in, u_yz, v_yz, w_yz)
 
-    # Total local wind = freestream + wake-induced perturbation
-    U_total = U_wake
-    V_total = V_wake
-    W_total = W_wake
-
-    return U_total, V_total, W_total
-
-def RSS_superposition(U_in, U_list, V_list=None, W_list=None):
+def RSS_superposition(U_in, u_yz, v_yz=None, w_yz=None):
     """
     Root-Sum-Square (RSS) superposition of multiple wake velocity fields.
-    U_in: Freestream velocity field (2D array)
-    U_list: List of wake velocity fields (2D arrays)
-    Returns combined wake velocity field (2D array)
+    U_in: Freestream velocity field (2D array of shape (Ny, Nz))
+    u_yz: Wake velocity fields (3D array of shape (i_turbine, Ny, Nz))
+    Returns combined wake velocity field (2D array of shape (Ny, Nz))
     """
-    # Convert to arrays
-    U_list = [np.asarray(U) for U in U_list]
     
     # 1. Calculate Individual Deficits (u_i_s)
-    u_s_list = [np.maximum(U_in - U, 0) for U in U_list]
+    u_s = np.maximum(U_in[None, :, :] - u_yz, 0)
 
     # 2. Calculate Total Deficit (Eq 2.4)
-    Us_total = np.sqrt(np.sum([np.minimum(u_s, 100) ** 2 for u_s in u_s_list], axis=0))
-    Us_total = np.minimum(Us_total, U_in * 0.99)  # prevent over-deficit
+    U_s = np.sqrt(np.sum(u_s ** 2, axis=0))
+    U_s = np.minimum(U_s, U_in)  # prevent over-deficit
 
     # 3. Combined Wake Velocity Field
-    Uw_total = U_in - Us_total
+    U = U_in - U_s
 
-    if V_list is not None:
-        V_list = [np.asarray(V) for V in V_list]
-        V_total = np.sqrt(np.sum([V**2 for V in V_list], axis=0))
+    if v_yz is not None:
+        V = np.sum(v_yz, axis=0)
     else:
-        V_total = None
-    if W_list is not None:
-        W_list = [np.asarray(W) for W in W_list]
-        W_total = np.sqrt(np.sum([W**2 for W in W_list], axis=0))
+        V = None
+    if w_yz is not None:
+        W = np.sum(w_yz, axis=0)
     else:
-        W_total = None
+        W = None
 
-    return Uw_total, V_total, W_total
+    return U, V, W
 
-def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, max_iter=50, tol=1e-3):
-    # Convert to arrays
-    U_list = [np.asarray(U) for U in U_list]
-    
+def momentum_conserving_superposition(U_in, u_yz, v_yz=None, w_yz=None, max_iter=50, tol=1e-3):
+    """
+    Momentum-Conserving Superposition (MCS) of multiple wake velocity fields.
+        U_in: Freestream velocity field (2D array of shape (Ny, Nz))
+        u_yz: Wake velocity fields (3D array of shape (i_turbine, Ny, Nz))
+        v_yz: Transverse wake velocity fields (3D array of shape (i_turbine, Ny, Nz)) or None
+        w_yz: Vertical wake velocity fields (3D array of shape (i_turbine, Ny, Nz)) or None
+        Returns combined wake velocity field (2D array of shape (Ny, Nz))
+    """
+
     # 1. Calculate Individual Deficits (u_i_s)
     # Ensure no negative deficits due to numerical noise if U > U_in slightly
-    u_s_list = [np.maximum(U_in - U, 0) for U in U_list]
+    u_s = np.maximum(U_in[None, :, :] - u_yz, 0) # shape (i_turbine, Ny, Nz)
 
     # 2. Calculate Individual Convection Velocities (Uc_i)
-    Uc_list = []
-    for U, u_s in zip(U_list, u_s_list):
-        den = np.sum(u_s)
-        if den < 1e-8:
-            Uc_list.append(np.mean(U_in))
-        else:
-            num = np.sum(U * u_s)
-            Uc_val = num / den
-            Uc_list.append(Uc_val)
+    u_c = np.sum(u_yz * u_s, axis=(1,2)) / np.sum(u_s, axis=(1,2)) # shape (i_turbine,)
 
-    Uc = np.max(Uc_list) if Uc_list else np.mean(U_in)
+    U_c = np.max(u_c, axis=0)  # initial guess for Uc
 
     # ---- ITERATION LOOP (Eq 2.7 & 2.9) ----
-    for i in range(max_iter):
-        if Uc < 1e-6: Uc = 1e-6
+    for _ in range(max_iter):
+        U_c = np.maximum(U_c, 1e-6)
 
-        weights = [Uc_i / Uc for Uc_i in Uc_list]
+        weights = u_c / U_c # shape (i_turbine,)
         # if sum(weights) > len(weights) + 1e-3:
         # weights_sum = sum(weights)
         # weights = [w / weights_sum for w in weights]  # normalize weights
-        Us_total = sum(w * u_s for w, u_s in zip(weights, u_s_list))
-        Us_total = np.minimum(Us_total, U_in * 0.99)  # prevent over-deficit
+        U_s = np.sum(weights * u_s, axis=0)  # shape (Ny, Nz)
+        U_s = np.minimum(U_s, U_in)  # prevent over-deficit
 
-        Uw_total = U_in - Us_total
-        
-        num = np.sum(Uw_total * Us_total)
-        den = np.sum(Us_total)
+        U = U_in - U_s
 
-        if den < 1e-8:
+        Uc_new = np.sum(U * U_s, axis=(1,2)) / np.sum(U_s, axis=(1,2))
+
+        if np.abs(Uc_new - U_c) / np.abs(Uc_new) < tol:
+            U_c = Uc_new
             break
-
-        Uc_new = num / den
-        relaxation = 0.05
-        Uc_new = (1 - relaxation) * Uc + (relaxation * Uc_new)
-
-        if np.abs(Uc_new - Uc) / np.abs(Uc_new) < tol:
-            Uc = Uc_new
-            break
-        Uc = Uc_new
+        U_c = Uc_new
 
     # Transverse
-    if V_list is not None:
-        V_list = [np.asarray(V) for V in V_list]
-        V_total = sum((Uc_i / Uc) * V for Uc_i, V in zip(Uc_list, V_list))
+    if v_yz is not None:
+        V = np.sum(weights[:, None, None] * v_yz, axis=0)
     else:
-        V_total = None
+        V = None
         
-    if W_list is not None:
-        W_list = [np.asarray(W) for W in W_list]
-        W_total = sum((Uc_i / Uc) * W for Uc_i, W in zip(Uc_list, W_list))
+    if w_yz is not None:
+        W = np.sum(weights[:, None, None] * w_yz, axis=0)
     else:
-        W_total = None
+        W = None
 
-    return Uw_total, V_total, W_total
+    return U, V, W
     
