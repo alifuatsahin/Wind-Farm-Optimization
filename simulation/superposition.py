@@ -52,9 +52,9 @@ def interpolate_local_velocity_field(turbine, X, yloc, zloc, default):
     source_zloc = turbine.zloc + turbine.pos[2]
 
     if X <= positions[0]:
-        return interp_field(vortex_data_list[0].U, source_yloc, source_zloc, yloc, zloc, default=default)
+        return _interp_field(vortex_data_list[0].U, source_yloc, source_zloc, yloc, zloc, default=default)
     if X >= positions[-1]:
-        return interp_field(vortex_data_list[-1].U, source_yloc, source_zloc, yloc, zloc, default=default)
+        return _interp_field(vortex_data_list[-1].U, source_yloc, source_zloc, yloc, zloc, default=default)
     
     idx = np.searchsorted(positions, X)
     i0 = idx - 1
@@ -68,7 +68,7 @@ def interpolate_local_velocity_field(turbine, X, yloc, zloc, default):
     # linear interp of arrays (works when shapes match)
     U = (1 - alpha) * d0.U + alpha * d1.U
 
-    Uinterp = interp_field(U, source_yloc, source_zloc, yloc, zloc, default=default)
+    Uinterp = _interp_field(U, source_yloc, source_zloc, yloc, zloc, default=default)
     return Uinterp
 
 def interpolate_vortex_field(turbine, X, yloc, zloc, target_pos, default):
@@ -102,9 +102,9 @@ def interpolate_vortex_field(turbine, X, yloc, zloc, target_pos, default):
     target_yloc = yloc + target_pos[1]
     target_zloc = zloc + target_pos[2]
 
-    Uinterp = interp_field(U, source_yloc, source_zloc, target_yloc, target_zloc, default=default)
-    Vinterp = interp_field(V, source_yloc, source_zloc, target_yloc, target_zloc)
-    Winterp = interp_field(W, source_yloc, source_zloc, target_yloc, target_zloc)
+    Uinterp = _interp_field(U, source_yloc, source_zloc, target_yloc, target_zloc, default=default)
+    Vinterp = _interp_field(V, source_yloc, source_zloc, target_yloc, target_zloc)
+    Winterp = _interp_field(W, source_yloc, source_zloc, target_yloc, target_zloc)
     
     return VortexField(
         yloc=target_yloc,
@@ -115,7 +115,7 @@ def interpolate_vortex_field(turbine, X, yloc, zloc, target_pos, default):
         X=X
     )
 
-def interp_field(field, y_source, z_source, target_yloc, target_zloc, default=None):
+def _interp_field(field, y_source, z_source, target_yloc, target_zloc, default=None):
     interp = RegularGridInterpolator(
         (y_source[:,0], z_source[0,:]),
         field,
@@ -133,7 +133,7 @@ def interp_field(field, y_source, z_source, target_yloc, target_zloc, default=No
         result = np.nan_to_num(result, nan=0.0)
     return result
 
-def get_local_velocity_field(config, wind_farm):
+def get_local_velocity_field(config, wind_farm, superposition_method='MCS'):
     """Compute the combined velocity field at a given downstream turbine plane."""
 
     upstream_turbines = [t for t in wind_farm.turbines if t.pos[0] < config.pos[0]]
@@ -154,10 +154,16 @@ def get_local_velocity_field(config, wind_farm):
     V_list = [wf.V for wf in wake_fields]
     W_list = [wf.W for wf in wake_fields]
 
-    # Momentum-conserving superposition
-    U_wake, V_wake, W_wake, _ = momentum_conserving_superposition(
-        U_in=U_base, U_list=U_list, V_list=V_list, W_list=W_list, plot=True
-    )
+    if superposition_method == 'MCS':
+        # Momentum-conserving superposition
+        U_wake, V_wake, W_wake = momentum_conserving_superposition(
+            U_in=U_base, U_list=U_list, V_list=V_list, W_list=W_list
+        )
+    else:
+        # Root-Sum-Square superposition
+        U_wake, V_wake, W_wake = RSS_superposition(
+            U_in=U_base, U_list=U_list, V_list=V_list, W_list=W_list
+        )
 
     # Total local wind = freestream + wake-induced perturbation
     U_total = U_wake
@@ -166,7 +172,40 @@ def get_local_velocity_field(config, wind_farm):
 
     return U_total, V_total, W_total
 
-def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, max_iter=50, tol=1e-3, plot=False):
+def RSS_superposition(U_in, U_list, V_list=None, W_list=None):
+    """
+    Root-Sum-Square (RSS) superposition of multiple wake velocity fields.
+    U_in: Freestream velocity field (2D array)
+    U_list: List of wake velocity fields (2D arrays)
+    Returns combined wake velocity field (2D array)
+    """
+    # Convert to arrays
+    U_list = [np.asarray(U) for U in U_list]
+    
+    # 1. Calculate Individual Deficits (u_i_s)
+    u_s_list = [np.maximum(U_in - U, 0) for U in U_list]
+
+    # 2. Calculate Total Deficit (Eq 2.4)
+    Us_total = np.sqrt(np.sum([np.minimum(u_s, 100) ** 2 for u_s in u_s_list], axis=0))
+    Us_total = np.minimum(Us_total, U_in * 0.99)  # prevent over-deficit
+
+    # 3. Combined Wake Velocity Field
+    Uw_total = U_in - Us_total
+
+    if V_list is not None:
+        V_list = [np.asarray(V) for V in V_list]
+        V_total = np.sqrt(np.sum([V**2 for V in V_list], axis=0))
+    else:
+        V_total = None
+    if W_list is not None:
+        W_list = [np.asarray(W) for W in W_list]
+        W_total = np.sqrt(np.sum([W**2 for W in W_list], axis=0))
+    else:
+        W_total = None
+
+    return Uw_total, V_total, W_total
+
+def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, max_iter=50, tol=1e-3):
     # Convert to arrays
     U_list = [np.asarray(U) for U in U_list]
     
@@ -186,18 +225,17 @@ def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, ma
             Uc_list.append(Uc_val)
 
     Uc = np.max(Uc_list) if Uc_list else np.mean(U_in)
-    Uc_history = [Uc]
-    Us_history = []
 
     # ---- ITERATION LOOP (Eq 2.7 & 2.9) ----
     for i in range(max_iter):
         if Uc < 1e-6: Uc = 1e-6
 
         weights = [Uc_i / Uc for Uc_i in Uc_list]
+        # if sum(weights) > len(weights) + 1e-3:
+        # weights_sum = sum(weights)
+        # weights = [w / weights_sum for w in weights]  # normalize weights
         Us_total = sum(w * u_s for w, u_s in zip(weights, u_s_list))
-        Us_total = np.minimum(Us_total, U_in) 
-        Us_total = np.maximum(Us_total, 0)
-        Us_history.append(Us_total)
+        Us_total = np.minimum(Us_total, U_in * 0.99)  # prevent over-deficit
 
         Uw_total = U_in - Us_total
         
@@ -208,35 +246,13 @@ def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, ma
             break
 
         Uc_new = num / den
-        Uc_history.append(Uc_new)
+        relaxation = 0.05
+        Uc_new = (1 - relaxation) * Uc + (relaxation * Uc_new)
 
         if np.abs(Uc_new - Uc) / np.abs(Uc_new) < tol:
             Uc = Uc_new
             break
         Uc = Uc_new
-
-    # Final calculation
-    weights = [Uc_i / Uc for Uc_i in Uc_list]
-    Us_total = sum(w * u_s for w, u_s in zip(weights, u_s_list))
-    Us_total = np.minimum(Us_total, U_in) 
-    Us_total = np.maximum(Us_total, 0)
-    U_total = U_in - Us_total
-
-    if plot:
-        import matplotlib.pyplot as plt
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6))
-        ax1.plot(Uc_history, marker='o')
-        ax1.set_xlabel('Iteration')
-        ax1.set_ylabel('Convection Velocity Uc')
-        ax1.set_title('Convection Velocity Convergence')
-        ax1.grid()
-        ax2.plot(Us_history[-1][:, Us_history[-1].shape[1]//2])
-        ax2.set_xlabel('Y Index')
-        ax2.set_ylabel('Final Total Deficit Us')
-        ax2.set_title('Final Total Deficit Profile at Centerline')
-        ax2.grid()
-        plt.tight_layout()
-        plt.show()
 
     # Transverse
     if V_list is not None:
@@ -251,5 +267,5 @@ def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, ma
     else:
         W_total = None
 
-    return U_total, V_total, W_total, Uc
+    return Uw_total, V_total, W_total
     

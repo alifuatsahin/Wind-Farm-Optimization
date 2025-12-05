@@ -26,6 +26,9 @@ class Turbine:
         self.vortex_field = None  # to be filled after simulation
         self.wake_field = None  # to be filled after wake calculation
         self.dl = None  # grid spacing in y direction
+
+        self.phi = np.linspace(-np.pi, np.pi, self.Nv)
+        self.dphi = abs(self.phi[1] - self.phi[0])
         self._initialize_grid()
 
         self.Uhub = self._init_Uhub()
@@ -38,7 +41,11 @@ class Turbine:
 
         Ny = max(2, int(Ly / (self.D / n_grids)))
         Nz = max(2, int(Lz / (self.D / n_grids)))
-        self.yloc, self.zloc = np.meshgrid(np.linspace(-Ly/2, Ly/2, Ny), np.linspace(self.Zhub - Lz/2, self.Zhub + Lz/2, Nz), indexing='ij')
+        if self.Zhub - Lz/2 < 0:
+            zlims = (0, Lz)
+        else:
+            zlims = (self.Zhub - Lz/2, self.Zhub + Lz/2)
+        self.yloc, self.zloc = np.meshgrid(np.linspace(-Ly/2, Ly/2, Ny), np.linspace(*zlims, Nz), indexing='ij')
 
     def _compute_Ut(self):
         z = self.Zhub + self.D / 2.0 * np.sin(self.phi)
@@ -98,14 +105,6 @@ class Turbine:
     @property
     def gamma0(self):
         return np.pi * self.Uhub ** 2 * self.Ct / self.omega
-
-    @property
-    def phi(self):
-        return np.linspace(-np.pi, np.pi, self.Nv)
-
-    @property
-    def dphi(self):
-        return abs(self.phi[1] - self.phi[0])
 
     @property
     def Ut(self):
@@ -184,28 +183,20 @@ class WindFarm:
 
     def solve(self):
         for t in self.turbines:
-            U_local, V_local, W_local = get_local_velocity_field(t, self)
-            
+            U_local, V_local, W_local = get_local_velocity_field(t, self, superposition_method='RSS')
+
             # Create a mask for the rotor disk
             R = t.D / 2.0
             dist_from_hub = np.sqrt((t.yloc)**2 + (t.zloc - t.Zhub)**2)
             rotor_mask = dist_from_hub <= R
             
             t.Uhub = np.mean(U_local[rotor_mask])
-            t.Vhub = np.mean(V_local[rotor_mask])
-            t.Whub = np.mean(W_local[rotor_mask])
+            # t.Vhub = np.mean(V_local[rotor_mask])
+            # t.Whub = np.mean(W_local[rotor_mask])
             t.Uin = U_local
 
             print(f"Simulating turbine at pos={t.pos} m, yaw={t.yaw}°")
             t.simulate_vortex_field()            # Create a mask for the rotor disk
-            R = t.D / 2.0
-            dist_from_hub = np.sqrt((t.yloc)**2 + (t.zloc - t.Zhub)**2)
-            rotor_mask = dist_from_hub <= R
-            
-            t.Uhub = np.mean(U_local[rotor_mask])
-            t.Vhub = np.mean(V_local[rotor_mask])
-            t.Whub = np.mean(W_local[rotor_mask])
-            t.Uin = U_local
             t.initialize_wake_field()
             t.calculate_deficit_field()
 

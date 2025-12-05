@@ -5,12 +5,12 @@ import matplotlib.patheffects as patheffects
 import numpy as np
 import os
 
-from .superposition import momentum_conserving_superposition, interpolate_local_velocity_field
+from .superposition import momentum_conserving_superposition, RSS_superposition, interpolate_local_velocity_field
 
 def NuT_model(x, config, field_params):
     """Compute the turbulent viscosity Nu_T based on the distance from the hub."""
     NuT_hat = min(field_params.NuT_max, x / (5 * config.D) * field_params.NuT_max)
-    return config.a * config.Uhub * config.D * NuT_hat
+    return config.a * config._init_Uhub() ** 2 / config.Uhub * config.D * NuT_hat
 
 def smooth_2d(U, kernel_size=3, method='gaussian'):
     """
@@ -30,12 +30,7 @@ def smooth_2d(U, kernel_size=3, method='gaussian'):
     else:
         raise ValueError("method must be one of {'gaussian','uniform'}")
 
-def plot_farm_deficit_map(wind_farm, x_resolution=200, y_resolution=100, save_path=None):
-    """
-    Calculates the combined superposed velocity field using the custom 
-    Momentum Conserving Superposition function.
-    """
-    
+def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resolution=100, save_path=None):
     if not wind_farm.turbines:
         print("No turbines found in wind farm.")
         return
@@ -43,119 +38,147 @@ def plot_farm_deficit_map(wind_farm, x_resolution=200, y_resolution=100, save_pa
     print("Generating Momentum Conserving Superposition Map...")
 
     # 1. Define Visualization Domain
-    # ---------------------------------------------------
     all_x = [t.pos[0] for t in wind_farm.turbines]
     all_y = [t.pos[1] for t in wind_farm.turbines]
-    D = wind_farm.turbines[0].D
-    Uhub_ref = wind_farm.turbines[0].Uhub
-    Zhub_ref = wind_farm.turbines[0].Zhub
+    D = wind_farm.turbines[0].D 
+    Uhub_ref = wind_farm.turbines[0].Uhub 
+    Zhub_ref = wind_farm.turbines[0].Zhub 
 
     max_wake_len = wind_farm.field_params.max_X * D
     max_wake_wid = wind_farm.field_params.max_Y * D
+    max_wake_hgt = wind_farm.field_params.max_Z * D
     
     x_min = min(all_x) - 2 * D
     x_max = max(all_x) + max_wake_len
     y_min = min(all_y) - max_wake_wid
     y_max = max(all_y) + max_wake_wid
+    z_min = 0.0
+    z_max = max([t.Zhub for t in wind_farm.turbines]) + max_wake_hgt
 
     X_vis = np.linspace(x_min, x_max, x_resolution)
     Y_vis = np.linspace(y_min, y_max, y_resolution)
-    
-    # Single Z height (Hub Height)
-    Z_vis = np.array([Zhub_ref])
+    Z_vis = np.linspace(z_min, z_max, z_resolution)
 
-    # Result map
-    U_total_map = np.zeros((len(Y_vis), len(X_vis)))
+    # [FIX 1] Create 2D meshgrids for slicing logic
+    Y_loc, Z_loc = np.meshgrid(Y_vis, Z_vis, indexing='ij')
 
     # 2. Calculate Background Flow
-    # ---------------------------------------------------
     fp = wind_farm.field_params
-    U_in_val = fp.Uh * (np.log(Zhub_ref / fp.z0) / np.log(fp.Zh / fp.z0))
+    z_safe = np.maximum(Z_loc, fp.z0 + 1e-3)
+    U_in = fp.Uh * (np.log(z_safe / fp.z0) / np.log(fp.Zh / fp.z0))
+    
+    z_ref_idx = np.argmin(np.abs(Z_vis - Zhub_ref))
+    y_ref_idx = np.argmin(np.abs(Y_vis - 0.0)) 
 
-    # 3. Streamwise Iteration (Column by Column)
-    # ---------------------------------------------------
+    # Initialize Maps
+    U_xy_map = np.zeros((len(Y_vis), len(X_vis))) # (Y, X)
+    U_xz_map = np.zeros((len(Z_vis), len(X_vis))) # (Z, X)
+
+    # 3. Streamwise Iteration
     for i, x_global in enumerate(X_vis):
         
-        # A. Create a vertical slice mesh at this X location
-        # Shape: (Ny, 1)
-        Y_loc, Z_loc = np.meshgrid(Y_vis, Z_vis, indexing='ij')
-        
-        # Background flow array for this slice
-        U_in_slice = np.full_like(Y_loc, U_in_val)
-        
-        # List to store full velocity fields from each turbine
         U_wake_list = []
         
         for t in wind_farm.turbines:
-            # Calculate streamwise distance from turbine to current map slice
             dist = x_global - t.pos[0]
             
-            # Check if we are downstream and within wake limit
-            if 0 < dist < (wind_farm.field_params.max_X * D):
-                # 1. Get the Absolute Local Velocity
-                # CRITICAL: We pass 'dist' (local coordinate), not 'x_global'
-                # This ensures the wake shape/narrowing is retrieved correctly.
+            if dist > 0 and dist < wind_farm.field_params.max_X * t.D:
+                # Interpolate returns a (Y, Z) slice
                 u_local_abs = interpolate_local_velocity_field(
-                    t, dist, Y_loc, Z_loc, default=U_in_slice
+                    t, dist, Y_loc, Z_loc, default=U_in
                 )
-                
-                # Append to list for the superposition function
                 U_wake_list.append(u_local_abs)
 
-        # C. Apply Momentum Conserving Superposition
         if len(U_wake_list) > 0:
-            # Your custom function takes (U_in, List_of_Wakes)
-            # It returns U_total, V_total, W_total, Uc
-            if (x_global > 690 and x_global < 710) or (x_global > 0 and x_global < 50):
-                plot_data = False
-            else:
-                plot_data = False
-            U_total_slice, _, _, _ = momentum_conserving_superposition(
-                U_in=U_in_slice, 
+            # Pass 2D background and 2D wake list
+            # U_total_slice, _, _ = momentum_conserving_superposition(
+            #     U_in=U_in, 
+            #     U_list=U_wake_list,
+            # )
+            U_total_slice, _, _ = RSS_superposition(
+                U_in=U_in, 
                 U_list=U_wake_list,
-                plot=plot_data
             )
-            
-            # Assign result to map
-            U_total_map[:, i] = U_total_slice[:, 0]
         else:
-            # No wakes at this X location, just background flow
-            U_total_map[:, i] = U_in_slice[:, 0]
+            U_total_slice = U_in
+
+        
+        # Top View: Take all Y at fixed Z (Hub Height)
+        # We need shape (Y,), so we slice the 2nd dim
+        U_xy_map[:, i] = U_total_slice[:, z_ref_idx]
+        
+        # Side View: Take all Z at fixed Y (Centerline)
+        # We need shape (Z,), so we slice the 1st dim
+        U_xz_map[:, i] = U_total_slice[y_ref_idx, :]
 
     # 4. Plotting
-    # ---------------------------------------------------
     plt.close('all')
-    fig, ax = plt.subplots(figsize=(12, 6))
+    fig, (ax1, ax2) = plt.subplots(2, figsize=(10, 8)) # Added figsize
     
-    X_grid, Y_grid = np.meshgrid(X_vis, Y_vis)
+    # XY Grid
+    X_grid_xy, Y_grid_xy = np.meshgrid(X_vis, Y_vis) 
     
-    im = ax.pcolormesh(X_grid, Y_grid, U_total_map / Uhub_ref, 
+    im1 = ax1.pcolormesh(X_grid_xy, Y_grid_xy, U_xy_map / Uhub_ref, 
                        cmap='bwr', shading='auto')
     
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label(r'Normalized Velocity $U / U_{hub}$')
+    # XZ Grid (Side view requires X and Z)
+    X_grid_xz, Z_grid_xz = np.meshgrid(X_vis, Z_vis)
     
-    for i, t in enumerate(wind_farm.turbines):
+    im2 = ax2.pcolormesh(X_grid_xz, Z_grid_xz, U_xz_map / Uhub_ref, 
+                       cmap='bwr', shading='auto')
+        
+    cbar1 = fig.colorbar(im1, ax=ax1)
+    cbar1.set_label(r'Normalized Velocity $U / U_{hub}$')
+    ax1.set_xlabel('Global Streamwise X (m)')
+    ax1.set_ylabel('Global Cross-stream Y (m)')
+    ax1.set_title(f'Top View (Z = {Zhub_ref:.1f}m)')
+
+    cbar2 = fig.colorbar(im2, ax=ax2)
+    cbar2.set_label(r'Normalized Velocity $U / U_{hub}$')
+    ax2.set_xlabel('Global Streamwise X (m)')
+    ax2.set_ylabel('Global Vertical Z (m)')
+    ax2.set_title('Side View (Y = 0m)')
+    
+    # --- TURBINE OVERLAYS ---
+    for idx, t in enumerate(wind_farm.turbines):
         yaw_rad = np.deg2rad(t.yaw)
+        
+        # --- TOP VIEW (XY) ---
+        # Draw a line representing the rotor diameter, rotated by yaw
         dx = (t.D / 2) * np.sin(yaw_rad)
         dy = (t.D / 2) * np.cos(yaw_rad)
         
-        ax.plot([t.pos[0] - dx, t.pos[0] + dx], 
-                [t.pos[1] + dy, t.pos[1] - dy], 
-                color='red', lw=3, solid_capstyle='round')
+        ax1.plot([t.pos[0] - dx, t.pos[0] + dx], 
+                 [t.pos[1] + dy, t.pos[1] - dy], 
+                 color='black', lw=3, solid_capstyle='round')
         
-        ax.text(t.pos[0], t.pos[1] + t.D * 0.6, f"T{i}", color='white', 
-                ha='center', va='center', fontweight='bold',
-                path_effects=[patheffects.withStroke(linewidth=2, foreground="black")])
+        ax1.text(t.pos[0], t.pos[1] + t.D * 0.6, f"T{idx}", color='white', 
+                 ha='center', va='center', fontweight='bold',
+                 path_effects=[patheffects.withStroke(linewidth=2, foreground="black")])
+        
+        # --- SIDE VIEW (XZ) ---
+        # 1. Draw the Tower (Vertical line from ground to hub)
+        ax2.plot([t.pos[0], t.pos[0]], 
+                 [0, t.Zhub], 
+                 color='black', lw=2)
+        
+        # 2. Draw the Rotor (Vertical line at hub height)
+        # In side view, a rotor is a vertical line (Z-axis), 
+        # potentially foreshortened by yaw.
+        z_top = t.Zhub + (t.D / 2)
+        z_bot = t.Zhub - (t.D / 2)
+        
+        ax2.plot([t.pos[0], t.pos[0]], 
+                 [z_bot, z_top], 
+                 color='black', lw=4, solid_capstyle='round')
 
-    ax.set_aspect('equal')
-    ax.set_xlabel('Global Streamwise X (m)')
-    ax.set_ylabel('Global Cross-stream Y (m)')
-    ax.set_title('Wind Farm Velocity Field (Momentum Conserving Superposition)')
-    
+    plt.tight_layout() # Fix overlap
+
     if save_path:
-        if not os.path.exists(os.path.dirname(save_path)) and os.path.dirname(save_path) != '':
-            os.makedirs(os.path.dirname(save_path))
+        # Check if folder exists logic...
+        dir_name = os.path.dirname(save_path)
+        if dir_name and not os.path.exists(dir_name):
+            os.makedirs(dir_name)
         fig.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Saved farm map to {save_path}")
     else:

@@ -1,29 +1,28 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.optimize import brentq
 
-
-def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, max_iter=50, tol=1e-3, plot=False):
+def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, max_iter=10, tol=1e-3, plot=False):
     # Convert to arrays
     U_list = [np.asarray(U) for U in U_list]
     
     # 1. Calculate Individual Deficits (u_i_s)
     # Ensure no negative deficits due to numerical noise if U > U_in slightly
     u_s_list = [np.maximum(U_in - U, 0) for U in U_list]
+    print(f"Us list: {np.array(u_s_list).shape}")
 
     # 2. Calculate Individual Convection Velocities (Uc_i)
-    # Uc_list = [np.mean(U) for U in U_list]
-    Uc_list = []
+    uc_list = []
     for U, u_s in zip(U_list, u_s_list):
         den = np.sum(u_s)
         if den < 1e-8:
-            Uc_list.append(np.mean(U_in))
+            uc_list.append(np.mean(U_in))
         else:
             num = np.sum(U * u_s)
             Uc_val = num / den
-            Uc_list.append(Uc_val)
+            uc_list.append(Uc_val)
 
-    Uc = np.max(Uc_list) if Uc_list else np.mean(U_in)
+    print(f"Uc list: {np.array(uc_list).shape}")
+    Uc = np.max(uc_list) if uc_list else np.mean(U_in)
     Uc_history = [Uc]
     Us_history = []
 
@@ -31,11 +30,12 @@ def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, ma
     for i in range(max_iter):
         if Uc < 1e-6: Uc = 1e-6
 
-        weights = [Uc_i / Uc for Uc_i in Uc_list]
+        weights = [uc_i / Uc for uc_i in uc_list]
+        print(f"Iteration {i+1}: Weights: {weights}")
+        weights_sum = sum(weights)
+        weights = [w / weights_sum for w in weights] * len(weights) # normalize weights
         Us_total = sum(w * u_s for w, u_s in zip(weights, u_s_list))
-        print(f"weights: {weights}")
-        Us_total = np.minimum(Us_total, U_in) 
-        Us_total = np.maximum(Us_total, 0)
+        # Us_total = np.minimum(Us_total, U_in * 0.99)  # prevent over-deficit
         Us_history.append(Us_total)
 
         Uw_total = U_in - Us_total
@@ -47,11 +47,9 @@ def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, ma
             break
 
         Uc_new = num / den
-        # relaxation = 0.3
+        # relaxation = 0.05
         # Uc_new = (1 - relaxation) * Uc + (relaxation * Uc_new)
         Uc_history.append(Uc_new)
-        print(f"residuals: {np.abs(Uc_new - Uc) / np.abs(Uc_new)}")
-        print("UC update:", Uc, "->", Uc_new)
 
         if np.abs(Uc_new - Uc) / np.abs(Uc_new) < tol:
             print(f"Converged in {i+1} iterations. Uc: {Uc_new:.4f}")
@@ -61,12 +59,10 @@ def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, ma
     else:
         print(f"Max iterations reached. Final Uc: {Uc:.4f}")
 
-    # Final calculation
-    weights = [Uc_i / Uc for Uc_i in Uc_list]
-    Us_total = sum(w * u_s for w, u_s in zip(weights, u_s_list))
-    Us_total = np.minimum(Us_total, U_in) 
-    Us_total = np.maximum(Us_total, 0)
-    U_total = U_in - Us_total
+    # # Final calculation
+    # weights = [uc_i / Uc for uc_i in uc_list]
+    # Us_total = sum(w * u_s for w, u_s in zip(weights, u_s_list))
+    # U_total = U_in - Us_total
 
     if plot:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
@@ -87,17 +83,17 @@ def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, ma
     # Transverse
     if V_list is not None:
         V_list = [np.asarray(V) for V in V_list]
-        V_total = sum((Uc_i / Uc) * V for Uc_i, V in zip(Uc_list, V_list))
+        V_total = sum((Uc_i / Uc) * V for Uc_i, V in zip(uc_list, V_list))
     else:
         V_total = None
         
     if W_list is not None:
         W_list = [np.asarray(W) for W in W_list]
-        W_total = sum((Uc_i / Uc) * W for Uc_i, W in zip(Uc_list, W_list))
+        W_total = sum((Uc_i / Uc) * W for Uc_i, W in zip(uc_list, W_list))
     else:
         W_total = None
 
-    return U_total, V_total, W_total, Uc
+    return Uw_total, V_total, W_total, Uc
 
 def gaussian_wake(Y, Z, center_y, center_z, u_inf, sigma, max_deficit):
     """
@@ -145,7 +141,7 @@ def run_test():
     wake1, def1 = gaussian_wake(Y, Z, center_y=0, center_z=0, u_inf=U_inf_val, sigma=20, max_deficit=7.0)
     
     # Wake 2: Slightly offset, overlapping Wake 1
-    wake2, def2 = gaussian_wake(Y, Z, center_y=0, center_z=0, u_inf=U_inf_val, sigma=25, max_deficit=2.0)
+    wake2, def2 = gaussian_wake(Y, Z, center_y=0, center_z=0, u_inf=U_inf_val, sigma=20, max_deficit=4.0)
 
     # Transverse fields (just to test V/W logic)
     V1, W1 = create_rotational_field(Y, Z, -20, 0, 1.0)
@@ -168,7 +164,7 @@ def run_test():
 
     # --- Calculate Standard Linear Superposition (for comparison) ---
     # Linear: U_total = U_in - sum(deficits)
-    U_linear = U_in - (def1 + def2)
+    U_rss = U_in - np.sqrt(def1**2 + def2**2)
 
     # ==========================================
     # 4. VISUALIZATION
@@ -182,18 +178,18 @@ def run_test():
     axes[0, 1].set_title("Input Wake 2")
     
     # Show overlap area concept
-    axes[0, 2].pcolormesh(Y, Z, def1 + def2, shading='auto', cmap='Reds')
-    axes[0, 2].set_title("Sum of Deficits (Linear)")
+    axes[0, 2].pcolormesh(Y, Z, np.sqrt(def1**2 + def2**2), shading='auto', cmap='Reds')
+    axes[0, 2].set_title("Sum of Deficits (RSS)")
 
     # Row 2: The Results
-    im3 = axes[1, 0].pcolormesh(Y, Z, U_linear, shading='auto', vmin=4, vmax=10, cmap='viridis')
-    axes[1, 0].set_title("Linear Superposition Result")
+    im3 = axes[1, 0].pcolormesh(Y, Z, U_rss, shading='auto', vmin=4, vmax=10, cmap='viridis')
+    axes[1, 0].set_title("RSS Superposition Result")
     
     im4 = axes[1, 1].pcolormesh(Y, Z, U_mc, shading='auto', vmin=4, vmax=10, cmap='viridis')
     axes[1, 1].set_title(f"Momentum Conserving Result\n(Uc = {Uc_final:.2f})")
 
     # Difference Plot
-    diff = U_mc - U_linear
+    diff = U_mc - U_rss
     limit = np.max(np.abs(diff))
     im5 = axes[1, 2].pcolormesh(Y, Z, diff, shading='auto', cmap='coolwarm', vmin=-limit, vmax=limit)
     axes[1, 2].set_title("Difference (MC - Linear)")
@@ -208,7 +204,7 @@ def run_test():
     plt.plot(y, U_in[mid_idx, :], 'k--', label="Freestream")
     plt.plot(y, wake1[mid_idx, :], label="Wake 1 Only", alpha=0.5)
     plt.plot(y, wake2[mid_idx, :], label="Wake 2 Only", alpha=0.5)
-    plt.plot(y, U_linear[mid_idx, :], 'r--', linewidth=2, label="Linear Sum")
+    plt.plot(y, U_rss[mid_idx, :], 'r--', linewidth=2, label="RSS Sum")
     plt.plot(y, U_mc[mid_idx, :], 'b-', linewidth=2, label="Momentum Conserving")
     
     plt.title(f"Cross Section at Z=0 (Uc={Uc_final:.3f} m/s)")
