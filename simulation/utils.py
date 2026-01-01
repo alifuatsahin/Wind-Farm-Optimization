@@ -9,7 +9,7 @@ from .superposition import superpose, interpolate_local_velocity_field
 
 def NuT_model(x, config, field_params):
     """Compute the turbulent viscosity Nu_T based on the distance from the hub."""
-    NuT_hat = min(field_params.NuT_max, x / (5 * config.D) * field_params.NuT_max)
+    NuT_hat = min(0.03, x / (5 * config.D) * 0.06)
     return config.a * config._init_Uhub() ** 2 / config.Uhub * config.D * NuT_hat
 
 def smooth_2d(U, kernel_size=3, method='gaussian'):
@@ -37,12 +37,16 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
 
     print("Generating Momentum Conserving Superposition Map...")
 
+    elevation_func = wind_farm.turbine_configs.elevation_func
+
     # 1. Define Visualization Domain
     all_x = [t.pos[0] for t in wind_farm.turbines]
     all_y = [t.pos[1] for t in wind_farm.turbines]
     D = wind_farm.turbines[0].D 
     Uhub_ref = wind_farm.turbines[0].Uhub 
-    Zhub_ref = wind_farm.turbines[0].Zhub 
+    Zhub_ref = wind_farm.turbines[0].Zhub + wind_farm.turbines[0].pos[2]
+    y_slice_val = wind_farm.turbines[0].pos[1]  # Cross-stream slice at T0 for side view
+    z_min_plot = 0.0  # Minimum z for plotting ground
 
     max_wake_len = wind_farm.field_params.max_X * D
     max_wake_wid = wind_farm.field_params.max_Y * D
@@ -53,7 +57,7 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     y_min = min(all_y) - max_wake_wid
     y_max = max(all_y) + max_wake_wid
     z_min = 0.0
-    z_max = max([t.Zhub for t in wind_farm.turbines]) + max_wake_hgt
+    z_max = max([(t.Zhub + t.pos[2]) for t in wind_farm.turbines]) + max_wake_hgt
 
     X_vis = np.linspace(x_min, x_max, x_resolution)
     Y_vis = np.linspace(y_min, y_max, y_resolution)
@@ -67,7 +71,7 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     U_in = fp.Uh * (np.log(z_safe / fp.z0) / np.log(fp.Zh / fp.z0))
     
     z_ref_idx = np.argmin(np.abs(Z_vis - Zhub_ref))
-    y_ref_idx = np.argmin(np.abs(Y_vis - 0.0)) 
+    y_ref_idx = np.argmin(np.abs(Y_vis - y_slice_val)) 
 
     # Initialize Maps
     U_xy_map = np.zeros((len(Y_vis), len(X_vis))) # (Y, X)
@@ -151,16 +155,23 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
         # --- SIDE VIEW (XZ) ---
         # 1. Draw the Tower (Vertical line from ground to hub)
         ax2.plot([t.pos[0], t.pos[0]], 
-                 [0, t.Zhub], 
+                 [t.pos[2], t.Zhub+t.pos[2]], 
                  color='black', lw=2)
         
         # 2. Draw the Rotor (Vertical line at hub height)
-        z_top = t.Zhub + (t.D / 2)
-        z_bot = t.Zhub - (t.D / 2)
+        z_top = t.pos[2] + t.Zhub + (t.D / 2)
+        z_bot = t.pos[2] + t.Zhub - (t.D / 2)
         
         ax2.plot([t.pos[0], t.pos[0]], 
                  [z_bot, z_top], 
                  color='black', lw=4, solid_capstyle='round')
+
+    # --- DRAW GROUND IN SIDE VIEW ---
+    if elevation_func:
+        # Calculate terrain line along the side-view slice
+        z_ground_line = elevation_func(X_vis, np.full_like(X_vis, y_slice_val))
+        ax2.fill_between(X_vis, z_min_plot, z_ground_line, color='#6d4c41', alpha=1.0, zorder=5) # Brown ground
+        ax2.plot(X_vis, z_ground_line, color='black', lw=1, zorder=6)
 
     plt.tight_layout()
 
@@ -198,6 +209,7 @@ def plot_data(Data, config, pause_interval=0.1, quiver_samples=35,
 
     # Execution
     if save_path:
+        os.makedirs(save_path, exist_ok=True)
         _save_animation(fig, Data, update_frame, save_path, config.yaw, fps, dpi, pause_interval)
     else:
         _show_live(fig, Data, update_frame, pause_interval)
@@ -364,3 +376,10 @@ def _show_live(fig, data, update_func, interval):
     for entry in data:
         update_func(entry)
         plt.pause(interval)
+
+def npy_to_list(d):
+    if isinstance(d, dict):
+        return {k: npy_to_list(v) for k, v in d.items()}
+    if isinstance(d, np.ndarray):
+        return d.tolist()
+    return d

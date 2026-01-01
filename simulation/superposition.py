@@ -206,7 +206,6 @@ def momentum_conserving_superposition(U_in, u_yz, v_yz=None, w_yz=None, max_iter
     """
 
     # 1. Calculate Individual Deficits (u_i_s)
-    # Ensure no negative deficits due to numerical noise if U > U_in slightly
     u_s = np.maximum(U_in[None, :, :] - u_yz, 0) # shape (i_turbine, Ny, Nz)
 
     # 2. Calculate Individual Convection Velocities (Uc_i)
@@ -222,12 +221,12 @@ def momentum_conserving_superposition(U_in, u_yz, v_yz=None, w_yz=None, max_iter
         # if sum(weights) > len(weights) + 1e-3:
         # weights_sum = sum(weights)
         # weights = [w / weights_sum for w in weights]  # normalize weights
-        U_s = np.sum(weights * u_s, axis=0)  # shape (Ny, Nz)
+        U_s = np.sum(weights[:, None, None] * u_s, axis=0)  # shape (Ny, Nz)
         U_s = np.minimum(U_s, U_in)  # prevent over-deficit
 
         U = U_in - U_s
 
-        Uc_new = np.sum(U * U_s, axis=(1,2)) / np.sum(U_s, axis=(1,2))
+        Uc_new = np.sum(U * U_s, axis=(0,1)) / np.sum(U_s, axis=(0,1))
 
         if np.abs(Uc_new - U_c) / np.abs(Uc_new) < tol:
             U_c = Uc_new

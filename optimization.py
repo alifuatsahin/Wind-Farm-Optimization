@@ -1,10 +1,11 @@
 import numpy as np
-from config import Config, WindFarmConfig
+from config import Config
 from simulation import Simulation
 from typing import Callable, Tuple, Optional, List, Dict, Any
 import time
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern, ConstantKernel
+from scipy.optimize import minimize
 from scipy.stats import norm
 import matplotlib.pyplot as plt
 import copy
@@ -60,12 +61,21 @@ class Optimizer:
         self.acquisition_func = acquisition_func.lower()
         self.xi = xi
         self.rng = np.random.default_rng(random_state)
+        self.normalized_bounds = np.array([[0.0, 1.0]] * self.n_params)
         
         # Storage for optimization history
         self.X_samples = []  # Evaluated parameter configurations
         self.y_samples = []  # Corresponding objective values
         self.best_value = -np.inf
         self.best_params = None
+
+    def _normalize(self, x_physical: np.ndarray) -> np.ndarray:
+        """Convert physical units to [0, 1]."""
+        return (x_physical - self.bounds[:, 0]) / (self.bounds[:, 1] - self.bounds[:, 0])
+
+    def _denormalize(self, x_normalized: np.ndarray) -> np.ndarray:
+        """Convert [0, 1] back to physical units."""
+        return x_normalized * (self.bounds[:, 1] - self.bounds[:, 0]) + self.bounds[:, 0]
         
     def objective_function(self, params: np.ndarray) -> float:
         """
@@ -74,15 +84,17 @@ class Optimizer:
         Parameters:
         -----------
         params : np.ndarray
-            Optimization parameters
+            Optimization parameters (normalized [0, 1])
             
         Returns:
         --------
         float
             Objective value (higher is better)
         """
+        physical_parms = self._denormalize(params)
+
         # Apply parameter mapping to create config
-        temp_config = self.param_mapping(params, copy.deepcopy(self.config))
+        temp_config = self.param_mapping(physical_parms, copy.deepcopy(self.config))
         
         # Run simulation
         sim = Simulation(temp_config)
@@ -164,7 +176,7 @@ class Optimizer:
         else:
             raise ValueError(f"Unknown acquisition function: {self.acquisition_func}")
     
-    def _propose_location(self, gp, n_random: int = 10000) -> np.ndarray:
+    def _propose_location(self, gp, n_random: int = 5000, n_refinements: int = 5) -> np.ndarray:
         """
         Propose next sampling point by optimizing acquisition function.
         
@@ -180,23 +192,34 @@ class Optimizer:
         np.ndarray
             Proposed parameter values
         """
-        # Generate random candidates within bounds
-        dim = self.n_params
-        X_random = np.zeros((n_random, dim))
-        for i in range(dim):
-            X_random[:, i] = self.rng.uniform(
-                self.bounds[i, 0],
-                self.bounds[i, 1],
-                n_random
-            )
-        
-        # Evaluate acquisition function
         y_max = np.max(self.y_samples)
-        acq_values = self._acquisition(X_random, gp, y_max)
         
-        # Return point with highest acquisition value
-        best_idx = np.argmax(acq_values)
-        return X_random[best_idx]
+        X_random = self.rng.uniform(0, 1, size=(n_random, self.n_params))
+        acq_random = self._acquisition(X_random, gp, y_max)
+
+        best_idx = np.argmax(acq_random)
+        best_x = X_random[best_idx].copy()
+        best_acq = acq_random[best_idx]
+
+        idx_top = np.argpartition(acq_random, -n_refinements)[-n_refinements:]
+        X_seeds = X_random[idx_top]
+
+        for x_seed in X_seeds:
+            res = minimize(
+                lambda x: -self._acquisition(x.reshape(1, -1), gp, y_max)[0],
+                x_seed, 
+                bounds=self.normalized_bounds, 
+                method='L-BFGS-B',
+                options={'ftol': 1e-6} # Tolerance for stopping
+            )
+            
+            if res.success:
+                current_acq = -res.fun # Convert back to positive acquisition
+                if current_acq > best_acq:
+                    best_acq = current_acq
+                    best_x = res.x
+        
+        return best_x
     
     def _latin_hypercube_sampling(self, n_samples: int) -> np.ndarray:
         """
@@ -222,8 +245,6 @@ class Optimizer:
             samples[:, i] = self.rng.uniform(intervals[:-1], intervals[1:])
             # Shuffle
             self.rng.shuffle(samples[:, i])
-            # Scale to bounds
-            samples[:, i] = self.bounds[i, 0] + samples[:, i] * (self.bounds[i, 1] - self.bounds[i, 0])
         
         return samples
     
@@ -231,6 +252,8 @@ class Optimizer:
         self,
         n_iter: int = 20,
         n_init: int = 5,
+        n_refinements: int = 5,
+        n_random: int = 5000,
         verbose: bool = True
     ) -> Tuple[np.ndarray, float]:
         """
@@ -285,7 +308,7 @@ class Optimizer:
             gp = self._fit_gp()
             
             # Propose next point
-            x_next = self._propose_location(gp)
+            x_next = self._propose_location(gp, n_random=n_random, n_refinements=n_refinements)
             
             # Evaluate objective
             start_time = time.time()
@@ -450,6 +473,7 @@ def optimize_turbine_positions(config: Config, x_bounds: List[Tuple[float, float
             new_pos[i, 0] = params[2*i]     # x
             new_pos[i, 1] = params[2*i + 1] # y
         cfg.WindFarm.pos = new_pos
+        cfg.WindFarm.update_elevation()  # Update z based on elevation function if provided
         return cfg
     
     optimizer = Optimizer(
@@ -463,7 +487,7 @@ def optimize_turbine_positions(config: Config, x_bounds: List[Tuple[float, float
     opt_params = {k: v for k, v in opt_kwargs.items() if k in ['n_iter', 'n_init', 'verbose']}
     best_params, best_value = optimizer.optimize(**opt_params)
     
-    return optimizer
+    return optimizer, best_params, best_value
 
 
 def optimize_mixed_params(config: Config, param_specs: Dict[str, Any], **opt_kwargs):

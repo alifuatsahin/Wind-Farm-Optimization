@@ -1,6 +1,9 @@
 import numpy as np
-from dataclasses import dataclass, field
-from typing import Iterator
+from dataclasses import asdict, dataclass, field, InitVar
+from typing import Iterator, Callable, Optional
+import yaml
+
+from simulation.utils import npy_to_list
 
 @dataclass
 class TurbineConfig:
@@ -13,44 +16,45 @@ class TurbineConfig:
 
 @dataclass
 class WindFarmConfig:
-    pos: np.ndarray = field(default_factory=lambda: np.array([[0.0, 0.0, 0.0], [1230, 0.0, 0.0], [2460.0, 0.0, 0.0]]))  # Turbine positions (x, y, z)
-    D: np.ndarray = field(default_factory=lambda: np.array([123.0]))  # Rotor diameter(s)
+    pos: np.ndarray = field(default_factory=lambda: np.array([[0.0, 0.0, 0.0], [1260, 0.0, 0.0], [2520.0, 0.0, 0.0]]))  # Turbine positions (x, y, z)
+    D: np.ndarray = field(default_factory=lambda: np.array([126.0]))  # Rotor diameter(s)
     Zhub: np.ndarray = field(default_factory=lambda: np.array([90.0]))  # Hub height(s)
     Ct: np.ndarray = field(default_factory=lambda: np.array([0.75]))  # Thrust coefficient(s)
-    yaw: np.ndarray = field(default_factory=lambda: np.array([0.0]))  # Yaw angle(s)
+    yaw: np.ndarray = field(default_factory=lambda: np.array([30.0]))  # Yaw angle(s)
     TSR: np.ndarray = field(default_factory=lambda: np.array([7.02]))  # Tip speed ratio(s)
 
-    def _broadcast(self, arr):
-        a = np.asarray(arr)
-        n = len(self)
-        if len(a) == 1:
-            return np.full(n, a[0])
-        elif len(a) < n:
-            return np.tile(a, (n // len(a) + 1))[:n]
-        elif len(a) == n:
-            return a
-        raise ValueError(f"Cannot broadcast array of size {a.size} to size {n}.")
-
-    def check_consistency(self):
-        if self.pos.ndim != 2 or self.pos.shape[1] != 3:
-            raise ValueError(f"Inconsistent shape for 'pos': {self.pos.shape}, expected (N, 3).")
-        
-        lengths = [len(self.D), len(self.Zhub), len(self.Ct), len(self.yaw), len(self.TSR)]
-        max_len = max(lengths)
-        for name, length in zip(['D', 'Zhub', 'Ct', 'yaw', 'TSR'], lengths):
-            if length != 1 and length != max_len:
-                raise ValueError(f"Inconsistent lengths in WindFarmConfig: '{name}' has length {length}, expected 1 or {max_len}.")
+    elevation_func: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = field(default=None, repr=False)
+    grid: InitVar[tuple] = None #(3,3,5,5)  # Optional grid definition: (n_rows, n_cols, spacing_x, spacing_y)
+    dist_type: str = "m"  # Distance type between the turbines: 'm (meters)' or 'D (x/D normalized over rotor diameters)'
             
-    def __post_init__(self):
+    def __post_init__(self, grid):
         self.pos = np.atleast_2d(np.asarray(self.pos, dtype=float))
-        # ensure numeric fields are numpy arrays
-        self.D    = np.asarray(self.D, dtype=float)
+        self.D = np.asarray(self.D, dtype=float)
+
+        # initialize positions from grid if specified
+        D_ref = self.D[0]
+        if grid:
+            rows, cols, spacing_x, spacing_y = grid
+            if len(self.D) > 1:
+                print("WARNING: Initializing positions from grid with multiple rotor diameters. Using first turbine's D as reference.")
+            scale = D_ref if self.dist_type == 'D' else 1.0
+            x_coords = np.arange(cols) * spacing_x * scale
+            y_coords = np.arange(rows) * spacing_y * scale
+            xv, yv = np.meshgrid(x_coords, y_coords)
+            self.pos = np.column_stack((xv.ravel(), yv.ravel(), np.zeros(xv.size)))
+            self.dist_type = 'm'
+        elif self.dist_type == 'D':
+            self.pos *= D_ref
+            self.dist_type = 'm'
+
+        self.update_elevation()
+
         self.Zhub = np.asarray(self.Zhub, dtype=float)
         self.Ct   = np.asarray(self.Ct, dtype=float)
         self.yaw  = np.asarray(self.yaw, dtype=float)
         self.TSR  = np.asarray(self.TSR, dtype=float)
 
-        self.check_consistency()
+        self._check_consistency()
 
         # broadcast scalars or shorter arrays to match number of turbines (allows tiling)
         self.D    = self._broadcast(self.D)
@@ -89,6 +93,35 @@ class WindFarmConfig:
             TSR = float(self._pick(self.TSR, idx)),
         )
     
+    def _broadcast(self, arr):
+        a = np.asarray(arr)
+        n = len(self)
+        if len(a) == 1:
+            return np.full(n, a[0])
+        elif len(a) < n:
+            print(f"WARNING: Broadcasting array of size {a.size} to size {n}.")
+            return np.tile(a, (n // len(a) + 1))[:n]
+        elif len(a) == n:
+            return a
+        raise ValueError(f"Cannot broadcast array of size {a.size} to size {n}.")
+
+    def _check_consistency(self):
+        if self.pos.ndim != 2 or self.pos.shape[1] != 3:
+            raise ValueError(f"Inconsistent shape for 'pos': {self.pos.shape}, expected (N, 3).")
+        
+        lengths = [len(self.D), len(self.Zhub), len(self.Ct), len(self.yaw), len(self.TSR)]
+        max_len = max(lengths)
+        for name, length in zip(['D', 'Zhub', 'Ct', 'yaw', 'TSR'], lengths):
+            if length != 1 and length != max_len:
+                raise ValueError(f"Inconsistent lengths in WindFarmConfig: '{name}' has length {length}, expected 1 or {max_len}.")
+    
+    def update_elevation(self):
+        """Calculates and overrides the Z coordinate if elevation_func is provided."""
+        if self.elevation_func is not None:
+            x = self.pos[:, 0]
+            y = self.pos[:, 1]
+            self.pos[:, 2] = self.elevation_func(x, y)
+
     def turbines(self) -> Iterator[TurbineConfig]:
         for i in range(len(self)):
             yield self[i]
@@ -98,7 +131,7 @@ class FieldConfig:
     Uh: float = 8.55 # Measured wind speed
     Zh: float = 80.0 # Height of the wind speed measurement
     WV: float = 0.0 # Vertical wind veer
-    NuT_max: float = 0.03 # Maximum turbulence intensity
+    NuT_max: float = 0.05 # Maximum turbulent viscosity ratio
     Nv: int = 49
     z0: float = 0.03 # Surface roughness length (Open sea 0.0002, Flat land 0.03)
     max_X: float = 10.0 # Maximum downstream distance to simulate (in rotor diameters)
@@ -127,3 +160,24 @@ class Config:
                 print(f"{name}: ndarray shape={val.shape}")
             else:
                 print(f"{name}: {val}")
+
+    def save_yaml(self, path: str):
+        """Standard way to save configs."""
+        # Helper to convert numpy to list for serialization
+        with open(path, 'w') as f:
+            yaml.dump(npy_to_list(asdict(self)), f, default_flow_style=False)
+
+    @classmethod
+    def load_yaml(cls, path: str):
+        with open(path, 'r') as f:
+            data = yaml.safe_load(f)
+        
+        # Map dictionary keys to class constructors
+        return cls(
+            WindFarm=WindFarmConfig(**data['WindFarm']),
+            Field=FieldConfig(**data['Field']),
+            out_path=data.get('out_path', "Data/")
+        )
+
+    def __repr__(self):
+        return f"Config(Turbines={len(self.WindFarm)}, Uh={self.Field.Uh}, Out={self.out_path})"

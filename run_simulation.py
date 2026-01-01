@@ -24,9 +24,9 @@ def run_simulation(profiling=False):
         end = time.perf_counter()
         print(f"Simulation completed in {end - start:.2f} seconds.")
 
-    # sim.plot_single_turbine(turbine_index=0, show_streamwise=True, save_graphic=False)
-    sim.plot_wind_farm_wake(save_graphic=False)
+    sim.plot_single_turbine(turbine_index=0, show_streamwise=True, save_graphic=False)
+    # sim.plot_wind_farm_wake(save_graphic=False)
     # sim.save_results()
 
 if __name__ == "__main__":
-    run_simulation(profiling=False)
+    run_simulation(profiling=True)
