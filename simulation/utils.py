@@ -7,52 +7,33 @@ import os
 
 from .superposition import superpose, interpolate_local_velocity_field
 
-def NuT_model(wake_field, config, upstream_turbines):
+def NuT_model(wake_field, config, field_params, upstream_turbines):
     """Compute the turbulent viscosity Nu_T based on the distance from the hub."""
 
-    I_amb = 0.07  # ambient turbulence intensity
-    m = 2.0
+    I_amb = field_params.I_amb  # ambient turbulence intensity
+    m = 2.5
+    turb_dist = wake_field.X
     I = I_amb ** m # initialize as ambient turbulence intensity
     delta_I = lambda turbine, x_val: 0.73 * turbine.a ** 0.8325 * I_amb ** (-0.03) * (x_val / turbine.D) ** -0.32
 
-    if wake_field.X > 5 * config.D:
+    I_norm = np.sqrt(field_params.I_amb ** 2 + delta_I(config, 3 * config.D) ** m)
+
+    if wake_field.X > 3 * config.D:
         I += delta_I(config, wake_field.X) ** m
     else:
-        I += delta_I(config, 5 * config.D) ** m
+        I += delta_I(config, 3 * config.D) ** m
 
     for t in upstream_turbines:
         dist = wake_field.X + (config.pos[0] - t.pos[0])
         I_add = delta_I(t, dist)
         I += I_add ** m
 
-    I_total = I ** (1/m) / 0.1489 * 1.5
+    I_total = I ** (1/m)
 
-    NuT_hat = min(0.03 * (1 - (wake_field.X - 5 * config.D) / (100 * config.D)), wake_field.X / (5 * config.D) * 0.06)
-    NuT_hat = config.a * config._init_Uhub() * config.D * NuT_hat * I_total
+    turb_dist += config.D * I_total / I_norm if len(upstream_turbines) > 0 else 0.0
 
-    for t in upstream_turbines:
-        dist = wake_field.X + (config.pos[0] - t.pos[0])
-        NuT_add = min(0.03 * (1 - (dist - 5 * t.D) / (100 * t.D)), dist / (5 * t.D) * 0.06)
-        NuT_hat += NuT_add * t.a * t._init_Uhub() * t.D * I_total
-
-    # I_amb = 0.07  # ambient turbulence intensity
-    # delta_I = lambda turbine, x_val: 0.73 * turbine.a ** 0.8325 * I_amb ** (-0.03) * (x_val / turbine.D) ** -0.32
-    
-    # nu_t = lambda turbine, I_total: 0.015 * turbine.Uinf * turbine.D * I_total
-    # I = I_amb ** 2 # initialize as ambient turbulence intensity
-
-    # if wake_field.X > 5 * config.D:
-    #     I += delta_I(config, wake_field.X) ** 2
-    # else:
-    #     I += delta_I(config, 5 * config.D) ** 2
-
-    # for t in upstream_turbines:
-    #     dist = wake_field.X + (config.pos[0] - t.pos[0])
-    #     I_add = delta_I(t, dist)
-    #     I += I_add ** 2
-
-    # I_total = np.sqrt(I)
-    # NuT_hat = nu_t(config, I_total)
+    NuT_hat = min(0.03, turb_dist / config.D * 0.006) * config.a * config._init_Uhub() * config.D
+    NuT_hat = NuT_hat * I_total / I_norm
 
     return NuT_hat
 
@@ -125,20 +106,22 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     for i, x_global in enumerate(X_vis):
         
         U_wake_list = []
+        U_in_list = []
         
         for t in wind_farm.turbines:
             dist = x_global - t.pos[0]
             
             if dist > 0 and dist < wind_farm.field_params.max_X * t.D:
                 # Interpolate returns a (Y, Z) slice
-                u_local_abs = interpolate_local_velocity_field(
+                u_local_abs, u_in_local = interpolate_local_velocity_field(
                     t, dist, Y_loc, Z_loc, default=U_in
                 )
                 U_wake_list.append(u_local_abs)
+                U_in_list.append(u_in_local)
 
         if len(U_wake_list) > 0:
             # Pass 2D background and 2D wake list
-            U_total_slice = superpose(U_in, np.array(U_wake_list), method='RSS')[0]
+            U_total_slice = superpose(U_in, np.array(U_in_list), np.array(U_wake_list), method='MCS')[0]
         else:
             U_total_slice = U_in
 
@@ -159,13 +142,13 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     X_grid_xy, Y_grid_xy = np.meshgrid(X_vis, Y_vis) 
     
     im1 = ax1.pcolormesh(X_grid_xy, Y_grid_xy, U_xy_map / Uhub_ref, 
-                       cmap='bwr', shading='auto')
+                       cmap='bwr', shading='auto', vmin=0.3, vmax=1.0)
     
     # XZ Grid (Side view requires X and Z)
     X_grid_xz, Z_grid_xz = np.meshgrid(X_vis, Z_vis)
     
     im2 = ax2.pcolormesh(X_grid_xz, Z_grid_xz, U_xz_map / Uhub_ref, 
-                       cmap='bwr', shading='auto')
+                       cmap='bwr', shading='auto', vmin=0.3, vmax=1.0)
         
     cbar1 = fig.colorbar(im1, ax=ax1)
     cbar1.set_label(r'Normalized Velocity $U / U_{hub}$')

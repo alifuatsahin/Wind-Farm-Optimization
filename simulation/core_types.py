@@ -153,7 +153,7 @@ class Turbine:
         max_X = self.field_params.max_X * self.D
 
         while self.wake_field[-1].X <= max_X:
-            NuT = NuT_model(self.wake_field[-1], self, upstream_turbines)
+            NuT = NuT_model(self.wake_field[-1], self, self.field_params, upstream_turbines)
             dt = min(self.dl / self.Uhub, 0.25 * self.D / self.Uhub) 
             dt = min(dt, (self.dl**2) / (2 * (NuT + 1e-6)))  # stability condition
 
@@ -267,7 +267,7 @@ class WindFarm:
 
     def solve(self):
         for t in self.turbines:
-            U_local, V_local, W_local = get_local_velocity_field(t, self, method='RSS')
+            U_local, V_local, W_local = get_local_velocity_field(t, self, method='MCS')
 
             upstream_turbines = [
                 ut for ut in self.turbines

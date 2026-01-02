@@ -132,6 +132,7 @@ class FieldConfig:
     Zh: float = 80.0 # Height of the wind speed measurement
     WV: float = 0.0 # Vertical wind veer
     NuT_max: float = 0.05 # Maximum turbulent viscosity ratio
+    I_amb: float = 0.10 # Ambient turbulence intensity
     Nv: int = 49
     z0: float = 0.03 # Surface roughness length (Open sea 0.0002, Flat land 0.03)
     max_X: float = 15.0 # Maximum downstream distance to simulate (in rotor diameters)

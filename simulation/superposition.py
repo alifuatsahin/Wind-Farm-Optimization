@@ -43,7 +43,20 @@ def interpolate_vec_data(vortex_data_list, t):
     )
 
 def interpolate_local_velocity_field(turbine, X, yloc, zloc, default):
-    """Interpolate vortex field at position X from a list of VortexField objects."""
+    """
+    Interpolate wake velocity field at streamwise position X onto target grid.
+    
+    Args:
+        turbine: Turbine object containing wake_field data
+        X: Streamwise position (global coordinates) where to interpolate
+        yloc: Target lateral grid coordinates (2D array)
+        zloc: Target vertical grid coordinates (2D array)
+        default: Default velocity field for points outside interpolation bounds
+    
+    Returns:
+        Uinterp: Interpolated streamwise velocity field on target grid (yloc, zloc)
+        Uin_interp: Interpolated local input velocity field on target grid (yloc, zloc)
+    """
     vortex_data_list = turbine.wake_field
 
     positions = np.array([v.X for v in vortex_data_list])
@@ -69,7 +82,8 @@ def interpolate_local_velocity_field(turbine, X, yloc, zloc, default):
     U = (1 - alpha) * d0.U + alpha * d1.U
 
     Uinterp = _interp_field(U, source_yloc, source_zloc, yloc, zloc, default=default)
-    return Uinterp
+    Uin_interp = _interp_field(turbine.Uin, source_yloc, source_zloc, yloc, zloc, default=default)
+    return Uinterp, Uin_interp
 
 def interpolate_vortex_field(turbine, X, yloc, zloc, target_pos, default):
     """Interpolate vortex field at position X from a list of VortexField objects."""
@@ -149,20 +163,21 @@ def get_local_velocity_field(config, wind_farm, method='MCS'):
     # Get wake fields at this x-plane
     wake_fields = [interpolate_vortex_field(t, config.pos[0], config.yloc, config.zloc, config.pos, config._init_Uin()) 
                    for t in upstream_turbines]
-
+    
+    local_Uins = np.array([t.Uin for t in upstream_turbines])
     u_yz = np.array([wf.U for wf in wake_fields])
     v_yz = np.array([wf.V for wf in wake_fields])
     w_yz = np.array([wf.W for wf in wake_fields])
 
     # Superpose wakes
-    U, V, W = superpose(U_base, u_yz, v_yz, w_yz, method=method)
+    U, V, W = superpose(U_base, local_Uins, u_yz, v_yz, w_yz, method=method)
 
     return U, V, W
 
-def superpose(U_in, u_yz, v_yz=None, w_yz=None, method='MCS'):
+def superpose(U_in, local_Uins, u_yz, v_yz=None, w_yz=None, method='MCS'):
     """Superpose multiple wake velocity fields using specified method."""
     if method == 'MCS':
-        return momentum_conserving_superposition(U_in, u_yz, v_yz, w_yz)
+        return momentum_conserving_superposition(U_in, local_Uins, u_yz, v_yz, w_yz)
     else:
         return RSS_superposition(U_in, u_yz, v_yz, w_yz)
 
@@ -195,10 +210,11 @@ def RSS_superposition(U_in, u_yz, v_yz=None, w_yz=None):
 
     return U, V, W
 
-def momentum_conserving_superposition(U_in, u_yz, v_yz=None, w_yz=None, max_iter=50, tol=1e-3):
+def momentum_conserving_superposition(U_in, local_Uins, u_yz, v_yz=None, w_yz=None, max_iter=10, tol=1e-3):
     """
     Momentum-Conserving Superposition (MCS) of multiple wake velocity fields.
         U_in: Freestream velocity field (2D array of shape (Ny, Nz))
+        local_Uins: Freestream velocities at each turbine (3D array of shape (i_turbine, Ny, Nz))
         u_yz: Wake velocity fields (3D array of shape (i_turbine, Ny, Nz))
         v_yz: Transverse wake velocity fields (3D array of shape (i_turbine, Ny, Nz)) or None
         w_yz: Vertical wake velocity fields (3D array of shape (i_turbine, Ny, Nz)) or None
@@ -206,7 +222,7 @@ def momentum_conserving_superposition(U_in, u_yz, v_yz=None, w_yz=None, max_iter
     """
 
     # 1. Calculate Individual Deficits (u_i_s)
-    u_s = np.maximum(U_in[None, :, :] - u_yz, 0) # shape (i_turbine, Ny, Nz)
+    u_s = np.maximum(local_Uins - u_yz, 0) # shape (i_turbine, Ny, Nz)
 
     # 2. Calculate Individual Convection Velocities (Uc_i)
     u_c = np.sum(u_yz * u_s, axis=(1,2)) / np.sum(u_s, axis=(1,2)) # shape (i_turbine,)
@@ -218,14 +234,13 @@ def momentum_conserving_superposition(U_in, u_yz, v_yz=None, w_yz=None, max_iter
         U_c = np.maximum(U_c, 1e-6)
 
         weights = u_c / U_c # shape (i_turbine,)
-        # if sum(weights) > len(weights) + 1e-3:
-        # weights_sum = sum(weights)
-        # weights = [w / weights_sum for w in weights]  # normalize weights
+        weights = np.minimum(weights, 1.35)  # cap weights at 1.35 to avoid over-deficit
         U_s = np.sum(weights[:, None, None] * u_s, axis=0)  # shape (Ny, Nz)
         U_s = np.minimum(U_s, U_in)  # prevent over-deficit
 
         U = U_in - U_s
         Uc_new = np.sum(U * U_s, axis=(0,1)) / np.sum(U_s, axis=(0,1))
+        # Uc_new = 0.5 * U_c + (0.5 * Uc_new)
 
         if np.abs(Uc_new - U_c) / np.abs(Uc_new) < tol:
             U_c = Uc_new
