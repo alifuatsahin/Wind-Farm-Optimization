@@ -13,7 +13,8 @@ def advance_wake_field(data, dt, NuT, config, field_params):
     V += V_veer # total transverse velocity
 
     # estimate mean convection distance
-    mask = U < 0.8 * np.max(U)
+    Us = Uin - U
+    mask = Us > 0.2 * np.max(Us)
     dx = dt * np.mean(U[mask])
 
     # prediction step
@@ -35,7 +36,7 @@ def advance_wake_field(data, dt, NuT, config, field_params):
 
     dUpdx = numer / denom_safe
     Up = U + dUpdx * dx
-    Up[:, 0] = Uin[:, 0] # no slip at BC
+    Up[:, 0] = Uin[:, 0] # far stream dirichlet BC
 
     # correction step
     dUdY, dUdZ = np.gradient(Up, yloc[:, 0], zloc[0, :])   # dUdY = ∂(Up)/∂y, dUdZ = ∂(Up)/∂z
@@ -49,6 +50,6 @@ def advance_wake_field(data, dt, NuT, config, field_params):
 
     dUcdx = numer / denom_safe
     U += 0.5 * (dUpdx + dUcdx) * dx
-    U[:, 0] = Uin[:, 0] # no slip at BC
+    U[:, 0] = Uin[:, 0] # far stream dirichlet BC
     
     return U, data.X + dx

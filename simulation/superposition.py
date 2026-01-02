@@ -225,7 +225,6 @@ def momentum_conserving_superposition(U_in, u_yz, v_yz=None, w_yz=None, max_iter
         U_s = np.minimum(U_s, U_in)  # prevent over-deficit
 
         U = U_in - U_s
-
         Uc_new = np.sum(U * U_s, axis=(0,1)) / np.sum(U_s, axis=(0,1))
 
         if np.abs(Uc_new - U_c) / np.abs(Uc_new) < tol:

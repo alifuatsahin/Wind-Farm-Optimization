@@ -184,12 +184,6 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
     
     for i, j in zip(merge_pairs[0], merge_pairs[1]):
         if i not in to_remove and j not in to_remove:
-            # # Merge vortex i into vortex j
-            # Circ_new[j] += Circ_new[i]
-            # Y_new[j] = 0.5 * (Y_new[i] + Y_new[j])
-            # Z_new[j] = 0.5 * (Z_new[i] + Z_new[j])
-            # # Keep the larger radius
-            # Rv_new[j] = max(Rv_new[i], Rv_new[j])
             total_circ = Circ_new[i] + Circ_new[j]
             if abs(total_circ) > 1e-12:
                 Y_new[j] = (Y_new[i] * Circ_new[i] + Y_new[j] * Circ_new[j]) / total_circ

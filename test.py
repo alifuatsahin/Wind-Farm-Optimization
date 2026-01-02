@@ -32,10 +32,11 @@ def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, ma
 
         weights = [uc_i / Uc for uc_i in uc_list]
         print(f"Iteration {i+1}: Weights: {weights}")
-        weights_sum = sum(weights)
-        weights = [w / weights_sum for w in weights] * len(weights) # normalize weights
+        # weights_sum = sum(weights)
+        # weights = [w / weights_sum for w in weights] * len(weights) # normalize weights
+        # weights = np.minimum(weights, 2.0)  # cap weights at 2.0 to avoid over-deficit
         Us_total = sum(w * u_s for w, u_s in zip(weights, u_s_list))
-        # Us_total = np.minimum(Us_total, U_in * 0.99)  # prevent over-deficit
+        # Us_total = np.minimum(Us_total, U_in)  # prevent over-deficit
         Us_history.append(Us_total)
 
         Uw_total = U_in - Us_total
@@ -47,8 +48,9 @@ def momentum_conserving_superposition(U_in, U_list, V_list=None, W_list=None, ma
             break
 
         Uc_new = num / den
-        # relaxation = 0.05
-        # Uc_new = (1 - relaxation) * Uc + (relaxation * Uc_new)
+        relaxation = 0.3
+        Uc_new = (1 - relaxation) * Uc + (relaxation * Uc_new)
+        # Uc_new = max(Uc_new, np.mean(U_in) * 0.5)
         Uc_history.append(Uc_new)
 
         if np.abs(Uc_new - Uc) / np.abs(Uc_new) < tol:
@@ -138,10 +140,10 @@ def run_test():
     print("--- Generating Test Wakes ---")
     
     # Wake 1: Centered, deep deficit
-    wake1, def1 = gaussian_wake(Y, Z, center_y=0, center_z=0, u_inf=U_inf_val, sigma=20, max_deficit=7.0)
+    wake1, def1 = gaussian_wake(Y, Z, center_y=0, center_z=0, u_inf=U_inf_val, sigma=20, max_deficit=1.0)
     
     # Wake 2: Slightly offset, overlapping Wake 1
-    wake2, def2 = gaussian_wake(Y, Z, center_y=0, center_z=0, u_inf=U_inf_val, sigma=20, max_deficit=4.0)
+    wake2, def2 = gaussian_wake(Y, Z, center_y=0, center_z=0, u_inf=U_inf_val, sigma=20, max_deficit=7.0)
 
     # Transverse fields (just to test V/W logic)
     V1, W1 = create_rotational_field(Y, Z, -20, 0, 1.0)

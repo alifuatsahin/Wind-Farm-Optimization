@@ -16,11 +16,11 @@ class TurbineConfig:
 
 @dataclass
 class WindFarmConfig:
-    pos: np.ndarray = field(default_factory=lambda: np.array([[0.0, 0.0, 0.0], [1260, 0.0, 0.0], [2520.0, 0.0, 0.0]]))  # Turbine positions (x, y, z)
+    pos: np.ndarray = field(default_factory=lambda: np.array([[0.0, 0.0, 0.0], [1260*0.5, 0.0, 0.0], [1260.0*1.0, 0.0, 0.0]]))  # Turbine positions (x, y, z)
     D: np.ndarray = field(default_factory=lambda: np.array([126.0]))  # Rotor diameter(s)
     Zhub: np.ndarray = field(default_factory=lambda: np.array([90.0]))  # Hub height(s)
     Ct: np.ndarray = field(default_factory=lambda: np.array([0.75]))  # Thrust coefficient(s)
-    yaw: np.ndarray = field(default_factory=lambda: np.array([30.0]))  # Yaw angle(s)
+    yaw: np.ndarray = field(default_factory=lambda: np.array([0.0]))  # Yaw angle(s)
     TSR: np.ndarray = field(default_factory=lambda: np.array([7.02]))  # Tip speed ratio(s)
 
     elevation_func: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = field(default=None, repr=False)
@@ -134,7 +134,7 @@ class FieldConfig:
     NuT_max: float = 0.05 # Maximum turbulent viscosity ratio
     Nv: int = 49
     z0: float = 0.03 # Surface roughness length (Open sea 0.0002, Flat land 0.03)
-    max_X: float = 10.0 # Maximum downstream distance to simulate (in rotor diameters)
+    max_X: float = 15.0 # Maximum downstream distance to simulate (in rotor diameters)
     max_Y: float = 3.0 # Maximum lateral distance to simulate (in rotor diameters)
     max_Z: float = 2.0 # Maximum vertical distance to simulate (in rotor diameters)
     n_grids: int = 20 # Number of grids in each direction

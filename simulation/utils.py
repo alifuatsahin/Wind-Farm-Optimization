@@ -7,10 +7,54 @@ import os
 
 from .superposition import superpose, interpolate_local_velocity_field
 
-def NuT_model(x, config, field_params):
+def NuT_model(wake_field, config, upstream_turbines):
     """Compute the turbulent viscosity Nu_T based on the distance from the hub."""
-    NuT_hat = min(0.03, x / (5 * config.D) * 0.06)
-    return config.a * config._init_Uhub() ** 2 / config.Uhub * config.D * NuT_hat
+
+    I_amb = 0.07  # ambient turbulence intensity
+    m = 2.0
+    I = I_amb ** m # initialize as ambient turbulence intensity
+    delta_I = lambda turbine, x_val: 0.73 * turbine.a ** 0.8325 * I_amb ** (-0.03) * (x_val / turbine.D) ** -0.32
+
+    if wake_field.X > 5 * config.D:
+        I += delta_I(config, wake_field.X) ** m
+    else:
+        I += delta_I(config, 5 * config.D) ** m
+
+    for t in upstream_turbines:
+        dist = wake_field.X + (config.pos[0] - t.pos[0])
+        I_add = delta_I(t, dist)
+        I += I_add ** m
+
+    I_total = I ** (1/m) / 0.1489 * 1.5
+
+    NuT_hat = min(0.03 * (1 - (wake_field.X - 5 * config.D) / (100 * config.D)), wake_field.X / (5 * config.D) * 0.06)
+    NuT_hat = config.a * config._init_Uhub() * config.D * NuT_hat * I_total
+
+    for t in upstream_turbines:
+        dist = wake_field.X + (config.pos[0] - t.pos[0])
+        NuT_add = min(0.03 * (1 - (dist - 5 * t.D) / (100 * t.D)), dist / (5 * t.D) * 0.06)
+        NuT_hat += NuT_add * t.a * t._init_Uhub() * t.D * I_total
+
+    # I_amb = 0.07  # ambient turbulence intensity
+    # delta_I = lambda turbine, x_val: 0.73 * turbine.a ** 0.8325 * I_amb ** (-0.03) * (x_val / turbine.D) ** -0.32
+    
+    # nu_t = lambda turbine, I_total: 0.015 * turbine.Uinf * turbine.D * I_total
+    # I = I_amb ** 2 # initialize as ambient turbulence intensity
+
+    # if wake_field.X > 5 * config.D:
+    #     I += delta_I(config, wake_field.X) ** 2
+    # else:
+    #     I += delta_I(config, 5 * config.D) ** 2
+
+    # for t in upstream_turbines:
+    #     dist = wake_field.X + (config.pos[0] - t.pos[0])
+    #     I_add = delta_I(t, dist)
+    #     I += I_add ** 2
+
+    # I_total = np.sqrt(I)
+    # NuT_hat = nu_t(config, I_total)
+
+    return NuT_hat
 
 def smooth_2d(U, kernel_size=3, method='gaussian'):
     """
@@ -53,7 +97,7 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     max_wake_hgt = wind_farm.field_params.max_Z * D
     
     x_min = min(all_x) - 2 * D
-    x_max = max(all_x) + max_wake_len
+    x_max = max(all_x) + 5 * D
     y_min = min(all_y) - max_wake_wid
     y_max = max(all_y) + max_wake_wid
     z_min = 0.0
@@ -177,23 +221,33 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
 
     if save_path:
         dir_name = os.path.dirname(save_path)
+        grid = wind_farm.get_grid()
+        img_name = f"farm_map_{grid['rows']}x{grid['cols']}.png"
         if dir_name and not os.path.exists(dir_name):
             os.makedirs(dir_name)
-        fig.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Saved farm map to {save_path}")
+        fig.savefig(os.path.join(dir_name, img_name), dpi=300, bbox_inches='tight')
+        print(f"Saved farm map to {os.path.join(dir_name, img_name)}")
     else:
         plt.show()
     
-def plot_data(Data, config, pause_interval=0.1, quiver_samples=35,
-              show_streamwise=True, save_path=None, fps=10, dpi=150):
+def plot_data(data, config, pause_interval=0.1, quiver_samples=35,
+              show_streamwise=True, save_path=None, save_at_x=None, fps=10, dpi=150):
     """
     Main driver to visualize wake data. Coordinates setup, data prep, and animation loop.
     """
     plt.close('all')
+
+    all_u = [np.asarray(d.U) for d in data]
+    all_omg = [np.asarray(d.OmegaX) for d in data]
+
+    levels = {
+        'u': np.linspace(0, 1, 21) * np.nanmax(all_u) / config.Uhub,
+        'omg': np.linspace(-1, 1, 21) * np.nanmax(np.abs(all_omg)) / (config.Uhub / config.D)
+        }
     
     # 1. Prepare common data and grids
-    grid_info = _get_grid_info(Data[0], config, config.Zhub)
-    wake_history = _extract_streamwise_history(Data, config, grid_info) if show_streamwise else None
+    grid_info = _get_grid_info(data[0], config, config.Zhub)
+    wake_history = _extract_streamwise_history(data, config, grid_info) if show_streamwise else None
     
     # 2. Setup Figure and Axes
     fig, axes_dict = _setup_layout(show_streamwise and wake_history is not None)
@@ -203,16 +257,25 @@ def plot_data(Data, config, pause_interval=0.1, quiver_samples=35,
     plot_state = {'cbar_vort': None, 'cbar_vel': None, 'cbar_wake': None}
 
     def update_frame(entry):
-        _render_snapshot(axes_dict, plot_state, entry, config, grid_info, quiver_samples)
+        _render_snapshot(axes_dict, plot_state, entry, config, grid_info, quiver_samples, levels)
         if wake_history:
             _render_streamwise(axes_dict, plot_state, entry, config, grid_info, wake_history)
+
+    # Pre-identify indices for snapshots to save
+    save_indices = {}
+    if save_at_x is not None:
+        actual_x = np.array([d.X / config.D for d in data])
+        for target in save_at_x:
+            # Find the index of the data entry closest to the user's target x/D
+            idx = np.argmin(np.abs(actual_x - target))
+            save_indices[idx] = target
 
     # Execution
     if save_path:
         os.makedirs(save_path, exist_ok=True)
-        _save_animation(fig, Data, update_frame, save_path, config.yaw, fps, dpi, pause_interval)
+        _save_animation(fig, data, update_frame, save_path, config.yaw, fps, dpi, pause_interval, save_indices)
     else:
-        _show_live(fig, Data, update_frame, pause_interval)
+        _show_live(data, update_frame, pause_interval)
 
     return fig, axes_dict
 
@@ -264,114 +327,129 @@ def _setup_layout(has_streamwise):
         fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
         return fig, {'vort': axes[0], 'vel': axes[1]}
 
-def _render_snapshot(axes, state, entry, config, grid, q_samples):
+def _render_snapshot(axes, state, entry, config, grid, q_samples, levels):
     """Handles the top row: Contour plots for current timestep."""
     # 1. Vorticity (Top Left)
-    ax = axes['vort']
-    ax.clear()
-    ax.set_aspect('equal', 'box')
+    ax_vort = axes['vort']
     
     omg = np.asarray(entry.OmegaX)
     norm_factor = config.Uhub / config.D
     omg_norm = omg / norm_factor
     
-    limit = np.nanmax(np.abs(omg_norm)) if np.isfinite(np.nanmax(omg_norm)) else 1.0
-    levels = np.linspace(-1, 1, 21) * limit
-    
-    cf = ax.contourf(grid['yloc'], grid['zloc'], omg_norm, levels=levels, cmap='RdBu_r', extend='both')
-    ax.set_title(f'$\\Omega_x$ (Normalized) at X/D = {entry.X/config.D:.1f}')
-    
-    if state['cbar_vort'] is None:
-        state['cbar_vort'] = ax.figure.colorbar(cf, ax=ax, label='Vorticity')
+    if 'cf_vort' not in state:
+        ax_vort.set_aspect('equal', 'box')
+        state['cf_vort'] = ax_vort.contourf(grid['yloc'], grid['zloc'], omg_norm,
+                        levels=levels['omg'], cmap='RdBu_r', extend='both')
+        state['title_vort'] = ax_vort.set_title(f'$\\Omega_x$ (Normalized) at X/D = {entry.X/config.D:.1f}')
+        state['cbar_vort'] = ax_vort.figure.colorbar(state['cf_vort'], ax=ax_vort, label='Vorticity')
     else:
-        state['cbar_vort'].update_normal(cf)
+        state['cf_vort'].remove()
+        state['cf_vort'] = ax_vort.contourf(grid['yloc'], grid['zloc'], omg_norm,
+                                    levels=levels['omg'], cmap='RdBu_r', extend='both')
+        state['title_vort'].set_text(f'$\\Omega_x$ (Normalized) at X/D = {entry.X/config.D:.1f}')
         
     # Quiver overlay
-    _add_quiver(ax, entry, grid, q_samples)
+    state = _add_quiver(ax_vort, entry, state, grid, q_samples)
 
     # 2. Velocity (Top Right)
-    ax = axes['vel']
-    ax.clear()
-    ax.set_aspect('equal', 'box')
+    ax_vel = axes['vel']
 
     u_def_norm = np.asarray(entry.U) / config.Uhub
-    limit = np.nanmax(np.abs(u_def_norm)) if np.isfinite(np.nanmax(u_def_norm)) else 1.0
 
-    cf = ax.contourf(grid['yloc'], grid['zloc'], u_def_norm, levels=21, cmap='turbo')
-    cf.set_clim(0, limit)
-    ax.set_title(f'U/Uhub at X/D = {entry.X/config.D:.1f}')
-    
-    if state['cbar_vel'] is None:
-        state['cbar_vel'] = ax.figure.colorbar(cf, ax=ax, label='Normalized Streamwise Velocity')
+    if 'cf_vel' not in state:
+        ax_vel.set_aspect('equal', 'box')
+        state['cf_vel'] = ax_vel.contourf(grid['yloc'], grid['zloc'], u_def_norm, levels=levels['u'], cmap='turbo')
+        state['title_vel'] = ax_vel.set_title(f'U/Uhub at X/D = {entry.X/config.D:.1f}')
+        state['cbar_vel'] = ax_vel.figure.colorbar(state['cf_vel'], ax=ax_vel, label='Normalized Streamwise Velocity')
     else:
-        state['cbar_vel'].update_normal(cf)
+        state['cf_vel'].remove()
+        state['cf_vel'] = ax_vel.contourf(grid['yloc'], grid['zloc'], u_def_norm, levels=levels['u'], cmap='turbo')
+        state['title_vel'].set_text(f'U/Uhub at X/D = {entry.X/config.D:.1f}')
 
-def _add_quiver(ax, entry, grid, samples):
+def _add_quiver(ax, entry, state, grid, samples):
     """Adds quiver arrows to an existing axis."""
     dN = max(1, int(grid['Ny'] / samples))
     sl = np.s_[::dN, ::dN] # Slice object
-    ax.quiver(grid['yloc'][sl], grid['zloc'][sl], 
-              np.asarray(entry.V)[sl], np.asarray(entry.W)[sl], 
-              color='k', scale=16.0, angles='xy')
+
+    V_new = np.asarray(entry.V)[sl]
+    W_new = np.asarray(entry.W)[sl]
+
+    if 'quiver' not in state:
+        state['quiver'] = ax.quiver(grid['yloc'][sl], grid['zloc'][sl], 
+                V_new, W_new, color='k', scale=16.0, angles='xy', zorder=2)
+    else:
+        state['quiver'].set_UVC(V_new, W_new)
+    return state
 
 def _render_streamwise(axes, state, entry, config, grid, history):
     """Handles bottom row: Profiles and Heatmap."""
     current_x = entry.X / config.D
     
     # 3. Radial Profiles (Bottom Left)
-    ax = axes['prof']
-    ax.clear()
+    ax_prof = axes['prof']
     
-    # Plot background profiles (static snapshots)
-    num_profs = min(5, len(history['X']))
-    indices = np.linspace(0, len(history['X'])-1, num_profs, dtype=int)
-    colors = plt.cm.viridis(np.linspace(0, 1, num_profs))
-    
-    u_norm = history['U'] / config._init_Uhub()
-    for i, idx in enumerate(indices):
-        ax.plot(grid['yloc'][:,0], u_norm[:, idx], 
-                color=colors[i], marker='o', ms=3, alpha=0.5, label=f'X/D={history["X"][idx]:.1f}')
+    if 'prof_lines' not in state:
+        # Plot background profiles (static snapshots)
+        num_profs = min(5, len(history['X']))
+        indices = np.linspace(0, len(history['X'])-1, num_profs, dtype=int)
+        colors = plt.cm.viridis(np.linspace(0, 1, num_profs))
         
-    # Highlight current profile
-    curr_idx = np.argmin(np.abs(history['X'] - current_x))
-    ax.plot(grid['yloc'][:,0], u_norm[:, curr_idx], 'r-', lw=3, label='Current')
-    
-    ax.set_title('Hub Height Velocity Profiles')
-    ax.set_ylabel('U/Uhub')
-    ax.set_xlabel('Normalized Cross-stream Distance Y/D')
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8)
+        u_norm = history['U'] / config._init_Uhub()
+        for i, idx in enumerate(indices):
+            ax_prof.plot(grid['yloc'][:,0], u_norm[:, idx], 
+                    color=colors[i], marker='o', ms=3, alpha=0.5, label=f'X/D={history["X"][idx]:.1f}')
+            
+        # Highlight current profile
+        curr_idx = np.argmin(np.abs(history['X'] - current_x))
+        state['prof_lines'] = ax_prof.plot(grid['yloc'][:,0], u_norm[:, curr_idx], 'r-', lw=3, label='Current Profile')[0]
+        
+        ax_prof.set_title('Hub Height Velocity Profiles')
+        ax_prof.set_ylabel('U/Uhub')
+        ax_prof.set_xlabel('Normalized Cross-stream Distance Y/D')
+        ax_prof.grid(True, alpha=0.3)
+        ax_prof.legend(fontsize=8)
+    else:
+        curr_idx = np.argmin(np.abs(history['X'] - current_x))
+        u_norm = history['U'] / config._init_Uhub()
+        state['prof_lines'].set_ydata(u_norm[:, curr_idx])
 
     # 4. Wake Evolution Heatmap (Bottom Right)
-    ax = axes['wake']
-    ax.clear()
+    ax_wake = axes['wake']
     
-    mesh = ax.pcolormesh(history['X_grid'], history['Y_grid'], u_norm, cmap='jet', shading='auto')
-    ax.axvline(current_x, color='r', ls='--')
-    ax.set_title('Wake Evolution (Top Down)')
-    ax.set_xlabel('Streamwise Distance X/D')
-    ax.set_ylabel('Normalized Cross-stream Distance Y/D')
-    
-    if state['cbar_wake'] is None:
-        state['cbar_wake'] = ax.figure.colorbar(mesh, ax=ax, label='Normalized Velocity U/Uhub')
+    if 'v_line' not in state:
+        u_norm = history['U'] / config._init_Uhub()
+        mesh = ax_wake.pcolormesh(history['X_grid'], history['Y_grid'], u_norm, cmap='turbo', shading='auto', rasterized=True)
+        state['v_line'] = ax_wake.axvline(current_x, color='r', ls='--')
+        ax_wake.set_title('Wake Evolution (Top Down)')
+        ax_wake.set_xlabel('Streamwise Distance X/D')
+        ax_wake.set_ylabel('Normalized Cross-stream Distance Y/D')
+        state['cbar_wake'] = ax_wake.figure.colorbar(mesh, ax=ax_wake, label='Normalized Velocity U/Uhub')
     else:
-        state['cbar_wake'].update_normal(mesh)
+        state['v_line'].set_xdata([current_x, current_x])
 
-def _save_animation(fig, data, update_func, path, yaw, fps, dpi, interval):
+def _save_animation(fig, data, update_func, path, yaw, fps, dpi, interval, save_indices):
     """Handles the video writing logic."""
+    folder_name = f"Yaw{yaw:.2f}"
+    os.makedirs(os.path.join(path, folder_name), exist_ok=True)
     try:
-        out_path = os.path.join(path, f"Yaw{yaw:.2f}_Wake.gif")
+        out_path = os.path.join(path, folder_name, f"Yaw{yaw:.2f}_Wake.gif")
         writer = PillowWriter(fps=fps)
         with writer.saving(fig, out_path, dpi):
-            for entry in data:
+            for i, entry in enumerate(data):
                 update_func(entry)
                 fig.canvas.draw()
+
+                if i in save_indices.keys():
+                    fname = os.path.join(path, folder_name, f"Wake_xD_{save_indices[i]:.1f}.png")
+                    fig.savefig(fname, dpi=dpi, bbox_inches='tight')
+                    print(f"Saved snapshot at x/D = {save_indices[i]:.1f}")
+
                 writer.grab_frame()
                 plt.pause(interval) # Optional: keep small pause to see progress
     except Exception as e:
         print(f"Error saving animation: {e}")
 
-def _show_live(fig, data, update_func, interval):
+def _show_live(data, update_func, interval):
     """Handles standard live plotting."""
     for entry in data:
         update_func(entry)

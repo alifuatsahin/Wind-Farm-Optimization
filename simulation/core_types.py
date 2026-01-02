@@ -109,6 +109,10 @@ class Turbine:
     @property
     def Ut(self):
         return self._compute_Ut()
+    
+    @property
+    def Uinf(self):
+        return self._init_Uhub()
 
     @property
     def dgamma(self):
@@ -143,14 +147,15 @@ class Turbine:
         self.vortex_field[0].t = 0.0
         self.vortex_field[0].Uhub = self.Uhub
 
-    def calculate_deficit_field(self, max_steps=10000):
+    def calculate_deficit_field(self, upstream_turbines, max_steps=10000):
         # Time-marching reduced-order model
         self.wake_field = [self.vortex_field[0]]
-        dt = min(self.dl / self.Uhub, 0.25 * self.D / self.Uhub)
         max_X = self.field_params.max_X * self.D
 
         while self.wake_field[-1].X <= max_X:
-            NuT = NuT_model(self.wake_field[-1].X, self, self.field_params)
+            NuT = NuT_model(self.wake_field[-1], self, upstream_turbines)
+            dt = min(self.dl / self.Uhub, 0.25 * self.D / self.Uhub) 
+            dt = min(dt, (self.dl**2) / (2 * (NuT + 1e-6)))  # stability condition
 
             new = interpolate_vec_data(self.vortex_field, self.wake_field[-1].t + dt)
             U, X_new = advance_wake_field(self.wake_field[-1], dt, NuT, self, self.field_params)
@@ -171,6 +176,85 @@ class WindFarm:
 
         self._construct_wind_farm()
 
+    def get_grid(self, tolerance=None):
+        """
+        Return grid dimensions and layout of the wind farm.
+        Handles misaligned turbines by clustering positions within a tolerance.
+        
+        Args:
+            tolerance: Distance tolerance for grouping positions (default: D/3)
+        
+        Returns:
+            dict: Contains 'rows', 'cols', 'x_positions', 'y_positions', 'layout'
+        """
+        if not self.turbines:
+            return {'rows': 0, 'cols': 0, 'x_positions': [], 'y_positions': [], 'layout': None}
+        
+        # Use rotor diameter as default tolerance if not specified
+        if tolerance is None:
+            tolerance = self.turbines[0].D / 3.0
+        
+        # Cluster x positions (streamwise)
+        x_coords = [t.pos[0] for t in self.turbines]
+        x_positions = self._cluster_positions(x_coords, tolerance)
+        
+        # Cluster y positions (spanwise)
+        y_coords = [t.pos[1] for t in self.turbines]
+        y_positions = self._cluster_positions(y_coords, tolerance)
+        
+        rows = len(x_positions)
+        cols = len(y_positions)
+        
+        # Create a 2D layout grid
+        layout = [[None for _ in range(cols)] for _ in range(rows)]
+        
+        for idx, turbine in enumerate(self.turbines):
+            # Find closest cluster centers
+            row_idx = self._find_closest_cluster(turbine.pos[0], x_positions)
+            col_idx = self._find_closest_cluster(turbine.pos[1], y_positions)
+            layout[row_idx][col_idx] = idx
+        
+        return {
+            'rows': rows,
+            'cols': cols,
+            'x_positions': x_positions,
+            'y_positions': y_positions,
+            'layout': np.array(layout, dtype=object),
+            'total_turbines': len(self.turbines)
+        }
+
+    def _cluster_positions(self, positions, tolerance):
+        """
+        Cluster positions that are within tolerance distance.
+        Returns sorted list of cluster centers.
+        """
+        if not positions:
+            return []
+        
+        sorted_pos = sorted(positions)
+        clusters = []
+        current_cluster = [sorted_pos[0]]
+        
+        for pos in sorted_pos[1:]:
+            if pos - current_cluster[-1] <= tolerance:
+                current_cluster.append(pos)
+            else:
+                # Save cluster center (mean of positions in cluster)
+                clusters.append(np.mean(current_cluster))
+                current_cluster = [pos]
+        
+        # Don't forget the last cluster
+        clusters.append(np.mean(current_cluster))
+        
+        return clusters
+
+    def _find_closest_cluster(self, position, cluster_centers):
+        """
+        Find index of closest cluster center to given position.
+        """
+        distances = [abs(position - center) for center in cluster_centers]
+        return distances.index(min(distances))
+
     def _construct_wind_farm(self):
         self.turbines = [Turbine(t_config, self.field_params) for t_config in self.turbine_configs.turbines()]
         self.turbines = sorted(self.turbines, key=lambda t: t.pos[0])
@@ -185,6 +269,15 @@ class WindFarm:
         for t in self.turbines:
             U_local, V_local, W_local = get_local_velocity_field(t, self, method='RSS')
 
+            upstream_turbines = [
+                ut for ut in self.turbines
+                if (
+                    ut.pos[0] < t.pos[0] and  # Check if upstream
+                    np.abs(ut.pos[1] - t.pos[1]) < 3 * ut.D and  # Check lateral distance
+                    np.abs(ut.pos[2] - t.pos[2]) < 3 * ut.D  # Check vertical distance
+                )
+            ]
+
             # Create a mask for the rotor disk
             R = t.D / 2.0
             dist_from_hub = np.sqrt((t.yloc)**2 + (t.zloc - t.Zhub)**2)
@@ -198,7 +291,7 @@ class WindFarm:
             print(f"Simulating turbine at pos={t.pos} m, yaw={t.yaw}°")
             t.simulate_vortex_field()            # Create a mask for the rotor disk
             t.initialize_wake_field()
-            t.calculate_deficit_field()
+            t.calculate_deficit_field(upstream_turbines)
 
     def save_results(self, out_path):
         os.makedirs(out_path, exist_ok=True)
