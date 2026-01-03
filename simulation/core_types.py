@@ -17,8 +17,6 @@ class Turbine:
         self.yaw = config.yaw
         self.TSR = config.TSR
         self.Uh = field_params.Uh
-        self.Vhub = 0.0
-        self.Whub = 0.0
         self.Zh = field_params.Zh
         self.WV = field_params.WV
         self.Nv = field_params.Nv
@@ -27,14 +25,17 @@ class Turbine:
         self.dl = None  # grid spacing in y direction
 
         self.Ct = config.Ct * np.cos(np.deg2rad(self.yaw))**1.8  # Adjusted thrust coefficient
-        self.Cp = config.Cp * np.cos(np.deg2rad(self.yaw))**3  # Adjusted power coefficient
+        self.Cp = config.Cp * np.cos(np.deg2rad(self.yaw))**1.88  # Adjusted power coefficient
 
         self.phi = np.linspace(-np.pi, np.pi, self.Nv)
         self.dphi = abs(self.phi[1] - self.phi[0])
         self._initialize_grid()
 
-        self.Uhub = self._init_Uhub()
+        self.V = np.zeros_like(self.yloc)
+        self.W = np.zeros_like(self.zloc)
+
         self.Uin = self._init_Uin()
+        self.Uhub = self._init_Uhub()
 
     def _initialize_grid(self):
         Ly = self.field_params.max_Y * self.D
@@ -66,7 +67,9 @@ class Turbine:
         return dgamma
 
     def _init_Uhub(self):
-        Uhub = self.Uh * (np.log(self.Zhub / self.field_params.z0) / np.log(self.Zh / self.field_params.z0))
+        Uin = self._init_Uin()
+        rotor_mask = np.sqrt((self.yloc)**2 + (self.zloc - self.Zhub)**2) <= (self.D / 2)
+        Uhub = np.mean(Uin[rotor_mask])
         return Uhub
 
     def _init_Uin(self):
@@ -112,7 +115,7 @@ class Turbine:
 
     @property
     def dgamma(self):
-        return self._compute_dgamma()
+        return self._compute_dgamma()        
     
     def calculate_power_output(self):
         rho = 1.225
@@ -262,7 +265,7 @@ class WindFarm:
             if verbose:
                 print(f"Turbine at pos={t.pos} m, yaw={t.yaw}°: Power = {P_i:.2f} W")
             total_power += P_i
-        return total_power
+        return total_power / len(self.turbines)
 
     def solve(self):
         for t in self.turbines:
@@ -279,16 +282,16 @@ class WindFarm:
 
             # Create a mask for the rotor disk
             R = t.D / 2.0
-            dist_from_hub = np.sqrt((t.yloc)**2 + (t.zloc - t.Zhub)**2)
+            dist_from_hub = np.sqrt((t.yloc / np.cos(t.beta))**2 + (t.zloc - t.Zhub)**2)
             rotor_mask = dist_from_hub <= R
             
             t.Uhub = np.mean(U_local[rotor_mask])
-            # t.Vhub = np.mean(V_local[rotor_mask])
-            # t.Whub = np.mean(W_local[rotor_mask])
+            t.V = V_local
+            t.W = W_local
             t.Uin = U_local
 
             # print(f"Simulating turbine at pos={t.pos} m, yaw={t.yaw}°")
-            t.simulate_vortex_field()            # Create a mask for the rotor disk
+            t.simulate_vortex_field()
             t.initialize_wake_field()
             t.calculate_deficit_field(upstream_turbines)
 

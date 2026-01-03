@@ -9,7 +9,6 @@ from gpytorch.kernels import MaternKernel, ScaleKernel
 from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import ExactMarginalLogLikelihood
 
-from botorch.utils.transforms import standardize
 from botorch.generation import MaxPosteriorSampling
 from botorch.utils.sampling import SobolEngine
 from botorch.fit import fit_gpytorch_mll
@@ -57,6 +56,7 @@ class Optimizer:
         random_state: Optional[int] = None,
         max_cholesky_size: Optional[int] = float("inf"),
     ):
+        bounds = np.asarray(bounds, dtype=float)
         assert np.all(bounds[:, 1] > bounds[:, 0]), "Error: Upper bounds must be greater than lower bounds"
         assert max_cholesky_size >= 0, "Error: max_cholesky_size must be non-negative"
         assert dtype in [torch.float32, torch.float64], "Error: dtype must be torch.float32 or torch.float64"
@@ -65,7 +65,7 @@ class Optimizer:
             device = "cpu"
 
         self.config = config
-        self.bounds = np.array(bounds)
+        self.bounds = bounds
         self.n_params = len(bounds)
         self.param_mapping = param_mapping
         self.param_names = param_names or [f'param_{i}' for i in range(self.n_params)]

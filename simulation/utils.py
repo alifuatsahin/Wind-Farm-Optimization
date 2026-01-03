@@ -34,7 +34,7 @@ def NuT_model(wake_field, config, field_params, upstream_turbines):
 
     turb_dist += config.D * I_total / I_norm if len(upstream_turbines) > 0 else 0.0
 
-    NuT_hat = min(0.03, turb_dist / config.D * 0.006) * config.a * config._init_Uhub() * config.D
+    NuT_hat = min(0.03, turb_dist / config.D * 0.006) * config.a * config.Uinf * config.D
     NuT_hat = NuT_hat * I_total / I_norm
 
     return NuT_hat
@@ -98,7 +98,7 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     U_in = fp.Uh * (np.log(z_safe / fp.z0) / np.log(fp.Zh / fp.z0))
     
     z_ref_idx = np.argmin(np.abs(Z_vis - Zhub_ref))
-    y_ref_idx = np.argmin(np.abs(Y_vis - y_slice_val)) 
+    y_ref_idx = np.argmin(np.abs(Y_vis - y_slice_val))
 
     # Initialize Maps
     U_xy_map = np.zeros((len(Y_vis), len(X_vis))) # (Y, X)
@@ -142,15 +142,17 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     
     # XY Grid
     X_grid_xy, Y_grid_xy = np.meshgrid(X_vis, Y_vis) 
+    vmin, vmax = 0.2, 1.2
+    levels = np.linspace(vmin, vmax, 15)
     
-    im1 = ax1.pcolormesh(X_grid_xy, Y_grid_xy, U_xy_map / Uhub_ref, 
-                       cmap='bwr', shading='auto', vmin=0.3, vmax=1.0)
+    im1 = ax1.contourf(X_grid_xy, Y_grid_xy, U_xy_map / Uhub_ref, 
+                       cmap='bwr', levels=levels, vmin=vmin, vmax=vmax, extend='both')
     
     # XZ Grid (Side view requires X and Z)
     X_grid_xz, Z_grid_xz = np.meshgrid(X_vis, Z_vis)
     
-    im2 = ax2.pcolormesh(X_grid_xz, Z_grid_xz, U_xz_map / Uhub_ref, 
-                       cmap='bwr', shading='auto', vmin=0.3, vmax=1.0)
+    im2 = ax2.contourf(X_grid_xz, Z_grid_xz, U_xz_map / Uhub_ref, 
+                       cmap='bwr', levels=levels, vmin=vmin, vmax=vmax, extend='both')
         
     cbar1 = fig.colorbar(im1, ax=ax1)
     cbar1.set_label(r'Normalized Velocity $U / U_{hub}$')
@@ -391,7 +393,7 @@ def _render_streamwise(axes, state, entry, config, grid, history):
         indices = np.linspace(0, len(history['X'])-1, num_profs, dtype=int)
         colors = plt.cm.viridis(np.linspace(0, 1, num_profs))
         
-        u_norm = history['U'] / config._init_Uhub()
+        u_norm = history['U'] / config.Uinf
         for i, idx in enumerate(indices):
             ax_prof.plot(grid['yloc'][:,0], u_norm[:, idx], 
                     color=colors[i], marker='o', ms=3, alpha=0.5, label=f'X/D={history["X"][idx]:.1f}')
@@ -407,14 +409,14 @@ def _render_streamwise(axes, state, entry, config, grid, history):
         ax_prof.legend(fontsize=8)
     else:
         curr_idx = np.argmin(np.abs(history['X'] - current_x))
-        u_norm = history['U'] / config._init_Uhub()
+        u_norm = history['U'] / config.Uinf
         state['prof_lines'].set_ydata(u_norm[:, curr_idx])
 
     # 4. Wake Evolution Heatmap (Bottom Right)
     ax_wake = axes['wake']
     
     if 'v_line' not in state:
-        u_norm = history['U'] / config._init_Uhub()
+        u_norm = history['U'] / config.Uinf
         mesh = ax_wake.pcolormesh(history['X_grid'], history['Y_grid'], u_norm, cmap='turbo', shading='auto', rasterized=True)
         state['v_line'] = ax_wake.axvline(current_x, color='r', ls='--')
         ax_wake.set_title('Wake Evolution (Top Down)')

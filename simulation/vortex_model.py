@@ -56,9 +56,8 @@ def simulate_vortex_evolution(config, field_params, total_steps=1000):
         new_vor_field = VortexField(
             Y=new_Y, Z=new_Z, Rv=new_Rv, 
             Circ=curr.Circ.copy(), t=t,
-            yloc=curr.yloc, zloc=curr.zloc, V=curr.V, W=curr.W, OmegaX=curr.OmegaX
+            yloc=curr.yloc, zloc=curr.zloc, V=np.zeros_like(curr.V), W=np.zeros_like(curr.W), OmegaX=curr.OmegaX
         )
-        # new_vor_field = _update_vortices(vor_field_list[-1], V_induced, W_induced, dt, Nu)
         
         # 5. Merge close vortices
         dY, dZ, dist2 = _get_relative_geometry(curr.Y, curr.Z)
@@ -79,6 +78,8 @@ def _vortex2velocity(data, config):
     zloc = config.zloc
 
     V, W = _oseenlamb(Circ, Y, Z, Rv, yloc, zloc)
+    V += data.V
+    W += data.W
 
     _, dVdZ = np.gradient(V, yloc[:, 0], zloc[0, :])
     dWdY, _ = np.gradient(W, yloc[:, 0], zloc[0, :])
@@ -118,8 +119,8 @@ def _define_location(config):
         Circ=Circ,
         yloc=np.array([]),
         zloc=np.array([]),
-        V=np.array([]),
-        W=np.array([]),
+        V=config.V,
+        W=config.W,
         OmegaX=np.array([]),
         t=0.0
     )

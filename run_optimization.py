@@ -36,7 +36,7 @@ def yaw_optimization():
     
     # Plot trust region evolution
     optimizer.plot_trust_region_snapshots(
-        iterations=[10, 30, 50, 70],
+        iterations=[10, 30, 60, 90],
         param_idx_x=0,
         param_idx_y=1,
         save_path='Figures/yaw_trust_region.png'
@@ -44,7 +44,7 @@ def yaw_optimization():
     
     # Plot GP posterior (works with both TS and EI)
     optimizer.plot_gp_posterior_snapshots(
-        iterations=[10, 30, 50, 70],
+        iterations=[10, 30, 60, 90],
         param_idx_x=0,
         param_idx_y=1,
         save_path='Figures/yaw_gp_posterior.png'
@@ -66,7 +66,7 @@ def yaw_optimization():
     print("="*70)
     for i, yaw in enumerate(optimizer.best_params):
         print(f"  Turbine {i}: {yaw:.2f}°")
-    print(f"\nWind Farm Efficiency: {optimizer.best_value / len(config.WindFarm):.2f}")
+    print(f"\nWind Farm Efficiency: {optimizer.best_value:.2f}")
     
     return optimizer
 
