@@ -1,7 +1,9 @@
 from scipy.ndimage import uniform_filter, gaussian_filter
 import matplotlib.pyplot as plt
 from matplotlib.animation import PillowWriter
+from matplotlib.ticker import FormatStrFormatter
 import matplotlib.patheffects as patheffects
+import pandas as pd
 import numpy as np
 import os
 
@@ -214,18 +216,28 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
         plt.show()
     
 def plot_data(data, config, pause_interval=0.1, quiver_samples=35,
-              show_streamwise=True, save_path=None, save_at_x=None, fps=10, dpi=150):
+              show_streamwise=True, save_path=None, save_at_x=None, fps=10, dpi=150, show=True):
     """
     Main driver to visualize wake data. Coordinates setup, data prep, and animation loop.
+    
+    Parameters:
+    -----------
+    show : bool, optional (default=True)
+        If True, displays the plots interactively. If False, only saves without displaying.
     """
+    # Use non-interactive backend when not showing
+    if not show and save_path:
+        import matplotlib
+        matplotlib.use('Agg')
+    
     plt.close('all')
 
     all_u = [np.asarray(d.U) for d in data]
     all_omg = [np.asarray(d.OmegaX) for d in data]
 
     levels = {
-        'u': np.linspace(0, 1, 21) * np.nanmax(all_u) / config.Uhub,
-        'omg': np.linspace(-1, 1, 21) * np.nanmax(np.abs(all_omg)) / (config.Uhub / config.D)
+        'u': np.linspace(0, 1, 21) * ceil(np.nanmax(all_u) / config.Uhub, 1),
+        'omg': np.linspace(-1, 1, 21) * ceil(np.nanmax(np.abs(all_omg)) / (config.Uhub / config.D), 1)
         }
     
     # 1. Prepare common data and grids
@@ -256,8 +268,8 @@ def plot_data(data, config, pause_interval=0.1, quiver_samples=35,
     # Execution
     if save_path:
         os.makedirs(save_path, exist_ok=True)
-        _save_animation(fig, data, update_frame, save_path, config.yaw, fps, dpi, pause_interval, save_indices)
-    else:
+        _save_animation(fig, data, update_frame, save_path, config.yaw, fps, dpi, pause_interval if show else 0, save_indices)
+    elif show:
         _show_live(data, update_frame, pause_interval)
 
     return fig, axes_dict
@@ -325,6 +337,7 @@ def _render_snapshot(axes, state, entry, config, grid, q_samples, levels):
                         levels=levels['omg'], cmap='RdBu_r', extend='both')
         state['title_vort'] = ax_vort.set_title(f'$\\Omega_x$ (Normalized) at X/D = {entry.X/config.D:.1f}')
         state['cbar_vort'] = ax_vort.figure.colorbar(state['cf_vort'], ax=ax_vort, label='Vorticity')
+        state['cbar_vort'].ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
     else:
         state['cf_vort'].remove()
         state['cf_vort'] = ax_vort.contourf(grid['yloc'], grid['zloc'], omg_norm,
@@ -344,6 +357,7 @@ def _render_snapshot(axes, state, entry, config, grid, q_samples, levels):
         state['cf_vel'] = ax_vel.contourf(grid['yloc'], grid['zloc'], u_def_norm, levels=levels['u'], cmap='turbo')
         state['title_vel'] = ax_vel.set_title(f'U/Uhub at X/D = {entry.X/config.D:.1f}')
         state['cbar_vel'] = ax_vel.figure.colorbar(state['cf_vel'], ax=ax_vel, label='Normalized Streamwise Velocity')
+        state['cbar_vel'].ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
     else:
         state['cf_vel'].remove()
         state['cf_vel'] = ax_vel.contourf(grid['yloc'], grid['zloc'], u_def_norm, levels=levels['u'], cmap='turbo')
@@ -428,7 +442,8 @@ def _save_animation(fig, data, update_func, path, yaw, fps, dpi, interval, save_
                     print(f"Saved snapshot at x/D = {save_indices[i]:.1f}")
 
                 writer.grab_frame()
-                plt.pause(interval) # Optional: keep small pause to see progress
+                if interval > 0:  # Only pause if interval is set (i.e., when showing)
+                    plt.pause(interval)
     except Exception as e:
         print(f"Error saving animation: {e}")
 
@@ -444,3 +459,9 @@ def npy_to_list(d):
     if isinstance(d, np.ndarray):
         return d.tolist()
     return d
+
+def ceil(a, precision=0):
+    return np.true_divide(np.ceil(a * 10**precision), 10**precision)
+
+def floor(a, precision=0):
+    return np.true_divide(np.floor(a * 10**precision), 10**precision)

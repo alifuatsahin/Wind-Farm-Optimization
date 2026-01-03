@@ -14,7 +14,6 @@ class Turbine:
         self.pos = config.pos  # (x, y, z)
         self.D = config.D
         self.Zhub = config.Zhub
-        self.Ct = config.Ct
         self.yaw = config.yaw
         self.TSR = config.TSR
         self.Uh = field_params.Uh
@@ -26,6 +25,9 @@ class Turbine:
         self.vortex_field = None  # to be filled after simulation
         self.wake_field = None  # to be filled after wake calculation
         self.dl = None  # grid spacing in y direction
+
+        self.Ct = config.Ct * np.cos(np.deg2rad(self.yaw))**1.8  # Adjusted thrust coefficient
+        self.Cp = config.Cp * np.cos(np.deg2rad(self.yaw))**3  # Adjusted power coefficient
 
         self.phi = np.linspace(-np.pi, np.pi, self.Nv)
         self.dphi = abs(self.phi[1] - self.phi[0])
@@ -75,12 +77,6 @@ class Turbine:
     @property
     def a(self):
         return (1 - np.sqrt(1 - self.Ct / np.cos(self.beta))) / 2
-    
-    @property
-    def Cp(self):
-        # Estimate Power Coefficient from Ct (using Actuator Disk theory approximation)
-        # Cp = 4 * a * (1-a)^2
-        return 4 * self.a * (1 - self.a)**2
 
     @property
     def R(self):
@@ -119,11 +115,11 @@ class Turbine:
         return self._compute_dgamma()
     
     def calculate_power_output(self):
-        # P = 0.5 * rho * A * U^3 * Cp
         rho = 1.225
         Area = np.pi * (self.R ** 2)
         P = 0.5 * rho * Area * (self.Uhub ** 3) * self.Cp
-        return P
+        nominal_P = 0.5 * rho * Area * (self.Uinf ** 3) * self.config.Cp
+        return P / nominal_P
 
     def simulate_vortex_field(self):
         self.vortex_field = simulate_vortex_evolution(self, self.field_params)
@@ -259,10 +255,13 @@ class WindFarm:
         self.turbines = [Turbine(t_config, self.field_params) for t_config in self.turbine_configs.turbines()]
         self.turbines = sorted(self.turbines, key=lambda t: t.pos[0])
 
-    def calculate_power_output(self):
+    def calculate_power_output(self, verbose=False):
         total_power = 0.0
         for t in self.turbines:
-            total_power += t.calculate_power_output()
+            P_i = t.calculate_power_output()
+            if verbose:
+                print(f"Turbine at pos={t.pos} m, yaw={t.yaw}°: Power = {P_i:.2f} W")
+            total_power += P_i
         return total_power
 
     def solve(self):
@@ -288,16 +287,17 @@ class WindFarm:
             # t.Whub = np.mean(W_local[rotor_mask])
             t.Uin = U_local
 
-            print(f"Simulating turbine at pos={t.pos} m, yaw={t.yaw}°")
+            # print(f"Simulating turbine at pos={t.pos} m, yaw={t.yaw}°")
             t.simulate_vortex_field()            # Create a mask for the rotor disk
             t.initialize_wake_field()
             t.calculate_deficit_field(upstream_turbines)
 
-    def save_results(self, out_path):
+    def save_results(self, out_path, limit_frames=None):
         os.makedirs(out_path, exist_ok=True)
         for i, t in enumerate(self.turbines):
             rows = []
-            for fi, frame in enumerate(t.wake_field):
+            data = t.wake_field[::max(1, len(t.wake_field)//limit_frames)] if limit_frames is not None else t.wake_field
+            for fi, frame in enumerate(data):
                 yloc = getattr(frame, "yloc", None)
                 zloc = getattr(frame, "zloc", None)
                 if yloc is None or zloc is None:

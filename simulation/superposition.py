@@ -224,10 +224,20 @@ def momentum_conserving_superposition(U_in, local_Uins, u_yz, v_yz=None, w_yz=No
     # 1. Calculate Individual Deficits (u_i_s)
     u_s = np.maximum(local_Uins - u_yz, 0) # shape (i_turbine, Ny, Nz)
 
-    # 2. Calculate Individual Convection Velocities (Uc_i)
-    u_c = np.sum(u_yz * u_s, axis=(1,2)) / np.sum(u_s, axis=(1,2)) # shape (i_turbine,)
+    deficit_sums = np.sum(u_s, axis=(1,2))
+    valid_mask = deficit_sums > 1e-6
 
-    U_c = np.max(u_c, axis=0)  # initial guess for Uc
+    if not np.any(valid_mask):
+        # No valid wakes, return freestream
+        V = np.sum(v_yz, axis=0) if v_yz is not None else None
+        W = np.sum(w_yz, axis=0) if w_yz is not None else None
+        return U_in, V, W
+
+    # 2. Calculate Individual Convection Velocities (Uc_i)
+    u_c = np.zeros(u_s.shape[0])
+    u_c[valid_mask] = np.sum(u_yz * u_s, axis=(1,2))[valid_mask] / deficit_sums[valid_mask] # shape (i_turbine,)
+
+    U_c = np.max(u_c[valid_mask], axis=0)  # initial guess for Uc
 
     # ---- ITERATION LOOP (Eq 2.7 & 2.9) ----
     for _ in range(max_iter):

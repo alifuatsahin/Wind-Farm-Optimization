@@ -11,21 +11,23 @@ class TurbineConfig:
     D: float
     Zhub: float
     Ct: float
+    Cp: float
     yaw: float
     TSR: float
 
 @dataclass
 class WindFarmConfig:
-    pos: np.ndarray = field(default_factory=lambda: np.array([[0.0, 0.0, 0.0], [1260*0.5, 0.0, 0.0], [1260.0*1.0, 0.0, 0.0]]))  # Turbine positions (x, y, z)
+    pos: np.ndarray = field(default_factory=lambda: np.array([[0.0, 0.0, 0.0]]))  # Turbine positions (x, y, z)
     D: np.ndarray = field(default_factory=lambda: np.array([126.0]))  # Rotor diameter(s)
     Zhub: np.ndarray = field(default_factory=lambda: np.array([90.0]))  # Hub height(s)
-    Ct: np.ndarray = field(default_factory=lambda: np.array([0.75]))  # Thrust coefficient(s)
+    Ct: np.ndarray = field(default_factory=lambda: np.array([0.8]))  # Thrust coefficient(s)
+    Cp: np.ndarray = field(default_factory=lambda: np.array([0.47]))  # Power coefficient(s)
     yaw: np.ndarray = field(default_factory=lambda: np.array([0.0]))  # Yaw angle(s)
     TSR: np.ndarray = field(default_factory=lambda: np.array([7.02]))  # Tip speed ratio(s)
 
     elevation_func: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = field(default=None, repr=False)
-    grid: InitVar[tuple] = None #(3,3,5,5)  # Optional grid definition: (n_rows, n_cols, spacing_x, spacing_y)
-    dist_type: str = "m"  # Distance type between the turbines: 'm (meters)' or 'D (x/D normalized over rotor diameters)'
+    grid: InitVar[tuple] = (3,3,5,5)  # Optional grid definition: (n_rows, n_cols, spacing_x, spacing_y)
+    dist_type: str = "D"  # Distance type between the turbines: 'm (meters)' or 'D (x/D normalized over rotor diameters)'
             
     def __post_init__(self, grid):
         self.pos = np.atleast_2d(np.asarray(self.pos, dtype=float))
@@ -51,6 +53,7 @@ class WindFarmConfig:
 
         self.Zhub = np.asarray(self.Zhub, dtype=float)
         self.Ct   = np.asarray(self.Ct, dtype=float)
+        self.Cp   = np.asarray(self.Cp, dtype=float)
         self.yaw  = np.asarray(self.yaw, dtype=float)
         self.TSR  = np.asarray(self.TSR, dtype=float)
 
@@ -60,6 +63,7 @@ class WindFarmConfig:
         self.D    = self._broadcast(self.D)
         self.Zhub = self._broadcast(self.Zhub)
         self.Ct   = self._broadcast(self.Ct)
+        self.Cp   = self._broadcast(self.Cp)
         self.yaw  = self._broadcast(self.yaw)
         self.TSR  = self._broadcast(self.TSR)
 
@@ -89,6 +93,7 @@ class WindFarmConfig:
             D = float(self._pick(self.D, idx)),
             Zhub = float(self._pick(self.Zhub, idx)),
             Ct = float(self._pick(self.Ct, idx)),
+            Cp = float(self._pick(self.Cp, idx)),
             yaw = float(self._pick(self.yaw, idx)),
             TSR = float(self._pick(self.TSR, idx)),
         )
@@ -109,9 +114,9 @@ class WindFarmConfig:
         if self.pos.ndim != 2 or self.pos.shape[1] != 3:
             raise ValueError(f"Inconsistent shape for 'pos': {self.pos.shape}, expected (N, 3).")
         
-        lengths = [len(self.D), len(self.Zhub), len(self.Ct), len(self.yaw), len(self.TSR)]
+        lengths = [len(self.D), len(self.Zhub), len(self.Ct), len(self.Cp), len(self.yaw), len(self.TSR)]
         max_len = max(lengths)
-        for name, length in zip(['D', 'Zhub', 'Ct', 'yaw', 'TSR'], lengths):
+        for name, length in zip(['D', 'Zhub', 'Ct', 'Cp', 'yaw', 'TSR'], lengths):
             if length != 1 and length != max_len:
                 raise ValueError(f"Inconsistent lengths in WindFarmConfig: '{name}' has length {length}, expected 1 or {max_len}.")
     
@@ -132,7 +137,7 @@ class FieldConfig:
     Zh: float = 80.0 # Height of the wind speed measurement
     WV: float = 0.0 # Vertical wind veer
     NuT_max: float = 0.05 # Maximum turbulent viscosity ratio
-    I_amb: float = 0.10 # Ambient turbulence intensity
+    I_amb: float = 0.072 # Ambient turbulence intensity
     Nv: int = 49
     z0: float = 0.03 # Surface roughness length (Open sea 0.0002, Flat land 0.03)
     max_X: float = 15.0 # Maximum downstream distance to simulate (in rotor diameters)
