@@ -144,7 +144,15 @@ class Optimizer:
         tr_ub = torch.clamp(x_center + weights * state.length / 2.0, 0.0, 1.0)
         return tr_lb, tr_ub, x_center
     
-    def _sample_candidates(self, x_center: torch.Tensor, tr_lb: torch.Tensor, tr_ub: torch.Tensor, n_candidates: int) -> torch.Tensor:
+    def _sample_candidates(
+            self, 
+            x_center: 
+            torch.Tensor, tr_lb: 
+            torch.Tensor, tr_ub: 
+            torch.Tensor, 
+            n_candidates: int
+        ) -> torch.Tensor:
+    
         """Sample candidate points within the trust region."""
         dim = tr_lb.shape[-1]
         sobol = SobolEngine(dim, scramble=True)
@@ -163,17 +171,17 @@ class Optimizer:
         return X_cand
 
     def _generate_batch(
-        self,
-        state: 'State',
-        acqf_type: str,
-        model: SingleTaskGP,  # GP model
-        X: torch.Tensor,  # Evaluated points on the domain [0, 1]^d
-        Y: torch.Tensor,  # Function values
-        batch_size: int,
-        num_restarts: int = 10, # Number of restarts for qEI optimization
-        raw_samples: int = 512, # Number of raw samples for qEI optimization
-        n_candidates: Optional[int] = None,  # Number of candidates for Thompson sampling
-    ) -> torch.Tensor:
+            self,
+            state: 'State',
+            acqf_type: str,
+            model: SingleTaskGP,  # GP model
+            X: torch.Tensor,  # Evaluated points on the domain [0, 1]^d
+            Y: torch.Tensor,  # Function values
+            batch_size: int,
+            num_restarts: int = 10, # Number of restarts for qEI optimization
+            raw_samples: int = 512, # Number of raw samples for qEI optimization
+            n_candidates: Optional[int] = None,  # Number of candidates for Thompson sampling
+        ) -> torch.Tensor:
         """Generate a new batch of points."""
         assert acqf_type in ['ts', 'ei'], "acqf_type must be 'ts' or 'ei'"
         assert X.min() >= 0.0
@@ -225,14 +233,16 @@ class Optimizer:
         
         return model
 
-    def optimize(self, n_init: int = 20, 
-                 max_evals: int = 100,
-                 batch_size: int = 1, 
-                 n_candidates: int = 5000,
-                 acquisition_func: str = 'ts',
-                 log_freq: int = 5,
-                 verbose: bool = True
-            ) -> Tuple[np.ndarray, float]:
+    def optimize(
+            self, 
+            n_init: int = 20, 
+            max_evals: int = 100,
+            batch_size: int = 1, 
+            n_candidates: int = 5000,
+            acquisition_func: str = 'ts',
+            log_freq: int = 5,
+            verbose: bool = True
+        ) -> Tuple[np.ndarray, float]:
         
         """
         Run the Bayesian Optimization loop with trust region and restarts.
@@ -262,8 +272,6 @@ class Optimizer:
         if verbose:
             print(f"Starting optimization on device: {self.device}")
             print(f"Max evaluations: {max_evals}\n")
-            # Initial Sobol sampling (only once at the beginning)
-            print(f"=== Initial Sobol Sampling ({n_init} points) ===")
 
         n_evals = 0
         
@@ -273,12 +281,23 @@ class Optimizer:
             self._restart()
 
             # Generate and evaluate initial points
+            if verbose:
+                print(f"\n{'='*60}")
+                print(f"Starting new trust region at eval {n_evals}/{max_evals}")
+                print(f"=== Initial Sobol Sampling ({n_init} points) ===")
+                print(f"{'='*60}\n")
+
             n_init_curr = min(n_init, max_evals - n_evals)
             init_X = self._get_initial_points(n_init_curr)
-            init_Y = torch.tensor(
-                [self._evaluate_objective(x.cpu().numpy()) for x in init_X], 
-                dtype=self.dtype, device=self.device
-            ).unsqueeze(-1)
+            init_Y = torch.empty((n_init_curr, 1), dtype=self.dtype, device=self.device)
+            for i, x in enumerate(init_X):
+                init_Y[i] = torch.tensor(
+                    self._evaluate_objective(x.cpu().numpy()), 
+                    dtype=self.dtype, device=self.device
+                )
+                if verbose and (i + 1) % log_freq == 0:
+                    print(f"Evaluated {i + 1}/{n_init_curr} initial points")
+
 
             # Initialize trust region state
             state = State(

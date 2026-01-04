@@ -32,14 +32,14 @@ def yaw_optimization():
     )
 
     # Plot results
-    optimizer.plot_optimization_history(save_path='Figures/yaw_optimization1.png')
+    optimizer.plot_optimization_history(save_path='Figures/yaw_optimization.png')
     
     # Plot trust region evolution
     optimizer.plot_trust_region_snapshots(
         iterations=[10, 30, 60, 90],
         param_idx_x=0,
         param_idx_y=1,
-        save_path='Figures/yaw_trust_region1.png'
+        save_path='Figures/yaw_trust_region.png'
     )
     
     # Plot GP posterior (works with both TS and EI)
@@ -47,7 +47,7 @@ def yaw_optimization():
         iterations=[10, 30, 60, 90],
         param_idx_x=0,
         param_idx_y=1,
-        save_path='Figures/yaw_gp_posterior1.png'
+        save_path='Figures/yaw_gp_posterior.png'
     )
     
     # Plot acquisition function (only for EI)

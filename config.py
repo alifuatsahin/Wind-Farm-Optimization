@@ -22,7 +22,7 @@ class WindFarmConfig:
     Zhub: np.ndarray = field(default_factory=lambda: np.array([90.0]))  # Hub height(s)
     Ct: np.ndarray = field(default_factory=lambda: np.array([0.8]))  # Thrust coefficient(s)
     Cp: np.ndarray = field(default_factory=lambda: np.array([0.47]))  # Power coefficient(s)
-    yaw: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))  # Yaw angle(s)
+    yaw: np.ndarray = field(default_factory=lambda: np.array([30.0, 12.0, 0.0]))  # Yaw angle(s)
     TSR: np.ndarray = field(default_factory=lambda: np.array([7.02]))  # Tip speed ratio(s)
 
     elevation_func: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = field(default=None, repr=False)
