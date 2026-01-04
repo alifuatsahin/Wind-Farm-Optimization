@@ -66,55 +66,57 @@ def interpolate_local_velocity_field(turbine, X, yloc, zloc, default):
 
     if X <= positions[0]:
         return _interp_field(vortex_data_list[0].U, source_yloc, source_zloc, yloc, zloc, default=default)
-    if X >= positions[-1]:
+    elif X >= positions[-1]:
         return _interp_field(vortex_data_list[-1].U, source_yloc, source_zloc, yloc, zloc, default=default)
     
     idx = np.searchsorted(positions, X)
     i0 = idx - 1
     i1 = idx
     X0, X1 = positions[i0], positions[i1]
-    # safe alpha (handles zero interval)
     alpha = 0.0 if X1 == X0 else (X - X0) / (X1 - X0)
 
     d0, d1 = vortex_data_list[i0], vortex_data_list[i1]
 
-    # linear interp of arrays (works when shapes match)
+    # linear interp of arrays
     U = (1 - alpha) * d0.U + alpha * d1.U
 
     Uinterp = _interp_field(U, source_yloc, source_zloc, yloc, zloc, default=default)
     Uin_interp = _interp_field(turbine.Uin, source_yloc, source_zloc, yloc, zloc, default=default)
+
     return Uinterp, Uin_interp
 
-def interpolate_vortex_field(turbine, X, yloc, zloc, target_pos, default):
+def interpolate_vortex_field(turbine, target_pos, yloc, zloc, default):
     """Interpolate vortex field at position X from a list of VortexField objects."""
     vortex_data_list = turbine.wake_field
+    X = target_pos[0]
 
     positions = np.array([v.X for v in vortex_data_list])
-
-    if X <= positions[0]:
-        return vortex_data_list[0]
-    if X >= positions[-1]:
-        return vortex_data_list[-1]
-    
-    idx = np.searchsorted(positions, X)
-    i0 = idx - 1
-    i1 = idx
-    X0, X1 = positions[i0], positions[i1]
-    # safe alpha (handles zero interval)
-    alpha = 0.0 if X1 == X0 else (X - X0) / (X1 - X0)
-
-    d0, d1 = vortex_data_list[i0], vortex_data_list[i1]
-
-    # linear interp of arrays (works when shapes match)
-    V = (1 - alpha) * d0.V + alpha * d1.V
-    W = (1 - alpha) * d0.W + alpha * d1.W
-    U = (1 - alpha) * d0.U + alpha * d1.U
 
     source_yloc = turbine.yloc + turbine.pos[1]
     source_zloc = turbine.zloc + turbine.pos[2]
 
     target_yloc = yloc + target_pos[1]
     target_zloc = zloc + target_pos[2]
+
+    # Determine which wake field to use
+    if X <= positions[0]:
+        d = vortex_data_list[0]
+        U, V, W = d.U, d.V, d.W
+    elif X >= positions[-1]:
+        d = vortex_data_list[-1]
+        U, V, W = d.U, d.V, d.W
+    else:
+        # Interpolate in X direction
+        idx = np.searchsorted(positions, X)
+        i0 = idx - 1
+        i1 = idx
+        X0, X1 = positions[i0], positions[i1]
+        alpha = 0.0 if X1 == X0 else (X - X0) / (X1 - X0)
+
+        d0, d1 = vortex_data_list[i0], vortex_data_list[i1]
+        V = (1 - alpha) * d0.V + alpha * d1.V
+        W = (1 - alpha) * d0.W + alpha * d1.W
+        U = (1 - alpha) * d0.U + alpha * d1.U
 
     Uinterp = _interp_field(U, source_yloc, source_zloc, target_yloc, target_zloc, default=default)
     Vinterp = _interp_field(V, source_yloc, source_zloc, target_yloc, target_zloc)
@@ -143,7 +145,7 @@ def _interp_field(field, y_source, z_source, target_yloc, target_zloc, default=N
         mask = np.isnan(result)
         result[mask] = default[mask]
     else:
-        # If no default, replace NaNs with 0.0 or keep them
+        # If no default, replace NaNs with 0.0
         result = np.nan_to_num(result, nan=0.0)
     return result
 
@@ -153,18 +155,28 @@ def get_local_velocity_field(config, wind_farm, method='MCS'):
     upstream_turbines = [t for t in wind_farm.turbines if t.pos[0] < config.pos[0]]
 
     # Freestream inflow at that turbine plane
-    U_base = config._init_Uin() # shape (Ny, Nz)
+    U_base = config.init_Uin() # shape (Ny, Nz)
     V_base = np.zeros_like(U_base)
     W_base = np.zeros_like(U_base)
 
     if not upstream_turbines:
         return U_base, V_base, W_base
 
-    # Get wake fields at this x-plane
-    wake_fields = [interpolate_vortex_field(t, config.pos[0], config.yloc, config.zloc, config.pos, config._init_Uin()) 
+    # Get wake fields at this x-plane (interpolated to downstream grid)
+    wake_fields = [interpolate_vortex_field(t, config.pos, config.yloc, config.zloc, config.init_Uin()) 
                    for t in upstream_turbines]
     
-    local_Uins = np.array([t.Uin for t in upstream_turbines])
+    # Interpolate local_Uins to downstream grid to match u_yz spatial locations
+    local_Uins_interpolated = []
+    for t in upstream_turbines:
+        source_yloc = t.yloc + t.pos[1]
+        source_zloc = t.zloc + t.pos[2]
+        target_yloc = config.yloc + config.pos[1]
+        target_zloc = config.zloc + config.pos[2]
+        Uin_interp = _interp_field(t.Uin, source_yloc, source_zloc, target_yloc, target_zloc, default=U_base)
+        local_Uins_interpolated.append(Uin_interp)
+    
+    local_Uins = np.array(local_Uins_interpolated)
     u_yz = np.array([wf.U for wf in wake_fields])
     v_yz = np.array([wf.V for wf in wake_fields])
     w_yz = np.array([wf.W for wf in wake_fields])

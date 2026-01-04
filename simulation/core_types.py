@@ -23,9 +23,10 @@ class Turbine:
         self.vortex_field = None  # to be filled after simulation
         self.wake_field = None  # to be filled after wake calculation
         self.dl = None  # grid spacing in y direction
+        self.calculation_domain = 0.0  # to be set by WindFarm
 
-        self.Ct = config.Ct * np.cos(np.deg2rad(self.yaw))**1.8  # Adjusted thrust coefficient
-        self.Cp = config.Cp * np.cos(np.deg2rad(self.yaw))**1.88  # Adjusted power coefficient
+        self.Ct = config.Ct
+        self.Cp = config.Cp * np.cos(self.beta)**1.88  # Adjusted power coefficient
 
         self.phi = np.linspace(-np.pi, np.pi, self.Nv)
         self.dphi = abs(self.phi[1] - self.phi[0])
@@ -34,7 +35,7 @@ class Turbine:
         self.V = np.zeros_like(self.yloc)
         self.W = np.zeros_like(self.zloc)
 
-        self.Uin = self._init_Uin()
+        self.Uin = self.init_Uin()
         self.Uhub = self._init_Uhub()
 
     def _initialize_grid(self):
@@ -62,17 +63,17 @@ class Turbine:
     def _compute_dgamma(self):
         alpha = np.arcsin(self.Ut[:, 0] / np.sqrt(np.sum(self.Ut ** 2, axis=1)))  # Fixed indexing
         dgamma = np.sin(alpha) * self.dphi
-        gamma_ref = self.gamma0 * 0.44
-        dgamma = gamma_ref / np.sum(dgamma[1:]) * dgamma  # Use np.sum
+        gamma_ref = self.gamma0 * 0.45
+        dgamma = gamma_ref / np.sum(dgamma[1:]) * dgamma
         return dgamma
 
     def _init_Uhub(self):
-        Uin = self._init_Uin()
+        Uin = self.init_Uin()
         rotor_mask = np.sqrt((self.yloc)**2 + (self.zloc - self.Zhub)**2) <= (self.D / 2)
         Uhub = np.mean(Uin[rotor_mask])
         return Uhub
 
-    def _init_Uin(self):
+    def init_Uin(self):
         zsafe = np.maximum(self.zloc, self.field_params.z0 + 1e-6)  # avoid log(0) issues
         Uin = self.Uh * (np.log(zsafe / self.field_params.z0) / np.log(self.Zh / self.field_params.z0))
         return Uin
@@ -117,11 +118,9 @@ class Turbine:
     def dgamma(self):
         return self._compute_dgamma()        
     
-    def calculate_power_output(self):
-        rho = 1.225
-        Area = np.pi * (self.R ** 2)
-        P = 0.5 * rho * Area * (self.Uhub ** 3) * self.Cp
-        nominal_P = 0.5 * rho * Area * (self.Uinf ** 3) * self.config.Cp
+    def calculate_efficiency(self):
+        P = (self.Uhub ** 3) * self.Cp
+        nominal_P = (self.Uinf ** 3) * self.config.Cp
         return P / nominal_P
 
     def simulate_vortex_field(self):
@@ -149,9 +148,8 @@ class Turbine:
     def calculate_deficit_field(self, upstream_turbines, max_steps=10000):
         # Time-marching reduced-order model
         self.wake_field = [self.vortex_field[0]]
-        max_X = self.field_params.max_X * self.D
 
-        while self.wake_field[-1].X <= max_X:
+        while self.wake_field[-1].X <= self.calculation_domain:
             NuT = NuT_model(self.wake_field[-1], self, self.field_params, upstream_turbines)
             dt = min(self.dl / self.Uhub, 0.25 * self.D / self.Uhub) 
             dt = min(dt, (self.dl**2) / (2 * (NuT + 1e-6)))  # stability condition
@@ -253,19 +251,36 @@ class WindFarm:
         """
         distances = [abs(position - center) for center in cluster_centers]
         return distances.index(min(distances))
+    
+    def _get_calculation_domain(self):
+        """
+        Calculate the downstream domain for each turbine as the distance to the furthest downstream turbine,
+        with an additional buffer proportional to the rotor diameter.
+        """
+        if not self.turbines:
+            return
+        x_positions = [t.pos[0] for t in self.turbines]
+        max_x = max(x_positions)
+        buffer = self.field_params.min_X * self.turbines[0].D
+        for t in self.turbines:
+            t.calculation_domain = (max_x + buffer - t.pos[0])
 
     def _construct_wind_farm(self):
         self.turbines = [Turbine(t_config, self.field_params) for t_config in self.turbine_configs.turbines()]
         self.turbines = sorted(self.turbines, key=lambda t: t.pos[0])
+        self._get_calculation_domain()
 
-    def calculate_power_output(self, verbose=False):
-        total_power = 0.0
+    def calculate_efficiency(self, verbose=False):
+        total_eff = 0.0
         for t in self.turbines:
-            P_i = t.calculate_power_output()
+            eta = t.calculate_efficiency()
             if verbose:
-                print(f"Turbine at pos={t.pos} m, yaw={t.yaw}°: Power = {P_i:.2f} W")
-            total_power += P_i
-        return total_power / len(self.turbines)
+                print(f"Turbine at pos={t.pos} m, yaw={t.yaw}°: Efficiency = {eta * 100:.2f} %")
+            total_eff += eta
+        total_eff /= len(self.turbines)
+        if verbose:
+            print(f"Wind Farm Average Efficiency: {total_eff * 100:.2f} %")
+        return total_eff
 
     def solve(self):
         for t in self.turbines:

@@ -23,7 +23,7 @@ class Simulation:
         plot_farm_deficit_map(self.wind_farm, save_path=save_path)
 
     def calculate_objective(self, verbose=False):
-        return self.wind_farm.calculate_power_output(verbose=verbose)
+        return self.wind_farm.calculate_efficiency(verbose=verbose)
 
     def run(self):
         self.wind_farm.solve()

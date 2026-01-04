@@ -46,7 +46,7 @@ def simulate_vortex_evolution(config, field_params, total_steps=1000):
         t += dt
         
         # Check if simulation time exceeded
-        if t * Uhub / D > 2 * field_params.max_X:
+        if t * Uhub / D > 1.5 * config.calculation_domain / D:
             break
 
         new_Y, new_Z = RK4_step(curr.Y, curr.Z, V_induced, W_induced, Circ, Rv, dt)
@@ -229,7 +229,7 @@ def _oseenlamb(Circ, Y, Z, Rv, yloc, zloc):
     dZ = zloc[np.newaxis, :, :] - Z
     r2 = dY**2 + dZ**2
 
-    r2_safe = np.where(r2 == 0, 1e-18, r2)  # Prevent division by zero
+    r2_safe = np.maximum(r2, 1e-8)  # Prevent division by zero
     prefactor = (Circ / (2 * np.pi * r2_safe)) * (1 - np.exp(-r2 / Rv**2))
 
     V = np.sum(-prefactor * dZ, axis=0)

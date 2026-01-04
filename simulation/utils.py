@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import PillowWriter
 from matplotlib.ticker import FormatStrFormatter
 import matplotlib.patheffects as patheffects
-import pandas as pd
 import numpy as np
 import os
 
@@ -13,17 +12,13 @@ def NuT_model(wake_field, config, field_params, upstream_turbines):
     """Compute the turbulent viscosity Nu_T based on the distance from the hub."""
 
     I_amb = field_params.I_amb  # ambient turbulence intensity
-    m = 2.5
+    m = 2.0
     turb_dist = wake_field.X
     I = I_amb ** m # initialize as ambient turbulence intensity
     delta_I = lambda turbine, x_val: 0.73 * turbine.a ** 0.8325 * I_amb ** (-0.03) * (x_val / turbine.D) ** -0.32
 
-    I_norm = np.sqrt(field_params.I_amb ** 2 + delta_I(config, 3 * config.D) ** m)
-
-    if wake_field.X > 3 * config.D:
-        I += delta_I(config, wake_field.X) ** m
-    else:
-        I += delta_I(config, 3 * config.D) ** m
+    self_I = delta_I(config, max(3 * config.D, wake_field.X))
+    I += self_I ** m
 
     for t in upstream_turbines:
         dist = wake_field.X + (config.pos[0] - t.pos[0])
@@ -31,11 +26,10 @@ def NuT_model(wake_field, config, field_params, upstream_turbines):
         I += I_add ** m
 
     I_total = I ** (1/m)
+    f_TI = I_total / I_amb * 0.4
 
-    turb_dist += config.D * I_total / I_norm if len(upstream_turbines) > 0 else 0.0
-
-    NuT_hat = min(0.03, turb_dist / config.D * 0.006) * config.a * config.Uinf * config.D
-    NuT_hat = NuT_hat * I_total / I_norm
+    NuT_hat = min(0.05, turb_dist / config.D * 0.05 / 5) * config.a * config.Uinf * config.D
+    NuT_hat = NuT_hat * f_TI
 
     return NuT_hat
 
@@ -75,12 +69,12 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     y_slice_val = wind_farm.turbines[0].pos[1]  # Cross-stream slice at T0 for side view
     z_min_plot = 0.0  # Minimum z for plotting ground
 
-    max_wake_len = wind_farm.field_params.max_X * D
+    min_wake_len = wind_farm.field_params.min_X * D
     max_wake_wid = wind_farm.field_params.max_Y * D
     max_wake_hgt = wind_farm.field_params.max_Z * D
     
     x_min = min(all_x) - 2 * D
-    x_max = max(all_x) + 5 * D
+    x_max = max(all_x) + min_wake_len
     y_min = min(all_y) - max_wake_wid
     y_max = max(all_y) + max_wake_wid
     z_min = 0.0
@@ -113,7 +107,7 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
         for t in wind_farm.turbines:
             dist = x_global - t.pos[0]
             
-            if dist > 0 and dist < wind_farm.field_params.max_X * t.D:
+            if dist > 0 and dist < t.calculation_domain:
                 # Interpolate returns a (Y, Z) slice
                 u_local_abs, u_in_local = interpolate_local_velocity_field(
                     t, dist, Y_loc, Z_loc, default=U_in
@@ -156,12 +150,14 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
         
     cbar1 = fig.colorbar(im1, ax=ax1)
     cbar1.set_label(r'Normalized Velocity $U / U_{hub}$')
+    cbar1.ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
     ax1.set_xlabel('Global Streamwise X (m)')
     ax1.set_ylabel('Global Cross-stream Y (m)')
     ax1.set_title(f'Top View (Z = {Zhub_ref:.1f}m)')
 
     cbar2 = fig.colorbar(im2, ax=ax2)
     cbar2.set_label(r'Normalized Velocity $U / U_{hub}$')
+    cbar2.ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
     ax2.set_xlabel('Global Streamwise X (m)')
     ax2.set_ylabel('Global Vertical Z (m)')
     ax2.set_title('Side View (Y = 0m)')
