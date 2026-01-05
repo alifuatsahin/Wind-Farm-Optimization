@@ -490,11 +490,11 @@ Contributions are welcome! Areas for improvement:
 
 ## References
 
-1. Vortex Particle Methods for wake modeling
+1. A Point Vortex Transportation Model for Yawed Wind Turbine Wakes - Zong et al. (2020)
 2. Trust Region Bayesian Optimization (TuRBO) - Eriksson et al. (2019)
 3. Thompson Sampling for Bayesian Optimization - Hernández-Lobato et al. (2014)
-4. Momentum-Conserving Superposition (MCS) for multiple wakes
-5. BoTorch: A Framework for Efficient Monte-Carlo Bayesian Optimization
+4. A Momentum-Conserving Wake Superposition Method for Wind Farm Power Prediction - Zong et al. (2020)
+5. BoTorch: A Framework for Efficient Monte-Carlo Bayesian Optimization - Balandat et al. (2020)
 
 ## License
 
