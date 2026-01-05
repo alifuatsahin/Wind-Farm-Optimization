@@ -478,7 +478,7 @@ def parallel_optimization(n_workers=4):
 5. **Trust Region**: Automatically adapts - expands on success, shrinks on failure
 6. **GPU Acceleration**: Set `device='cuda'` if available (optimizer runs on GPU, simulation on CPU)
 7. **Logging**: Adjust `log_freq` parameter to control console output frequency
-```
+
 
 ## Contributing
 
