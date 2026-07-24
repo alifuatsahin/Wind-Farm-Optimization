@@ -1,3 +1,6 @@
+import datetime
+import os
+
 import numpy as np
 from dataclasses import asdict, dataclass, field, InitVar
 from typing import Iterator, Callable, Optional
@@ -17,25 +20,30 @@ class TurbineConfig:
 
 @dataclass
 class WindFarmConfig:
-    pos: np.ndarray = field(default_factory=lambda: np.array([[0.0, 0.0, 0.0]]))  # Turbine positions (x, y, z)
+    pos: Optional[np.ndarray] = None  # Explicit turbine positions (x, y, z); leave unset to use 'grid' instead
     D: np.ndarray = field(default_factory=lambda: np.array([126.0]))  # Rotor diameter(s)
     Zhub: np.ndarray = field(default_factory=lambda: np.array([90.0]))  # Hub height(s)
     Ct: np.ndarray = field(default_factory=lambda: np.array([0.8]))  # Thrust coefficient(s)
     Cp: np.ndarray = field(default_factory=lambda: np.array([0.47]))  # Power coefficient(s)
-    yaw: np.ndarray = field(default_factory=lambda: np.array([30.0, 12.0, 0.0]))  # Yaw angle(s)
+    yaw: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))  # Yaw angle(s)
     TSR: np.ndarray = field(default_factory=lambda: np.array([7.02]))  # Tip speed ratio(s)
 
     elevation_func: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = field(default=None, repr=False)
-    grid: InitVar[tuple] = (3,3,5,5)  # Optional grid definition: (n_rows, n_cols, spacing_x, spacing_y)
+    grid: InitVar[tuple] = (1,3,5,5)  # Optional grid definition: (n_rows, n_cols, spacing_x, spacing_y); ignored if 'pos' is given
     dist_type: str = "D"  # Distance type between the turbines: 'm (meters)' or 'D (x/D normalized over rotor diameters)'
-            
-    def __post_init__(self, grid):
-        self.pos = np.atleast_2d(np.asarray(self.pos, dtype=float))
-        self.D = np.asarray(self.D, dtype=float)
 
-        # initialize positions from grid if specified
+    def __post_init__(self, grid):
+        self.D = np.asarray(self.D, dtype=float)
         D_ref = self.D[0]
-        if grid:
+
+        # Explicit 'pos' always takes priority over 'grid' -- this also makes save_yaml/load_yaml
+        # round-trip correctly, since a reloaded config always has concrete positions already resolved.
+        if self.pos is not None:
+            self.pos = np.atleast_2d(np.asarray(self.pos, dtype=float))
+            if self.dist_type == 'D':
+                self.pos = self.pos * D_ref
+                self.dist_type = 'm'
+        elif grid:
             rows, cols, spacing_x, spacing_y = grid
             if len(self.D) > 1:
                 print("WARNING: Initializing positions from grid with multiple rotor diameters. Using first turbine's D as reference.")
@@ -45,9 +53,8 @@ class WindFarmConfig:
             xv, yv = np.meshgrid(x_coords, y_coords)
             self.pos = np.column_stack((xv.ravel(), yv.ravel(), np.zeros(xv.size)))
             self.dist_type = 'm'
-        elif self.dist_type == 'D':
-            self.pos *= D_ref
-            self.dist_type = 'm'
+        else:
+            raise ValueError("WindFarmConfig requires either 'pos' or 'grid' to be specified.")
 
         self.update_elevation()
 
@@ -133,14 +140,14 @@ class WindFarmConfig:
 
 @dataclass(frozen=True)
 class FieldConfig:
-    Uh: float = 8.55 # Measured wind speed
+    Uh: float = 10.0 # Measured wind speed
     Zh: float = 80.0 # Height of the wind speed measurement
     WV: float = 0.0 # Vertical wind veer
     NuT_max: float = 0.025 # Maximum turbulent viscosity ratio
     I_amb: float = 0.072 # Ambient turbulence intensity
     Nv: int = 49
     z0: float = 0.03 # Surface roughness length (Open sea 0.0002, Flat land 0.03)
-    min_X: float = 5.0 # Minimum downstream distance to simulate (in rotor diameters)
+    min_X: float = 7.0 # Minimum downstream distance to simulate (in rotor diameters)
     max_Y: float = 3.0 # Maximum lateral distance to simulate (in rotor diameters)
     max_Z: float = 2.0 # Maximum vertical distance to simulate (in rotor diameters)
     n_grids: int = 20 # Number of grids in each direction
@@ -153,7 +160,17 @@ class Config:
     Field: FieldConfig = field(default_factory=FieldConfig)
 
     # File output
-    out_path: str = "Data/"
+    out_dir: str = "Data"            # root directory all runs are stored under
+    run_name: Optional[str] = None   # explicit run folder name; auto-timestamped if left as None
+
+    def __post_init__(self):
+        if self.run_name is None:
+            self.run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+
+    @property
+    def out_path(self) -> str:
+        """Directory this run's figures/ and results/ subfolders are saved under."""
+        return os.path.join(self.out_dir, self.run_name)
 
     def print(self):
         """Print only base dataclass fields (those with init=True)."""
@@ -182,7 +199,8 @@ class Config:
         return cls(
             WindFarm=WindFarmConfig(**data['WindFarm']),
             Field=FieldConfig(**data['Field']),
-            out_path=data.get('out_path', "Data/")
+            out_dir=data.get('out_dir', "Data"),
+            run_name=data.get('run_name'),
         )
 
     def __repr__(self):

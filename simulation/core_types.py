@@ -116,7 +116,7 @@ class Turbine:
 
     @property
     def dgamma(self):
-        return self._compute_dgamma()        
+        return self._compute_dgamma()
     
     def calculate_efficiency(self):
         P = (self.Uhub ** 3) * self.Cp

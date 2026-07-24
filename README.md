@@ -150,7 +150,8 @@ wf_config = WindFarmConfig(
         [1260.0, 0.0, 0.0]    # Turbine 3 (10D downstream)
     ]),
     D=np.array([126.0, 126.0, 126.0]),
-    yaw=np.array([15.0, 0.0, -10.0])
+    yaw=np.array([15.0, 0.0, -10.0]),
+    dist_type='m'  # pos values above are already in meters, not rotor diameters
 )
 ```
 

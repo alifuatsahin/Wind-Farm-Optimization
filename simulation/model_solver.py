@@ -19,16 +19,16 @@ def advance_wake_field(data, dt, NuT, config, field_params):
 
     # prediction step
     dUdY, dUdZ = np.gradient(U, yloc[:, 0], zloc[0, :])   # dUdY = ∂(U)/∂y, dUdZ = ∂(U)/∂z
-    # Gradient of Uin (Background Shear)
-    _, dUin_dZ = np.gradient(Uin, yloc[:, 0], zloc[0, :], axis=(0, 1))
+    # Gradient of Uin (Background Shear) -- only the z-direction is used downstream
+    dUin_dZ = np.gradient(Uin, zloc[0, :], axis=1)
 
     Sxy = dUdY
     Sxz = dUdZ
 
-    # derivatives of strains:
-    dSxydY, _ = np.gradient(Sxy, yloc[:, 0], zloc[0, :])   # first output = ∂Sxy/∂y
-    _, dSxzdZ = np.gradient(Sxz, yloc[:, 0], zloc[0, :])   # second output = ∂Sxz/∂z
-    _, d2Uin_dZ2 = np.gradient(dUin_dZ, yloc[:, 0], zloc[0, :], axis=(0, 1))
+    # derivatives of strains -- each only needs its own axis, not both
+    dSxydY = np.gradient(Sxy, yloc[:, 0], axis=0)   # = ∂Sxy/∂y
+    dSxzdZ = np.gradient(Sxz, zloc[0, :], axis=1)   # = ∂Sxz/∂z
+    d2Uin_dZ2 = np.gradient(dUin_dZ, zloc[0, :], axis=1)
 
     # assemble numerator
     numer = -V * dUdY - W * dUdZ + NuT * dSxydY + NuT * dSxzdZ - NuT * d2Uin_dZ2
@@ -43,8 +43,8 @@ def advance_wake_field(data, dt, NuT, config, field_params):
     Sxz = dUdZ
     Sxy = dUdY
 
-    dSxydY, _ = np.gradient(Sxy, yloc[:, 0], zloc[0, :])   # first output = ∂Sxy/∂y
-    _, dSxzdZ = np.gradient(Sxz, yloc[:, 0], zloc[0, :])   # second output = ∂Sxz/∂z
+    dSxydY = np.gradient(Sxy, yloc[:, 0], axis=0)   # = ∂Sxy/∂y
+    dSxzdZ = np.gradient(Sxz, zloc[0, :], axis=1)   # = ∂Sxz/∂z
     numer = -V * dUdY - W * dUdZ + NuT * dSxydY + NuT * dSxzdZ - NuT * d2Uin_dZ2
     denom_safe = np.maximum(Up, 1e-6)  # prevent division by zero
 

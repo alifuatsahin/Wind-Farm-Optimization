@@ -9,29 +9,43 @@ import os
 from .superposition import superpose, interpolate_local_velocity_field
 
 def NuT_model(wake_field, config, field_params, upstream_turbines):
-    """Compute the turbulent viscosity Nu_T based on the distance from the hub."""
+    """
+    Turbulent eddy viscosity closure for a single turbine's wake, following the
+    piecewise-linear model of Du, Zhu, Li, Ge, Li & Liu (2025), "Modeling of
+    turbulence kinetic energy added by wind-turbine wakes in the atmospheric
+    boundary layer", arXiv:2511.19881, Eq. (26):
 
-    I_amb = field_params.I_amb  # ambient turbulence intensity
-    m = 2.0
-    turb_dist = wake_field.X
-    I = I_amb ** m # initialize as ambient turbulence intensity
-    delta_I = lambda turbine, x_val: 0.73 * turbine.a ** 0.8325 * I_amb ** (-0.03) * (x_val / turbine.D) ** -0.32
+        NuT(x) / (U0*D) = (kv1*TI - kv0) * x/D,      x/D <= xv1/TI
+                         = (kv1*TI - kv0) * xv1/TI,   x/D >  xv1/TI
 
-    self_I = delta_I(config, max(3 * config.D, wake_field.X))
-    I += self_I ** m
+    with kv1=0.05, kv0=0.001, xv1=0.5 (paper's fitted constants). Extended here
+    to multi-turbine wakes by accumulating turbulence intensity across upstream
+    wakes via the Crespo & Hernandez (1996) added-turbulence correlation, and by
+    measuring x/D relative to 'config' itself (whose wake is being marched) --
+    the paper's model was validated only for a stand-alone turbine with a fixed
+    ambient TI, so this multi-turbine accumulation is an extension, not something
+    the source paper tested directly.
+    """
+    kv1, kv0, xv1 = 0.05, 0.001, 0.5
+    IU_TO_TI = 1.28  # Du et al. (2025), Sec 2.3: Iu ~ 1.28 * TI under neutral conditions
+    m = 2
 
+    x_global = config.pos[0] + wake_field.X
+
+    Iu_sq = field_params.I_amb ** m
     for t in upstream_turbines:
-        dist = wake_field.X + (config.pos[0] - t.pos[0])
-        I_add = delta_I(t, dist)
-        I += I_add ** m
+        x_D = (x_global - t.pos[0]) / t.D
+        if x_D >= 3.0:
+            delta_I = 0.73 * t.a ** 0.8325 * field_params.I_amb ** (-0.03) * x_D ** (-0.32)
+            Iu_sq += (delta_I * t.Uhub / config.Uhub) ** m
 
-    I_total = I ** (1/m)
-    f_TI = I_total / I_amb * 0.4
+    TI_total = (Iu_sq ** (1 / m)) / IU_TO_TI
 
-    NuT_hat = min(0.05, turb_dist / config.D * 0.05 / 5) * config.a * config.Uinf * config.D
-    NuT_hat = NuT_hat * f_TI
+    x_D = wake_field.X / config.D
+    x_D_threshold = xv1 / TI_total
+    coeff = max(kv1 * TI_total - kv0, 0.0)
 
-    return NuT_hat
+    return coeff * min(x_D, x_D_threshold) * config.Uhub * config.D
 
 def smooth_2d(U, kernel_size=3, method='gaussian'):
     """
@@ -137,7 +151,7 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     # XY Grid
     X_grid_xy, Y_grid_xy = np.meshgrid(X_vis, Y_vis) 
     vmin, vmax = 0.2, 1.2
-    levels = np.linspace(vmin, vmax, 15)
+    levels = np.linspace(vmin, vmax, 50)
     
     im1 = ax1.contourf(X_grid_xy, Y_grid_xy, U_xy_map / Uhub_ref, 
                        cmap='bwr', levels=levels, vmin=vmin, vmax=vmax, extend='both')
@@ -203,7 +217,7 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     plt.tight_layout()
 
     if save_path:
-        dir_name = os.path.dirname(save_path)
+        dir_name = save_path
         grid = wind_farm.get_grid()
         img_name = f"farm_map_{grid['rows']}x{grid['cols']}.png"
         if dir_name and not os.path.exists(dir_name):
