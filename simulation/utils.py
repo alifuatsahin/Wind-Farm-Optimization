@@ -1,14 +1,17 @@
 from scipy.ndimage import uniform_filter, gaussian_filter
 import matplotlib.pyplot as plt
 from matplotlib.animation import PillowWriter
+from matplotlib.colors import TwoSlopeNorm
 from matplotlib.ticker import FormatStrFormatter
 import matplotlib.patheffects as patheffects
 import numpy as np
+import jax.numpy as jnp
 import os
 
 from .superposition import superpose, interpolate_local_velocity_field
+from .viz_style import SURFACE, INK_PRIMARY, INK_SECONDARY, style_figure, style_axes, style_colorbar
 
-def NuT_model(wake_field, config, field_params, upstream_turbines):
+def NuT_model(wake_field, config, I_amb, up_a, up_D, up_pos_x, up_Uhub, up_mask):
     """
     Turbulent eddy viscosity closure for a single turbine's wake, following the
     piecewise-linear model of Du, Zhu, Li, Ge, Li & Liu (2025), "Modeling of
@@ -32,20 +35,19 @@ def NuT_model(wake_field, config, field_params, upstream_turbines):
 
     x_global = config.pos[0] + wake_field.X
 
-    Iu_sq = field_params.I_amb ** m
-    for t in upstream_turbines:
-        x_D = (x_global - t.pos[0]) / t.D
-        if x_D >= 3.0:
-            delta_I = 0.73 * t.a ** 0.8325 * field_params.I_amb ** (-0.03) * x_D ** (-0.32)
-            Iu_sq += (delta_I * t.Uhub / config.Uhub) ** m
+    x_D_up = (x_global - up_pos_x) / up_D
+    qualifies = up_mask & (x_D_up >= 3.0)
+    delta_I = 0.73 * up_a ** 0.8325 * I_amb ** (-0.03) * x_D_up ** (-0.32)
+    contribution = jnp.where(qualifies, (delta_I * up_Uhub / config.Uhub) ** m, 0.0)
+    Iu_sq = I_amb ** m + jnp.sum(contribution)
 
     TI_total = (Iu_sq ** (1 / m)) / IU_TO_TI
 
     x_D = wake_field.X / config.D
     x_D_threshold = xv1 / TI_total
-    coeff = max(kv1 * TI_total - kv0, 0.0)
+    coeff = jnp.maximum(kv1 * TI_total - kv0, 0.0)
 
-    return coeff * min(x_D, x_D_threshold) * config.Uhub * config.D
+    return coeff * jnp.minimum(x_D, x_D_threshold) * config.Uhub * config.D
 
 def smooth_2d(U, kernel_size=3, method='gaussian'):
     """
@@ -147,21 +149,21 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     # 4. Plotting
     plt.close('all')
     fig, (ax1, ax2) = plt.subplots(2, figsize=(10, 8)) # Added figsize
-    
+
     # XY Grid
     X_grid_xy, Y_grid_xy = np.meshgrid(X_vis, Y_vis) 
     vmin, vmax = 0.2, 1.2
     levels = np.linspace(vmin, vmax, 50)
     
-    im1 = ax1.contourf(X_grid_xy, Y_grid_xy, U_xy_map / Uhub_ref, 
+    im1 = ax1.contourf(X_grid_xy, Y_grid_xy, U_xy_map / Uhub_ref,
                        cmap='bwr', levels=levels, vmin=vmin, vmax=vmax, extend='both')
-    
+
     # XZ Grid (Side view requires X and Z)
     X_grid_xz, Z_grid_xz = np.meshgrid(X_vis, Z_vis)
-    
-    im2 = ax2.contourf(X_grid_xz, Z_grid_xz, U_xz_map / Uhub_ref, 
+
+    im2 = ax2.contourf(X_grid_xz, Z_grid_xz, U_xz_map / Uhub_ref,
                        cmap='bwr', levels=levels, vmin=vmin, vmax=vmax, extend='both')
-        
+
     cbar1 = fig.colorbar(im1, ax=ax1)
     cbar1.set_label(r'Normalized Velocity $U / U_{hub}$')
     cbar1.ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
@@ -226,7 +228,58 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
         print(f"Saved farm map to {os.path.join(dir_name, img_name)}")
     else:
         plt.show()
-    
+
+def plot_turbine_layout(wind_farm, save_path=None):
+    """Top-down farm layout: rotors colored by yaw (diverging, since yaw is signed),
+    labeled with per-turbine efficiency."""
+    turbines = wind_farm.turbines
+    if not turbines:
+        print("No turbines found in wind farm.")
+        return
+
+    positions = np.array([t.pos[:2] for t in turbines])
+    yaws = np.array([float(t.yaw) for t in turbines])
+    D = np.array([float(t.D) for t in turbines])
+    eff = np.array([float(t.calculate_efficiency()) for t in turbines])
+
+    yaw_abs_max = max(1.0, np.max(np.abs(yaws)))
+    norm = TwoSlopeNorm(vmin=-yaw_abs_max, vcenter=0.0, vmax=yaw_abs_max)
+
+    plt.close('all')
+    fig, ax = plt.subplots(figsize=(7, 5))
+    style_figure(fig)
+    ax.set_aspect('equal')
+
+    for (x, y), yaw, d, e in zip(positions, yaws, D, eff):
+        color = plt.cm.RdBu_r(norm(yaw))
+        circ = plt.Circle((x, y), d / 2, facecolor=color, edgecolor=INK_SECONDARY, linewidth=1.2, zorder=3)
+        ax.add_patch(circ)
+        ax.annotate(f"η={e:.2f}\nyaw {yaw:+.0f}°", (x, y + d / 2), xytext=(0, 10),
+                    textcoords='offset points', ha='center', va='bottom',
+                    fontsize=9, color=INK_PRIMARY)
+
+    pad = D.max() * 2
+    ax.set_xlim(positions[:, 0].min() - pad, positions[:, 0].max() + pad)
+    ax.set_ylim(positions[:, 1].min() - pad, positions[:, 1].max() + pad * 1.4)
+    ax.set_xlabel('x (m)')
+    ax.set_ylabel('y (m)')
+    ax.set_title('Wind farm layout — yaw & efficiency by turbine', loc='left')
+    style_axes(ax)
+
+    mappable = plt.cm.ScalarMappable(norm=norm, cmap='RdBu_r')
+    cbar = fig.colorbar(mappable, ax=ax, label='Yaw angle (deg)')
+    style_colorbar(cbar)
+
+    fig.tight_layout()
+
+    if save_path:
+        os.makedirs(save_path, exist_ok=True)
+        fname = os.path.join(save_path, 'turbine_layout.png')
+        fig.savefig(fname, dpi=300, bbox_inches='tight', facecolor=SURFACE)
+        print(f"Saved turbine layout to {fname}")
+    else:
+        plt.show()
+
 def plot_data(data, config, pause_interval=0.1, quiver_samples=35,
               show_streamwise=True, save_path=None, save_at_x=None, fps=10, dpi=150, show=True):
     """
@@ -326,7 +379,7 @@ def _extract_streamwise_history(Data, config, grid):
 def _setup_layout(has_streamwise):
     """Creates the figure and returns a labeled dictionary of axes."""
     plt.rcParams.update({'font.family': 'serif', 'font.size': 10})
-    
+
     if has_streamwise:
         fig, axes = plt.subplots(2, 2, figsize=(12, 9), constrained_layout=True)
         return fig, {'vort': axes[0,0], 'vel': axes[0,1], 'prof': axes[1,0], 'wake': axes[1,1]}
@@ -384,7 +437,7 @@ def _add_quiver(ax, entry, state, grid, samples):
     W_new = np.asarray(entry.W)[sl]
 
     if 'quiver' not in state:
-        state['quiver'] = ax.quiver(grid['yloc'][sl], grid['zloc'][sl], 
+        state['quiver'] = ax.quiver(grid['yloc'][sl], grid['zloc'][sl],
                 V_new, W_new, color='k', scale=16.0, angles='xy', zorder=2)
     else:
         state['quiver'].set_UVC(V_new, W_new)

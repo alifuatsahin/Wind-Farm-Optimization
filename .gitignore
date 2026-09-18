@@ -1,6 +1,4 @@
 *__pycache__
 .vscode/
-Results/
-Data/
-Figures/
-old/
+.claude/
+runs/

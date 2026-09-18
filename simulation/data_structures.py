@@ -1,4 +1,5 @@
 import numpy as np
+import jax
 from dataclasses import dataclass, field
 
 @dataclass
@@ -7,6 +8,7 @@ class VortexField:
     Z: np.ndarray = field(default_factory=lambda: np.array([]))      # Vortex Z positions
     Rv: np.ndarray = field(default_factory=lambda: np.array([]))     # Vortex core radii
     Circ: np.ndarray = field(default_factory=lambda: np.array([]))   # Vortex circulations
+    active: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))  # Live (True) vs merged-away (False)
     yloc: np.ndarray = field(default_factory=lambda: np.array([]))   # For velocity field grid (optional)
     zloc: np.ndarray = field(default_factory=lambda: np.array([]))   # For velocity field grid (optional)
     V: np.ndarray = field(default_factory=lambda: np.array([]))      # Velocity field (optional)
@@ -15,3 +17,9 @@ class VortexField:
     OmegaX: np.ndarray = field(default_factory=lambda: np.array([])) # Vorticity field (optional)
     t: float = 0.0
     X: float = 0.0  # streamwise position
+
+jax.tree_util.register_dataclass(
+    VortexField,
+    data_fields=["Y", "Z", "Rv", "Circ", "active", "yloc", "zloc", "V", "W", "U", "OmegaX", "t", "X"],
+    meta_fields=[],
+)

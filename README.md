@@ -64,7 +64,7 @@ total_power = sim.calculate_objective()
 print(f"Total Power: {total_power/1e6:.2f} MW")
 
 # Save results
-sim.save_results(out_path="Data/")
+sim.save_results(out_path="Runs/")
 ```
 
 ### 2. Multi-Turbine Wind Farm
@@ -206,7 +206,7 @@ from plotting import plot_yaw_sweep_panel, plot_wake_evolution_panel
 
 # Cross-sectional snapshots at different x/D positions
 plot_yaw_sweep_panel(
-    data_path="Data/",
+    data_path="runs/",
     turbine_idx=0,
     yaw_angles=[0.0, 15.0, 30.0],    # Rows
     x_positions=[2, 4, 6, 8],         # Columns
@@ -218,7 +218,7 @@ plot_yaw_sweep_panel(
 
 # Streamwise wake evolution
 plot_wake_evolution_panel(
-    data_path="Data/",
+    data_path="runs/",
     turbine_idx=0,
     yaw_angles=[0.0, 15.0, 30.0],
     X_limit=10.0,                     # Max x/D to plot
@@ -235,7 +235,7 @@ from plotting import load_saved_results, plot_velocity_contour
 import matplotlib.pyplot as plt
 
 # Load results
-results = load_saved_results("Data/")
+results = load_saved_results("runs/")
 frames = results[0]['frames']  # Turbine 0
 
 # Setup grid
@@ -383,8 +383,11 @@ PVT with Superposition/
 │   ├── superposition.py       # Multi-wake superposition
 │   ├── data_structures.py     # Data containers
 │   └── utils.py               # Utility functions
-├── Data/                       # Saved simulation results
-└── Figures/                    # Generated plots
+└── runs/                        # Saved simulation & optimization output, one folder per run
+    └── 2026-07-24_153000/       # <out_dir>/<run_name>, from Config.out_path
+        ├── config.yaml         # snapshot of the Config used for this run
+        ├── figures/            # PNGs/GIFs from plot_*(save_graphic=True) / optimizer.plot_*
+        └── results/            # CSVs from sim.save_results() / optimizer.save_results()
 ```
 
 ## API Reference

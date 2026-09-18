@@ -1,3 +1,5 @@
+import os
+
 from optimization import Optimizer
 from config import Config
 import numpy as np
@@ -7,8 +9,8 @@ def yaw_optimization():
     print("\n" + "="*70)
     print("Optimizing Yaw Angles")
     print("="*70 + "\n")
-    
-    config = Config()
+
+    config = Config(run_prefix="opt")
 
     def yaw_mapping(params, cfg):
         cfg.WindFarm.yaw = params.copy()
@@ -32,34 +34,34 @@ def yaw_optimization():
     )
 
     # Plot results
-    optimizer.plot_optimization_history(save_path='Figures/yaw_optimization.png')
-    
+    optimizer.plot_optimization_history(save_path=os.path.join(config.out_path, 'figures', 'yaw_optimization.png'))
+
     # Plot trust region evolution
     optimizer.plot_trust_region_snapshots(
         iterations=[10, 30, 60, 90],
         param_idx_x=0,
         param_idx_y=1,
-        save_path='Figures/yaw_trust_region.png'
+        save_path=os.path.join(config.out_path, 'figures', 'yaw_trust_region.png')
     )
-    
+
     # Plot GP posterior (works with both TS and EI)
     optimizer.plot_gp_posterior_snapshots(
         iterations=[10, 30, 60, 90],
         param_idx_x=0,
         param_idx_y=1,
-        save_path='Figures/yaw_gp_posterior.png'
+        save_path=os.path.join(config.out_path, 'figures', 'yaw_gp_posterior.png')
     )
-    
+
     # Plot acquisition function (only for EI)
     # optimizer.plot_acquisition_function(
     #     iterations=[10, 30, 50, 70],
     #     param_idx_x=0,
     #     param_idx_y=1,
     #     acqf_type='ei',
-    #     save_path='Figures/yaw_acquisition.png'
+    #     save_path=os.path.join(config.out_path, 'figures', 'yaw_acquisition.png')
     # )
 
-    optimizer.save_results('Results/yaw_optimization_results.pkl')
+    optimizer.save_results(os.path.join(config.out_path, 'results', 'yaw_optimization_results.pkl'))
     
     print("\n" + "="*70)
     print("RESULTS: Best yaw configuration found")
@@ -76,8 +78,8 @@ def position_optimization():
     print("\n" + "="*70)
     print("Optimizing Turbine Positions")
     print("="*70 + "\n")
-    
-    config = Config()
+
+    config = Config(run_prefix="opt")
     n_turbines = len(config.WindFarm)
     
     # Define bounds: [x0, y0, x1, y1, ...]
@@ -114,8 +116,8 @@ def position_optimization():
         verbose=True
     )
     
-    optimizer.plot_optimization_history(save_path='Figures/position_optimization.png')
-    optimizer.save_results('Results/position_optimization_results.pkl')
+    optimizer.plot_optimization_history(save_path=os.path.join(config.out_path, 'figures', 'position_optimization.png'))
+    optimizer.save_results(os.path.join(config.out_path, 'results', 'position_optimization_results.pkl'))
     
     print("\n" + "="*70)
     print("RESULTS: Best position configuration found")
@@ -134,8 +136,8 @@ def mixed_optimization():
     print("\n" + "="*70)
     print("Optimizing Mixed Parameters (Yaw + Ct)")
     print("="*70 + "\n")
-    
-    config = Config()
+
+    config = Config(run_prefix="opt")
     n_turbines = len(config.WindFarm)
     
     # Define bounds: [yaw_0, yaw_1, ..., Ct_0]
@@ -179,8 +181,8 @@ def mixed_optimization():
         verbose=True
     )
     
-    optimizer.plot_optimization_history(save_path='Figures/mixed_optimization.png')
-    optimizer.save_results('Results/mixed_optimization_results.pkl')
+    optimizer.plot_optimization_history(save_path=os.path.join(config.out_path, 'figures', 'mixed_optimization.png'))
+    optimizer.save_results(os.path.join(config.out_path, 'results', 'mixed_optimization_results.pkl'))
     
     print("\n" + "="*70)
     print("RESULTS: Best parameter configuration found")

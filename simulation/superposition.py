@@ -1,45 +1,46 @@
 import numpy as np
+import jax.numpy as jnp
 from scipy.interpolate import RegularGridInterpolator
 
 from .data_structures import VortexField
 
-def interpolate_vec_data(vortex_data_list, t):
+def interpolate_vec_data(stacked, t):
     """
-    Interpolate vortex field at time t from a list of VortexField objects.
-    vortex_data_list must be time-sorted.
-    Caveat: works best when vortex arrays correspond between frames.
+    Interpolate vortex field at time t from `stacked`, a VortexField whose every array leaf
+    has a leading (total_steps,) frame-index axis (Loop 1's raw, UNTRIMMED jit output -- see
+    vortex_model._simulate_vortex_evolution_jit) instead of a Python list of VortexField
+    objects. `stacked.t` must be non-decreasing along that axis.
     """
-    times = np.array([v.t for v in vortex_data_list])
+    t_stack = stacked.t
+    n = t_stack.shape[0]
 
-    if t <= times[0]:
-        return vortex_data_list[0]
-    if t >= times[-1]:
-        return vortex_data_list[-1]
-    
-    idx = np.searchsorted(times, t)
-    i0 = idx - 1
-    i1 = idx
-    t0, t1 = times[i0], times[i1]
-    # safe alpha (handles zero interval)
-    alpha = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+    below = t <= t_stack[0]
+    above = t >= t_stack[-1]
 
-    d0, d1 = vortex_data_list[i0], vortex_data_list[i1]
+    idx = jnp.searchsorted(t_stack, t)
+    idx_safe = jnp.clip(idx, 1, n - 1)
+    i0 = idx_safe - 1
+    i1 = idx_safe
+    t0, t1 = t_stack[i0], t_stack[i1]
+    denom = t1 - t0
+    same_t = denom == 0
+    alpha = jnp.where(same_t, 0.0, (t - t0) / jnp.where(same_t, 1.0, denom))
+    source_idx = jnp.where(below, 0, jnp.where(above, n - 1, i0))
 
-    # linear interp of arrays (works when shapes match)
-    V = (1 - alpha) * d0.V + alpha * d1.V
-    W = (1 - alpha) * d0.W + alpha * d1.W
+    def gather(leaf):
+        return leaf[source_idx]
+
+    def interp_pair(leaf):
+        blended = (1 - alpha) * leaf[i0] + alpha * leaf[i1]
+        return jnp.where(below | above, leaf[source_idx], blended)
 
     return VortexField(
-        Y=d0.Y,
-        Z=d0.Z,
-        Rv=d0.Rv,
-        Circ=d0.Circ,
-        yloc=d0.yloc,
-        zloc=d0.zloc,
-        V=V,
-        W=W,
-        OmegaX=d0.OmegaX,
-        t=t
+        Y=gather(stacked.Y), Z=gather(stacked.Z), Rv=gather(stacked.Rv), Circ=gather(stacked.Circ),
+        active=gather(stacked.active),
+        yloc=gather(stacked.yloc), zloc=gather(stacked.zloc),
+        V=interp_pair(stacked.V), W=interp_pair(stacked.W),
+        OmegaX=gather(stacked.OmegaX),
+        t=t,
     )
 
 def interpolate_local_velocity_field(turbine, X, yloc, zloc, default):

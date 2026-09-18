@@ -160,17 +160,27 @@ class Config:
     Field: FieldConfig = field(default_factory=FieldConfig)
 
     # File output
-    out_dir: str = "Data"            # root directory all runs are stored under
+    out_dir: str = "runs"             # root directory all runs are stored under
     run_name: Optional[str] = None   # explicit run folder name; auto-timestamped if left as None
+    run_prefix: Optional[str] = None # prepended to the auto-generated timestamp; ignored if run_name is given
 
     def __post_init__(self):
         if self.run_name is None:
-            self.run_name = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+            self.run_name = f"{self.run_prefix}_{timestamp}" if self.run_prefix else timestamp
 
     @property
     def out_path(self) -> str:
         """Directory this run's figures/ and results/ subfolders are saved under."""
         return os.path.join(self.out_dir, self.run_name)
+
+    def ensure_run_dir(self) -> str:
+        """Create this run's output directory and drop a config.yaml snapshot in it, if not already done."""
+        os.makedirs(self.out_path, exist_ok=True)
+        config_path = os.path.join(self.out_path, "config.yaml")
+        if not os.path.exists(config_path):
+            self.save_yaml(config_path)
+        return self.out_path
 
     def print(self):
         """Print only base dataclass fields (those with init=True)."""
@@ -199,7 +209,7 @@ class Config:
         return cls(
             WindFarm=WindFarmConfig(**data['WindFarm']),
             Field=FieldConfig(**data['Field']),
-            out_dir=data.get('out_dir', "Data"),
+            out_dir=data.get('out_dir', "runs"),
             run_name=data.get('run_name'),
         )
 

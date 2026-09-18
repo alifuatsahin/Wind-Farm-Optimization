@@ -144,7 +144,7 @@ def plot_velocity_contour(ax, state, entry, grid, levels, D=1.0, Uhub=1.0):
 
 def add_quiver(ax, entry, state, grid, samples):
     """Adds quiver arrows to an existing axis.
-    
+
     Args:
         entry: dict or object with V, W attributes/keys
     """
@@ -155,7 +155,7 @@ def add_quiver(ax, entry, state, grid, samples):
     W_new = np.asarray(get_value(entry, 'W'))[sl]
 
     if 'quiver' not in state:
-        state['quiver'] = ax.quiver(grid['yloc'][sl], grid['zloc'][sl], 
+        state['quiver'] = ax.quiver(grid['yloc'][sl], grid['zloc'][sl],
                 V_new, W_new, color='k', scale=16.0, angles='xy', zorder=2)
     else:
         state['quiver'].set_UVC(V_new, W_new)
@@ -223,15 +223,15 @@ def plot_wake_evolution(ax, state, entry, history, D=1.0, Uhub=1.0):
         state['v_line'].set_xdata([current_x, current_x])
     return state
 
-def plot_yaw_sweep_panel(data_path, turbine_idx, yaw_angles, x_positions, 
-                         D=126.0, Uhub=8.0, plot_type='velocity', 
+def plot_yaw_sweep_panel(data_path, turbine_idx, yaw_angles, x_positions,
+                         D=126.0, Uhub=8.0, plot_type='velocity',
                          q_samples=20, figsize=None, cmap='turbo',
                          vmin=None, vmax=None, save_path=None):
     """
     Create a grid plot with yaw angles as rows and x/D positions as columns.
-    
+
     Args:
-        data_path: Path to folder containing CSV files (e.g., "Data/")
+        data_path: Path to folder containing CSV files (e.g., "Runs/")
         turbine_idx: Turbine index to plot (e.g., 0)
         yaw_angles: List of yaw angles to plot (rows), e.g., [0.0, 10.0, 20.0]
         x_positions: List of x/D positions to plot (columns), e.g., [2, 4, 6, 8]
@@ -320,7 +320,7 @@ def plot_yaw_sweep_panel(data_path, turbine_idx, yaw_angles, x_positions,
     # Define contour levels
     levels = np.linspace(vmin, vmax, 21)
     cmap = 'turbo' if plot_type == 'velocity' else 'RdBu_r'
-    
+
     # Create figure and axes
     fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, constrained_layout=False)
     if n_rows == 1 and n_cols == 1:
@@ -364,8 +364,8 @@ def plot_yaw_sweep_panel(data_path, turbine_idx, yaw_angles, x_positions,
                 sl = np.s_[::dN, ::dN]
                 V_sample = (frame['V'] / Uhub)[sl]
                 W_sample = (frame['W'] / Uhub)[sl]
-                ax.quiver(grid['yloc'][sl], grid['zloc'][sl], 
-                            V_sample, W_sample, color='k', scale=1.0, 
+                ax.quiver(grid['yloc'][sl], grid['zloc'][sl],
+                            V_sample, W_sample, color='k', scale=1.0,
                             angles='xy', alpha=0.6)
             
             # Formatting
@@ -393,31 +393,31 @@ def plot_yaw_sweep_panel(data_path, turbine_idx, yaw_angles, x_positions,
     
     # Add single colorbar
     cbar_label = 'Normalized Streamwise Velocity U/Uhub' if plot_type == 'velocity' else r'Normalized Vorticity $\Omega_x D / U_{hub}$'
-    cbar = fig.colorbar(pcm, ax=axes, orientation='vertical', 
+    cbar = fig.colorbar(pcm, ax=axes, orientation='vertical',
                         fraction=0.02, pad=0.02, label=cbar_label)
     cbar.ax.tick_params(labelsize=16)
     cbar.ax.yaxis.label.set_size(16)
     cbar.ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
-    
+
     # Save or show
     if save_path:
         fig.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Saved figure to {save_path}")
     else:
         plt.show()
-    
+
     return fig, axes
 
-def plot_wake_evolution_panel(data_path, turbine_idx, yaw_angles, 
+def plot_wake_evolution_panel(data_path, turbine_idx, yaw_angles,
                               D=126.0, Uhub=8.55, Z_hub=None, X_limit=None,
                               figsize=None, cmap='turbo',
                               vmin=None, vmax=None, draw_centerline=True, save_path=None):
     """
     Create a multi-row plot showing wake evolution for different yaw angles.
     Each row shows the streamwise (x/D) vs lateral (y/D) wake evolution at hub height.
-    
+
     Args:
-        data_path: Path to folder containing CSV files (e.g., "Data/")
+        data_path: Path to folder containing CSV files (e.g., "Runs/")
         turbine_idx: Turbine index to plot (e.g., 0)
         yaw_angles: List of yaw angles to plot (one per row), e.g., [0.0, 15.0, 30.0]
         D: Rotor diameter for normalization
@@ -564,12 +564,12 @@ def plot_wake_evolution_panel(data_path, turbine_idx, yaw_angles,
             ax.set_xticklabels([])
     
     # Add single colorbar
-    cbar = fig.colorbar(mesh, ax=axes, orientation='vertical', 
+    cbar = fig.colorbar(mesh, ax=axes, orientation='vertical',
                        fraction=0.02, pad=0.02, label='Normalized Velocity U/Uhub')
     cbar.ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
     cbar.ax.tick_params(labelsize=16)
     cbar.ax.yaxis.label.set_size(16)
-    
+
     # Save or show
     if save_path:
         fig.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -583,7 +583,7 @@ if __name__ == "__main__":
     os.makedirs("Figures", exist_ok=True)
     # Yaw sweep panel (cross-sections at different x/D)
     plot_yaw_sweep_panel(
-        data_path="Data/",
+        data_path="runs/",
         turbine_idx=0,
         yaw_angles=[0.0, 15.0, 30.0],
         x_positions=[2, 4, 6, 8],
@@ -594,7 +594,7 @@ if __name__ == "__main__":
     )
 
     plot_yaw_sweep_panel(
-        data_path="Data/",
+        data_path="runs/",
         turbine_idx=0,
         yaw_angles=[0.0, 15.0, 30.0],
         x_positions=[2, 4, 6, 8],
@@ -606,7 +606,7 @@ if __name__ == "__main__":
     
     # Wake evolution panel (streamwise evolution)
     plot_wake_evolution_panel(
-        data_path="Data/",
+        data_path="runs/",
         turbine_idx=0,
         yaw_angles=[0.0, 15.0, 30.0],
         X_limit=10.0,

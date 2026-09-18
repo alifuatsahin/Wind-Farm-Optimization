@@ -1,7 +1,6 @@
-from .utils import smooth_2d, NuT_model
-from .vortex_model import simulate_vortex_evolution
-from .model_solver import advance_wake_field
-from .superposition import get_local_velocity_field, interpolate_vec_data
+from .superposition import get_local_velocity_field
+from .turbine_state import make_turbine_params, LocalConditions
+from . import turbine_physics as tp
 
 import numpy as np
 import pandas as pd
@@ -11,160 +10,101 @@ class Turbine:
     def __init__(self, config, field_params):
         self.config = config
         self.field_params = field_params
-        self.pos = config.pos  # (x, y, z)
-        self.D = config.D
-        self.Zhub = config.Zhub
-        self.yaw = config.yaw
-        self.TSR = config.TSR
-        self.Uh = field_params.Uh
-        self.Zh = field_params.Zh
-        self.WV = field_params.WV
-        self.Nv = field_params.Nv
+
+        self._params = make_turbine_params(config, field_params)
+        local = tp.init_local_conditions(self._params)
+
+        self.pos = self._params.pos  # (x, y, z)
+        self.D = self._params.D
+        self.Zhub = self._params.Zhub
+        self.yaw = self._params.yaw
+        self.TSR = self._params.TSR
+        self.Uh = self._params.Uh
+        self.Zh = self._params.Zh
+        self.WV = self._params.WV
+        self.Nv = self._params.Nv
         self.vortex_field = None  # to be filled after simulation
         self.wake_field = None  # to be filled after wake calculation
         self.dl = None  # grid spacing in y direction
         self.calculation_domain = 0.0  # to be set by WindFarm
 
-        self.Ct = config.Ct
-        self.Cp = config.Cp * np.cos(self.beta)**1.88  # Adjusted power coefficient
+        self.Ct = self._params.Ct
+        self.Cp = self._params.Cp  # Adjusted power coefficient
 
-        self.phi = np.linspace(-np.pi, np.pi, self.Nv)
-        self.dphi = abs(self.phi[1] - self.phi[0])
-        self._initialize_grid()
+        self.phi = self._params.phi
+        self.dphi = self._params.dphi
+        self.yloc = self._params.yloc
+        self.zloc = self._params.zloc
 
-        self.V = np.zeros_like(self.yloc)
-        self.W = np.zeros_like(self.zloc)
+        self.V = local.V
+        self.W = local.W
+        self.Uin = local.Uin
+        self.Uhub = local.Uhub
 
-        self.Uin = self.init_Uin()
-        self.Uhub = self._init_Uhub()
-
-    def _initialize_grid(self):
-        Ly = self.field_params.max_Y * self.D
-        Lz = self.field_params.max_Z * self.D
-        n_grids = self.field_params.n_grids
-
-        Ny = max(2, int(Ly / (self.D / n_grids)))
-        Nz = max(2, int(Lz / (self.D / n_grids)))
-        if self.Zhub - Lz/2 < 0:
-            zlims = (0, Lz)
-        else:
-            zlims = (self.Zhub - Lz/2, self.Zhub + Lz/2)
-        self.yloc, self.zloc = np.meshgrid(np.linspace(-Ly/2, Ly/2, Ny), np.linspace(*zlims, Nz), indexing='ij')
-
-    def _compute_Ut(self):
-        z = self.Zhub + self.D / 2.0 * np.sin(self.phi)
-        zsafe = np.maximum(z, self.field_params.z0 + 1e-6)
-        Utbl = self.Uh * (np.log(zsafe / self.field_params.z0) / np.log(self.Zh / self.field_params.z0))
-        U_tx = (1 - self.a) * Utbl - self.omega * self.R * np.sin(self.phi) * np.sin(self.beta)
-        U_ty = -self.omega * self.R * np.sin(self.phi) * np.cos(self.beta)
-        U_tz = self.omega * self.R * np.cos(self.phi)
-        return np.array([U_tx, U_ty, U_tz]).T
-
-    def _compute_dgamma(self):
-        alpha = np.arcsin(self.Ut[:, 0] / np.sqrt(np.sum(self.Ut ** 2, axis=1)))  # Fixed indexing
-        dgamma = np.sin(alpha) * self.dphi
-        gamma_ref = self.gamma0 * 0.45
-        dgamma = gamma_ref / np.sum(dgamma[1:]) * dgamma
-        return dgamma
-
-    def _init_Uhub(self):
-        Uin = self.init_Uin()
-        rotor_mask = np.sqrt((self.yloc)**2 + (self.zloc - self.Zhub)**2) <= (self.D / 2)
-        Uhub = np.mean(Uin[rotor_mask])
-        return Uhub
+    def _current_local(self):
+        """Snapshot of the state WindFarm.solve() mutates directly on this instance."""
+        return LocalConditions(Uhub=self.Uhub, V=self.V, W=self.W, Uin=self.Uin)
 
     def init_Uin(self):
-        zsafe = np.maximum(self.zloc, self.field_params.z0 + 1e-6)  # avoid log(0) issues
-        Uin = self.Uh * (np.log(zsafe / self.field_params.z0) / np.log(self.Zh / self.field_params.z0))
-        return Uin
+        return tp.init_Uin(self._params)
 
     @property
     def a(self):
-        return (1 - np.sqrt(1 - self.Ct / np.cos(self.beta))) / 2
+        return self._params.a
 
     @property
     def R(self):
-        return self.D / 2
+        return self._params.R
 
     @property
     def Rv(self):
-        return 0.1 * self.D
+        return self._params.Rv
 
     @property
     def omega(self):
-        return self.TSR * self.Uhub / self.R
+        return tp.compute_omega(self._params, self.Uhub)
 
     @property
     def beta(self):
-        return np.deg2rad(self.yaw)
+        return self._params.beta
 
     @property
     def Yoffset(self):
-        return 5 * np.sin(self.beta)
+        return self._params.Yoffset
 
     @property
     def gamma0(self):
-        return np.pi * self.Uhub ** 2 * self.Ct / self.omega
+        return tp.compute_gamma0(self._params, self.Uhub)
 
     @property
     def Ut(self):
-        return self._compute_Ut()
-    
+        return tp.compute_Ut(self._params, self.Uhub)
+
     @property
     def Uinf(self):
-        return self._init_Uhub()
+        return tp.nominal_hub_velocity(self._params)
 
     @property
     def dgamma(self):
-        return self._compute_dgamma()
-    
+        return tp.compute_dgamma(self._params, self.Uhub)
+
     def calculate_efficiency(self):
-        P = (self.Uhub ** 3) * self.Cp
-        nominal_P = (self.Uinf ** 3) * self.config.Cp
-        return P / nominal_P
+        return tp.calculate_efficiency(self._params, self.Uhub)
 
     def simulate_vortex_field(self):
-        self.vortex_field = simulate_vortex_evolution(self, self.field_params)
-    
+        self._params.calculation_domain = self.calculation_domain
+        self.vortex_field = tp.simulate_vortex_field(self._params, self._current_local())
+
     def initialize_wake_field(self):
-        yloc = self.vortex_field[0].yloc
-        zloc = self.vortex_field[0].zloc
-        beta = self.beta
-        
-        self.dl = float(yloc[1, 0] - yloc[0, 0])
-        U = self.Uin.copy()
-        mask = np.sqrt(((yloc + self.Yoffset)**2) / (np.cos(beta)**2) + (zloc - self.Zhub)**2) <= self.R
-        U[mask] -= 2.0 * U[mask] * self.a
+        self.vortex_field, self.dl = tp.initialize_wake_field(self._params, self.vortex_field, self._current_local())
 
-        hub_mask = (np.abs(yloc) <= self.dl * 1.0) & (zloc < self.Zhub)
-        U[hub_mask] -= 0.3 * U[hub_mask]  # add some velocity deficit at the hub
+    def calculate_deficit_field(self, upstream_turbines, max_steps=1500, N_upstream_max=None):
+        self._params.calculation_domain = self.calculation_domain
+        self.wake_field = tp.calculate_deficit_field(
+            self._params, self._current_local(), self.vortex_field, self.dl, upstream_turbines,
+            N_upstream_max=N_upstream_max, max_steps=max_steps
+        )
 
-        U_smooth = smooth_2d(U, kernel_size=3)
-        self.vortex_field[0].U = U_smooth
-        self.vortex_field[0].X = 0.0
-        self.vortex_field[0].t = 0.0
-        self.vortex_field[0].Uhub = self.Uhub
-
-    def calculate_deficit_field(self, upstream_turbines, max_steps=10000):
-        # Time-marching reduced-order model
-        self.wake_field = [self.vortex_field[0]]
-
-        while self.wake_field[-1].X <= self.calculation_domain:
-            NuT = NuT_model(self.wake_field[-1], self, self.field_params, upstream_turbines)
-            dt = min(self.dl / self.Uhub, 0.25 * self.D / self.Uhub) 
-            dt = min(dt, (self.dl**2) / (2 * (NuT + 1e-6)))  # stability condition
-
-            new = interpolate_vec_data(self.vortex_field, self.wake_field[-1].t + dt)
-            U, X_new = advance_wake_field(self.wake_field[-1], dt, NuT, self, self.field_params)
-            new.U = U
-            new.X = X_new
-            new.t = self.wake_field[-1].t + dt
-            self.wake_field.append(new)
-
-            if len(self.wake_field) > max_steps:
-                print("Safety break: Too many steps, stopping simulation.")
-                break
-    
 class WindFarm:
     def __init__(self, config):
         self.turbine_configs = config.WindFarm
@@ -283,6 +223,11 @@ class WindFarm:
         return total_eff
 
     def solve(self):
+        # Farm-wide constant so NuT_model's upstream-turbine padding (see
+        # turbine_state.pack_upstream_turbines) is the SAME shape for every turbine's call --
+        # required for calculate_deficit_field's jit to compile once and serve every turbine,
+        # not recompile per turbine's distinct (varying-by-construction) upstream count.
+        N_upstream_max = max(len(self.turbines) - 1, 0)
         for t in self.turbines:
             U_local, V_local, W_local = get_local_velocity_field(t, self, method='MCS')
 
@@ -308,7 +253,7 @@ class WindFarm:
             # print(f"Simulating turbine at pos={t.pos} m, yaw={t.yaw}°")
             t.simulate_vortex_field()
             t.initialize_wake_field()
-            t.calculate_deficit_field(upstream_turbines)
+            t.calculate_deficit_field(upstream_turbines, N_upstream_max=N_upstream_max)
 
     def save_results(self, out_path, limit_frames=None):
         os.makedirs(out_path, exist_ok=True)

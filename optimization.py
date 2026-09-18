@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 import math
@@ -381,16 +382,22 @@ class Optimizer:
 
         return self.best_params, self.best_value
     
+    def _ensure_save_dir(self, path: str):
+        """Create the run directory (with config.yaml snapshot) and path's parent folder."""
+        self.config.ensure_run_dir()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
     def save_results(self, filepath: str):
         """
         Save optimization results to a file.
-        
+
         Parameters:
         -----------
         filepath : str
             Path to save the results
         """
         import pickle
+        self._ensure_save_dir(filepath)
         results = {
             'X_samples': self.X_opt,
             'y_samples': self.Y_opt,
@@ -439,6 +446,7 @@ class Optimizer:
         plt.tight_layout()
         
         if save_path:
+            self._ensure_save_dir(save_path)
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             print(f"Plot saved to {save_path}")
         else:
@@ -511,6 +519,7 @@ class Optimizer:
         
         plt.tight_layout()
         if save_path:
+            self._ensure_save_dir(save_path)
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             print(f"Trust region snapshots saved to {save_path}")
         else:
@@ -613,6 +622,7 @@ class Optimizer:
         
         plt.tight_layout()
         if save_path:
+            self._ensure_save_dir(save_path)
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             print(f"Acquisition function plot saved to {save_path}")
         else:
@@ -713,6 +723,7 @@ class Optimizer:
         
         plt.tight_layout()
         if save_path:
+            self._ensure_save_dir(save_path)
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             print(f"GP posterior snapshots saved to {save_path}")
         else:
