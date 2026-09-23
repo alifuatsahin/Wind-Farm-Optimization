@@ -2,3 +2,7 @@
 .vscode/
 .claude/
 runs/
+data/
+make_paper_figures.py
+validation.py
+experiments/

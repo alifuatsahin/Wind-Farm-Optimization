@@ -91,9 +91,9 @@ class Turbine:
     def calculate_efficiency(self):
         return tp.calculate_efficiency(self._params, self.Uhub)
 
-    def simulate_vortex_field(self):
+    def simulate_vortex_field(self, seed=None):
         self._params.calculation_domain = self.calculation_domain
-        self.vortex_field = tp.simulate_vortex_field(self._params, self._current_local())
+        self.vortex_field = tp.simulate_vortex_field(self._params, self._current_local(), seed=seed)
 
     def initialize_wake_field(self):
         self.vortex_field, self.dl = tp.initialize_wake_field(self._params, self.vortex_field, self._current_local())
@@ -223,13 +223,9 @@ class WindFarm:
         return total_eff
 
     def solve(self):
-        # Farm-wide constant so NuT_model's upstream-turbine padding (see
-        # turbine_state.pack_upstream_turbines) is the SAME shape for every turbine's call --
-        # required for calculate_deficit_field's jit to compile once and serve every turbine,
-        # not recompile per turbine's distinct (varying-by-construction) upstream count.
         N_upstream_max = max(len(self.turbines) - 1, 0)
         for t in self.turbines:
-            U_local, V_local, W_local = get_local_velocity_field(t, self, method='MCS')
+            U_local, V_local, W_local = get_local_velocity_field(t, self)
 
             upstream_turbines = [
                 ut for ut in self.turbines

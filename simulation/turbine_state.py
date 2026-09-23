@@ -4,6 +4,10 @@ import jax.numpy as jnp
 from dataclasses import dataclass, field
 
 
+# Exponent in Ct(beta) = Ct(0)*cos(beta)**CT_YAW_EXP.
+CT_YAW_EXP = 2.0
+
+
 @dataclass
 class TurbineParams:
     """Everything about a turbine that is determined by config alone -- never mutated by WindFarm.solve()."""
@@ -43,8 +47,23 @@ class TurbineParams:
         return 5 * np.sin(self.beta)
 
     @property
+    def Ct_yawed(self):
+        """Thrust coefficient at the current yaw.
+
+        Zong & Porte-Agel (2020) Sec 3, fitting Bastankhah & Porte-Agel (2016):
+        Ct(beta) = Ct(0) * cos(beta)**1.6. The thrust counterpart of the
+        Cp * cos(beta)**1.88 correction already applied in local_conditions."""
+        return self.Ct * np.cos(self.beta) ** CT_YAW_EXP
+
+    @property
     def a(self):
-        return (1 - np.sqrt(1 - self.Ct / np.cos(self.beta))) / 2
+        """Axial induction factor, Zong & Porte-Agel (2020) Eq (3.3):
+        a = (1 - sqrt(1 - Ct/cos(beta))) / 2, with Ct evaluated AT the yaw angle.
+
+        Using the unyawed Ct here makes a *rise* with yaw (0.276 -> 0.329 at 25 deg)
+        when it should fall (-> 0.252), over-deepening yawed wakes by ~26%: the
+        measured near-wake minimum 0.347 matched 1-2a from the unyawed Ct exactly."""
+        return (1 - np.sqrt(1 - self.Ct_yawed / np.cos(self.beta))) / 2
 
     @property
     def dl(self):
@@ -115,14 +134,17 @@ class DeficitFieldConfig:
     model_solver.advance_wake_field."""
     pos: np.ndarray
     D: float
-    Uhub: float
+    Uhub: float      # rotor-averaged LOCAL inflow (waked); what the turbine actually sees
     Uin: np.ndarray
     Zhub: float
+    U0: float = 0.0  # rotor-averaged UNDISTURBED inflow (freestream), i.e. Du et al.'s U0
+    rotor_mask: np.ndarray = None  # rotor disc, for the near-wake deficit ramp
+    Ct_eff: float = 0.0            # Ct_yawed / cos(beta), i.e. the Ct entering Zong Eq 3.3
 
 
 jax.tree_util.register_dataclass(
     DeficitFieldConfig,
-    data_fields=["pos", "D", "Uhub", "Uin", "Zhub"],
+    data_fields=["pos", "D", "Uhub", "Uin", "Zhub", "U0", "rotor_mask", "Ct_eff"],
     meta_fields=[],
 )
 

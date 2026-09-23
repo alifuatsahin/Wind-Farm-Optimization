@@ -8,6 +8,7 @@ class VortexField:
     Z: np.ndarray = field(default_factory=lambda: np.array([]))      # Vortex Z positions
     Rv: np.ndarray = field(default_factory=lambda: np.array([]))     # Vortex core radii
     Circ: np.ndarray = field(default_factory=lambda: np.array([]))   # Vortex circulations
+    Nu: np.ndarray = field(default_factory=lambda: np.array([]))     # Per-vortex core-growth eddy viscosity
     active: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))  # Live (True) vs merged-away (False)
     yloc: np.ndarray = field(default_factory=lambda: np.array([]))   # For velocity field grid (optional)
     zloc: np.ndarray = field(default_factory=lambda: np.array([]))   # For velocity field grid (optional)
@@ -20,6 +21,6 @@ class VortexField:
 
 jax.tree_util.register_dataclass(
     VortexField,
-    data_fields=["Y", "Z", "Rv", "Circ", "active", "yloc", "zloc", "V", "W", "U", "OmegaX", "t", "X"],
+    data_fields=["Y", "Z", "Rv", "Circ", "Nu", "active", "yloc", "zloc", "V", "W", "U", "OmegaX", "t", "X"],
     meta_fields=[],
 )

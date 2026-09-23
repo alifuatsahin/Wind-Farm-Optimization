@@ -18,8 +18,8 @@ def advance_wake_field(data, dt, NuT, config, WV):
 
     # prediction step
     dUdY, dUdZ = jnp.gradient(U, yloc[:, 0], zloc[0, :])   # dUdY = ∂(U)/∂y, dUdZ = ∂(U)/∂z
-    # Gradient of Uin (Background Shear) -- only the z-direction is used downstream
     dUin_dZ = jnp.gradient(Uin, zloc[0, :], axis=1)
+    dUin_dY = jnp.gradient(Uin, yloc[:, 0], axis=0)
 
     Sxy = dUdY
     Sxz = dUdZ
@@ -28,12 +28,16 @@ def advance_wake_field(data, dt, NuT, config, WV):
     dSxydY = jnp.gradient(Sxy, yloc[:, 0], axis=0)   # = ∂Sxy/∂y
     dSxzdZ = jnp.gradient(Sxz, zloc[0, :], axis=1)   # = ∂Sxz/∂z
     d2Uin_dZ2 = jnp.gradient(dUin_dZ, zloc[0, :], axis=1)
+    d2Uin_dY2 = jnp.gradient(dUin_dY, yloc[:, 0], axis=0)
+    lap_Uin = d2Uin_dY2 + d2Uin_dZ2
 
     # assemble numerator
-    numer = -V * dUdY - W * dUdZ + NuT * dSxydY + NuT * dSxzdZ - NuT * d2Uin_dZ2
-    denom_safe = jnp.maximum(U, 1e-6)  # prevent division by zero
+    numer = -V * dUdY - W * dUdZ + NuT * dSxydY + NuT * dSxzdZ - NuT * lap_Uin
+    U_floor = jnp.maximum(0.1 * Uin, 1e-6)
+    denom_safe = jnp.maximum(U, U_floor)
 
     dUpdx = numer / denom_safe
+
     Up = U + dUpdx * dx
     Up = Up.at[:, 0].set(Uin[:, 0]) # far stream dirichlet BC
 
@@ -44,8 +48,8 @@ def advance_wake_field(data, dt, NuT, config, WV):
 
     dSxydY = jnp.gradient(Sxy, yloc[:, 0], axis=0)   # = ∂Sxy/∂y
     dSxzdZ = jnp.gradient(Sxz, zloc[0, :], axis=1)   # = ∂Sxz/∂z
-    numer = -V * dUdY - W * dUdZ + NuT * dSxydY + NuT * dSxzdZ - NuT * d2Uin_dZ2
-    denom_safe = jnp.maximum(Up, 1e-6)  # prevent division by zero
+    numer = -V * dUdY - W * dUdZ + NuT * dSxydY + NuT * dSxzdZ - NuT * lap_Uin
+    denom_safe = jnp.maximum(Up, U_floor)
 
     dUcdx = numer / denom_safe
     U = U + 0.5 * (dUpdx + dUcdx) * dx

@@ -11,6 +11,12 @@ import os
 from .superposition import superpose, interpolate_local_velocity_field
 from .viz_style import SURFACE, INK_PRIMARY, INK_SECONDARY, style_figure, style_axes, style_colorbar
 
+# Li, Wang, Dong, Yang & Zhang (2023) Energy 276, 127491 Eq (22): added-turbulence
+# contributions from several upstream rotors combine as a p-norm, exponent m=2.5 for
+# aligned turbines.
+CRESPO_M = 2.5
+
+
 def NuT_model(wake_field, config, I_amb, up_a, up_D, up_pos_x, up_Uhub, up_mask):
     """
     Turbulent eddy viscosity closure for a single turbine's wake, following the
@@ -19,7 +25,7 @@ def NuT_model(wake_field, config, I_amb, up_a, up_D, up_pos_x, up_Uhub, up_mask)
     boundary layer", arXiv:2511.19881, Eq. (26):
 
         NuT(x) / (U0*D) = (kv1*TI - kv0) * x/D,      x/D <= xv1/TI
-                         = (kv1*TI - kv0) * xv1/TI,   x/D >  xv1/TI
+                        = (kv1*TI - kv0) * xv1/TI,   x/D >  xv1/TI
 
     with kv1=0.05, kv0=0.001, xv1=0.5 (paper's fitted constants). Extended here
     to multi-turbine wakes by accumulating turbulence intensity across upstream
@@ -30,24 +36,23 @@ def NuT_model(wake_field, config, I_amb, up_a, up_D, up_pos_x, up_Uhub, up_mask)
     the source paper tested directly.
     """
     kv1, kv0, xv1 = 0.05, 0.001, 0.5
-    IU_TO_TI = 1.28  # Du et al. (2025), Sec 2.3: Iu ~ 1.28 * TI under neutral conditions
-    m = 2
+    IU_TO_TI = 1.28  #(1.28) Du et al. (2025), Sec 2.3: Iu ~ 1.28 * TI under neutral conditions
+    m = CRESPO_M
 
     x_global = config.pos[0] + wake_field.X
 
     x_D_up = (x_global - up_pos_x) / up_D
     qualifies = up_mask & (x_D_up >= 3.0)
     delta_I = 0.73 * up_a ** 0.8325 * I_amb ** (-0.03) * x_D_up ** (-0.32)
-    contribution = jnp.where(qualifies, (delta_I * up_Uhub / config.Uhub) ** m, 0.0)
+    contribution = jnp.where(qualifies, (delta_I * up_Uhub / config.U0) ** m, 0.0)
     Iu_sq = I_amb ** m + jnp.sum(contribution)
 
     TI_total = (Iu_sq ** (1 / m)) / IU_TO_TI
-
     x_D = wake_field.X / config.D
     x_D_threshold = xv1 / TI_total
     coeff = jnp.maximum(kv1 * TI_total - kv0, 0.0)
 
-    return coeff * jnp.minimum(x_D, x_D_threshold) * config.Uhub * config.D
+    return coeff * jnp.minimum(x_D, x_D_threshold) * config.U0 * config.D
 
 def smooth_2d(U, kernel_size=3, method='gaussian'):
     """
@@ -133,7 +138,7 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
 
         if len(U_wake_list) > 0:
             # Pass 2D background and 2D wake list
-            U_total_slice = superpose(U_in, np.array(U_in_list), np.array(U_wake_list), method='MCS')[0]
+            U_total_slice = superpose(U_in, np.array(U_in_list), np.array(U_wake_list))[0]
         else:
             U_total_slice = U_in
 

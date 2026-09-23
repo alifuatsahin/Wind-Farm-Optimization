@@ -8,6 +8,14 @@ SEQ_BLUE = LinearSegmentedColormap.from_list("seq_blue", [
     "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b",
 ])
 
+# Signed fields (vorticity). Same blue as SEQ_BLUE on the negative side, the rust accent
+# on the positive, meeting at the surface color so zero reads as background.
+DIV_BLUE_RUST = LinearSegmentedColormap.from_list("div_blue_rust", [
+    "#0d366b", "#184f95", "#256abf", "#5598e7", "#9ec5f4", "#cde2fb",
+    "#fcfcfb",
+    "#f7ddc8", "#efc09b", "#e2a271", "#d0804b", "#b0562a", "#7d3a17",
+])
+
 SURFACE = "#fcfcfb"
 INK_PRIMARY = "#0b0b0b"
 INK_SECONDARY = "#52514e"
