@@ -91,9 +91,10 @@ class Turbine:
     def calculate_efficiency(self):
         return tp.calculate_efficiency(self._params, self.Uhub)
 
-    def simulate_vortex_field(self, seed=None):
+    def simulate_vortex_field(self, seed=None, total_steps=1000):
         self._params.calculation_domain = self.calculation_domain
-        self.vortex_field = tp.simulate_vortex_field(self._params, self._current_local(), seed=seed)
+        self.vortex_field = tp.simulate_vortex_field(self._params, self._current_local(),
+                                                     seed=seed, total_steps=total_steps)
 
     def initialize_wake_field(self):
         self.vortex_field, self.dl = tp.initialize_wake_field(self._params, self.vortex_field, self._current_local())

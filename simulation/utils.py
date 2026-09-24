@@ -11,10 +11,9 @@ import os
 from .superposition import superpose, interpolate_local_velocity_field
 from .viz_style import SURFACE, INK_PRIMARY, INK_SECONDARY, style_figure, style_axes, style_colorbar
 
-# Li, Wang, Dong, Yang & Zhang (2023) Energy 276, 127491 Eq (22): added-turbulence
-# contributions from several upstream rotors combine as a p-norm, exponent m=2.5 for
-# aligned turbines.
-CRESPO_M = 2.5
+# Exponent of the p-norm combining added-turbulence contributions from several upstream
+# rotors, Li, Wang, Dong, Yang & Zhang (2023) Energy 276, 127491 Eq (22).
+CRESPO_M = 2.0
 
 
 def NuT_model(wake_field, config, I_amb, up_a, up_D, up_pos_x, up_Uhub, up_mask):

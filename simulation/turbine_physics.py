@@ -128,13 +128,14 @@ def initial_vortex_state(params, local):
     return _define_location(vortex_adapter(params, local), params.field_params.NuT_max)[0]
 
 
-def simulate_vortex_field(params, local, seed=None):
+def simulate_vortex_field(params, local, seed=None, total_steps=1000):
     """Evolve this rotor's vortex system. `seed` continues an existing cloud instead of
-    starting a fresh ring -- used by the single-field march."""
+    starting a fresh ring -- used by the single-field march.
+    """
     adapter = vortex_adapter(params, local)
     stacked, _was_active = _simulate_vortex_evolution_jit(
         adapter, params.field_params.NuT_max, params.field_params.merge_threshold,
-        params.field_params.cfl_factor, 1000, seed,
+        params.field_params.cfl_factor, total_steps, seed,
     )
     return stacked
 
