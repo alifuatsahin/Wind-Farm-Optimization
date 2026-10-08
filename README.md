@@ -1,12 +1,13 @@
 # Wind Farm Wake Simulation & Optimization
 
-A Python-based framework for simulating wind turbine wakes using vortex particle methods and optimizing wind farm configurations through Bayesian optimization.
+A Python framework for simulating wind turbine wakes with a point-vortex transportation (PVT) model and optimising wind farm configurations by Bayesian optimisation.
 
 ## Features
 
-- **Physics-Based Wake Model**: Vortex particle tracking with turbulent viscosity modeling
-- **Multiple Wake Superposition**: Momentum-conserving and root-sum-square methods
-- **Bayesian Optimization**: Optimize yaw angles, turbine positions, or mixed parameters
+- **Physics-Based Wake Model**: point-vortex transport of the counter-rotating vortex pair, with an eddy-viscosity closure for the deficit
+- **Single Marched Field**: one velocity field and one vortex cloud for the whole farm -- no superposition rule, and secondary steering comes out for free
+- **JAX-Compiled Solver**: fixed-length `lax.scan` marches, compiled once per grid size and reused across evaluations
+- **Bayesian Optimization**: optimise yaw angles, turbine positions, or mixed parameters with trust-region BO (TuRBO) and Thompson sampling
 - **Advanced Visualization**: 
   - Cross-sectional wake plots with velocity and vorticity fields
   - Streamwise wake evolution panels
@@ -18,30 +19,46 @@ A Python-based framework for simulating wind turbine wakes using vortex particle
 
 ### Requirements
 
+See `requirements.txt` for the authoritative list, including the versions this code is
+validated against.
+
 ```bash
-Python >= 3.8
-numpy >= 1.20
-scipy >= 1.7
-matplotlib >= 3.4
-pandas >= 1.3
+Python >= 3.10
+
+# wake model (required)
+jax >= 0.11, jaxlib >= 0.11
+numpy >= 1.26
+scipy >= 1.11
 pyyaml >= 5.4
+matplotlib >= 3.4
+
+# optimisation (only needed for run_optimization.py)
 torch >= 2.0
 botorch >= 0.9
 gpytorch >= 1.11
+
+# validating against reference datasets (optional)
+h5py >= 3.0
+pandas >= 1.3
 ```
+
+The wake solver is compiled with JAX, so results are reproducible to the last bit only
+within a given JAX release. Install the exact versions noted in `requirements.txt` if you
+are reproducing published numbers.
 
 ### Setup
 
 ```bash
-# Clone or download the repository
-cd "PVT with Superposition"
+# Clone the repository
+git clone https://github.com/alifuatsahin/Wind-Farm-Optimization.git
+cd Wind-Farm-Optimization
 
 # Install dependencies
-pip install numpy scipy matplotlib pandas pyyaml
-pip install torch botorch gpytorch
+pip install -r requirements.txt
 
 # Verify installation
-python -c "import numpy, scipy, matplotlib, pandas, yaml, torch, botorch, gpytorch; print('All dependencies installed!')"
+python -c "import simulation; print('wake model OK')"
+python tests/test_invariants.py        # or: python -m pytest tests -q
 ```
 
 ## Quick Start
@@ -369,20 +386,26 @@ optimizer.plot_acquisition_function(
 ## File Structure
 
 ```
-PVT with Superposition/
+Wind-Farm-Optimization/
 ├── config.py                   # Configuration dataclasses
+├── requirements.txt            # Dependencies, with validated versions
 ├── run_simulation.py           # Main simulation script
 ├── run_optimization.py         # Optimization script
-├── optimization.py             # Bayesian optimization framework
+├── optimization.py             # Bayesian optimization framework (TuRBO)
 ├── plotting.py                 # Visualization tools
 ├── simulation/
 │   ├── __init__.py            # Simulation class
 │   ├── core_types.py          # Turbine and WindFarm classes
-│   ├── vortex_model.py        # Vortex particle tracking
-│   ├── model_solver.py        # Wake field solver
-│   ├── superposition.py       # Multi-wake superposition
+│   ├── wake_solver.py         # Single marched field through the whole farm
+│   ├── vortex_model.py        # Point-vortex transport and merging
+│   ├── turbine_state.py       # Immutable per-turbine parameters
+│   ├── turbine_physics.py     # Rotor aerodynamics, shed circulation, deficit march
+│   ├── model_solver.py        # Deficit transport equation
+│   ├── field_ops.py           # Field interpolation and cross-plane extraction
 │   ├── data_structures.py     # Data containers
+│   ├── viz_style.py           # Figure styling
 │   └── utils.py               # Utility functions
+├── tests/                       # Invariant and regression tests (pytest)
 └── runs/                        # Saved simulation & optimization output, one folder per run
     └── 2026-07-24_153000/       # <out_dir>/<run_name>, from Config.out_path
         ├── config.yaml         # snapshot of the Config used for this run
@@ -404,7 +427,9 @@ Main configuration container
 #### `Simulation`
 Main simulation driver
 - `run()`: Execute wake simulation
-- `calculate_objective()`: Compute total power output
+- `calculate_objective()`: Farm efficiency -- the mean over turbines of the power each
+  produces relative to the same turbine unwaked and unyawed, so it already carries the
+  cos^1.88 power loss of misalignment. This is what the optimiser maximises.
 - `save_results(out_path, limit_frames)`: Save wake field data
 
 #### `Optimizer`

@@ -7,10 +7,16 @@ from dataclasses import dataclass, field
 # Exponent in Ct(beta) = Ct(0)*cos(beta)**CT_YAW_EXP.
 CT_YAW_EXP = 2.0
 
+# Tower-to-rotor spacing as a fraction of D.
+L_NACELLE_D = 0.2
+
 
 @dataclass
 class TurbineParams:
-    """Everything about a turbine that is determined by config alone -- never mutated by WindFarm.solve()."""
+    """Everything about a turbine fixed by config alone. Genuinely immutable once built:
+    WindFarm.solve() never writes to it. calculation_domain used to live here and was
+    written per segment by the march, which quietly broke that invariant -- it is mutable
+    per-solve state and now sits in LocalConditions."""
     pos: np.ndarray
     D: float
     Zhub: float
@@ -28,7 +34,6 @@ class TurbineParams:
     dphi: float
     yloc: np.ndarray
     zloc: np.ndarray
-    calculation_domain: float = 0.0  # set once by WindFarm after layout is known
 
     @property
     def beta(self):
@@ -39,31 +44,48 @@ class TurbineParams:
         return self.D / 2
 
     @property
-    def Rv(self):
-        return 0.1 * self.D
-
-    @property
     def Yoffset(self):
-        return 5 * np.sin(self.beta)
+        """Lateral shift of the rotor centre when yawed, Zong & Porte-Agel (2020) Eq (4.10):
+        the rotor sits l_n downstream of the tower, so yawing swings it sideways by
+        l_n*sin(beta). Used as the centre of both the top-hat mask and the vortex ring,
+        each of which is placed at -Yoffset.
+        """
+        return -L_NACELLE_D * self.D * np.sin(self.beta)
 
     @property
     def Ct_yawed(self):
         """Thrust coefficient at the current yaw.
 
-        Zong & Porte-Agel (2020) Sec 3, fitting Bastankhah & Porte-Agel (2016):
-        Ct(beta) = Ct(0) * cos(beta)**1.6. The thrust counterpart of the
-        Cp * cos(beta)**1.88 correction already applied in local_conditions."""
-        return self.Ct * np.cos(self.beta) ** CT_YAW_EXP
+        DEVIATION FROM ZONG, deliberate. His Eq (3.3) uses Ct(beta) = Ct(0)*cos(beta)**1.6,
+        which he states is a FIT to Bastankhah & Porte-Agel (2016) data, not a derivation.
+        CT_YAW_EXP = 2 is instead the momentum-theory value: the rotor-normal inflow is
+        U*cos(beta), so T = 2*rho*A*a*(1-a)*(U cos beta)^2 and Ct(beta) = Ct(0)cos^2(beta).
+        Backing the exponent out of the yawed LES gives 1.97. It also makes
+        Ct_eff = Ct*cos(beta), the combination that appears throughout the yawed-wake
+        literature. Note Heck, Johlas & Howland (2023) JFM 959 argue no fixed cos^n is
+        exact, since the induction itself depends on both yaw and Ct."""
+        return self.Ct_at(self.beta)
+
+    def Ct_at(self, beta):
+        """Ct at an ARBITRARY yaw. Everything that needs a yawed thrust coefficient goes
+        through here, so CT_YAW_EXP cannot drift between call sites -- compute_Ut used to
+        hardcode its own cos(beta)**1.6 and so ran on a different induction factor than
+        the rest of the model."""
+        return self.Ct * np.cos(beta) ** CT_YAW_EXP
 
     @property
     def a(self):
-        """Axial induction factor, Zong & Porte-Agel (2020) Eq (3.3):
-        a = (1 - sqrt(1 - Ct/cos(beta))) / 2, with Ct evaluated AT the yaw angle.
+        return self.a_at(self.beta)
 
-        Using the unyawed Ct here makes a *rise* with yaw (0.276 -> 0.329 at 25 deg)
-        when it should fall (-> 0.252), over-deepening yawed wakes by ~26%: the
-        measured near-wake minimum 0.347 matched 1-2a from the unyawed Ct exactly."""
-        return (1 - np.sqrt(1 - self.Ct_yawed / np.cos(self.beta))) / 2
+    def a_at(self, beta):
+        """Axial induction factor, Zong & Porte-Agel (2020) Eq (3.3):
+        a = (1 - sqrt(1 - Ct(beta)/cos(beta))) / 2, with Ct evaluated AT the yaw angle.
+        Under CT_YAW_EXP = 2 this collapses to a = (1 - sqrt(1 - Ct(0)cos(beta)))/2.
+
+        Ct(beta) must be the yawed value: using the unyawed Ct makes a RISE with yaw
+        (0.276 -> 0.329 at 25 deg) when it should fall, over-deepening yawed wakes."""
+        cb = np.cos(beta)
+        return (1 - np.sqrt(np.maximum(1 - self.Ct_at(beta) / cb, 0.0))) / 2
 
     @property
     def dl(self):
@@ -76,7 +98,7 @@ class TurbineParams:
 jax.tree_util.register_dataclass(
     TurbineParams,
     data_fields=["pos", "D", "Zhub", "yaw", "TSR", "Ct", "Cp", "Uh", "Zh", "WV",
-                 "phi", "dphi", "yloc", "zloc", "calculation_domain"],
+                 "phi", "dphi", "yloc", "zloc"],
     meta_fields=["config", "field_params", "Nv"],
 )
 
@@ -88,11 +110,12 @@ class LocalConditions:
     V: np.ndarray
     W: np.ndarray
     Uin: np.ndarray
+    calculation_domain: float = 0.0  # how far downstream this rotor's field is marched
 
 
 jax.tree_util.register_dataclass(
     LocalConditions,
-    data_fields=["Uhub", "V", "W", "Uin"],
+    data_fields=["Uhub", "V", "W", "Uin", "calculation_domain"],
     meta_fields=[],
 )
 
@@ -100,7 +123,7 @@ jax.tree_util.register_dataclass(
 @dataclass
 class VortexSimConfig:
     """Registered-pytree replacement for the SimpleNamespace adapter
-    turbine_physics.simulate_vortex_field builds to call vortex_model.simulate_vortex_evolution.
+    turbine_physics.simulate_vortex_field builds to call vortex_model._simulate_vortex_evolution_jit.
     Nv is meta: it is only read as a plain Python int (never appears inside a traced array
     expression in vortex_model.py), so marking it static avoids treating it as a value that
     could legitimately vary under trace, with no actual effect on correctness either way here."""
@@ -112,6 +135,8 @@ class VortexSimConfig:
     beta: float
     Yoffset: float
     Zhub: float
+    nu_slope: float
+    nu_const: float
     Nv: int
     V: np.ndarray
     W: np.ndarray
@@ -122,7 +147,7 @@ class VortexSimConfig:
 jax.tree_util.register_dataclass(
     VortexSimConfig,
     data_fields=["D", "Uhub", "dgamma", "calculation_domain", "phi", "beta", "Yoffset",
-                 "Zhub", "V", "W", "yloc", "zloc"],
+                 "Zhub", "nu_slope", "nu_const", "V", "W", "yloc", "zloc"],
     meta_fields=["Nv"],
 )
 
@@ -173,7 +198,7 @@ def pack_upstream_turbines(upstream_turbines, n_max):
 def make_turbine_params(config, field_params) -> TurbineParams:
     """Replicates the static portion of the current Turbine.__init__."""
     Nv = field_params.Nv
-    phi = np.linspace(-np.pi, np.pi, Nv)
+    phi = np.linspace(-np.pi, np.pi, Nv, endpoint=False)
     dphi = abs(phi[1] - phi[0])
 
     beta = np.deg2rad(config.yaw)
@@ -182,8 +207,13 @@ def make_turbine_params(config, field_params) -> TurbineParams:
     Ly = field_params.max_Y * config.D
     Lz = field_params.max_Z * config.D
     n_grids = field_params.n_grids
-    Ny = max(2, int(Ly / (config.D / n_grids)))
-    Nz = max(2, int(Lz / (config.D / n_grids)))
+    # D cancels algebraically here (Ly = max_Y*D), so take the ratio directly rather
+    # than round-tripping through it: (max_Z*D)/(D/n_grids) evaluates to
+    # 17.999999999999996 for D = 12.6, and the truncation then silently drops a grid
+    # point and shifts results by ~0.5%. Whether it happens depends on the floating-
+    # point representation of D alone, which is not something a user can anticipate.
+    Ny = max(2, int(round(field_params.max_Y * n_grids)))
+    Nz = max(2, int(round(field_params.max_Z * n_grids)))
     if config.Zhub - Lz / 2 < 0:
         zlims = (0, Lz)
     else:

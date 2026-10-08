@@ -143,7 +143,6 @@ class FieldConfig:
     Uh: float = 10.0 # Measured wind speed
     Zh: float = 80.0 # Height of the wind speed measurement
     WV: float = 0.0 # Vertical wind veer
-    NuT_max: float = 0.025 # Maximum turbulent viscosity ratio
     I_amb: float = 0.072 # Ambient turbulence intensity
     Nv: int = 49
     z0: float = 0.03 # Surface roughness length (Open sea 0.0002, Flat land 0.03)
@@ -152,7 +151,8 @@ class FieldConfig:
     max_Z: float = 2.0 # Maximum vertical distance to simulate (in rotor diameters)
     n_grids: int = 20 # Number of grids in each direction
     cfl_factor: float = 0.125 # CFL factor for adaptive time stepping
-    merge_threshold: float = 0.0075 # Vortex merging distance threshold
+    merge_threshold: float = 0.05 # Vortex merging distance, IN ROTOR DIAMETERS.
+    vortex_nu: str = 'abl'
 
 @dataclass
 class Config:

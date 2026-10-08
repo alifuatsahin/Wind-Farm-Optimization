@@ -4,5 +4,6 @@
 runs/
 data/
 make_paper_figures.py
+paper_metrics.py
 validation.py
 experiments/

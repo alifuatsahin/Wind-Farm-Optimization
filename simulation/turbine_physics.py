@@ -9,9 +9,9 @@ from jax.scipy.special import erf as jerf
 
 from .turbine_state import LocalConditions, VortexSimConfig, DeficitFieldConfig, pack_upstream_turbines
 from .utils import smooth_2d, NuT_model
-from .vortex_model import _simulate_vortex_evolution_jit
+from .vortex_model import _simulate_vortex_evolution_jit, _UNSTACKED
 from .model_solver import advance_wake_field
-from .superposition import interpolate_vec_data
+from .field_ops import interpolate_vec_data
 
 
 def init_Uin(params):
@@ -21,10 +21,12 @@ def init_Uin(params):
 
 
 def nominal_hub_velocity(params):
-    """Rotor-averaged undisturbed inflow -- depends only on config, never on the mutated Uin."""
+    """Rotor-averaged undisturbed inflow -- depends only on config, never on the mutated Uin.
+    """
     Uin = init_Uin(params)
-    rotor_mask = np.sqrt((params.yloc) ** 2 + (params.zloc - params.Zhub) ** 2) <= (params.D / 2)
-    return np.mean(Uin[rotor_mask])
+    r2 = (((params.yloc + params.Yoffset) ** 2) / (np.cos(params.beta) ** 2)
+          + (params.zloc - params.Zhub) ** 2)
+    return float(np.mean(Uin[np.sqrt(r2) <= params.R]))
 
 
 def init_local_conditions(params):
@@ -61,7 +63,7 @@ def compute_Ut(params, Uhub, beta=None):
     zsafe = np.maximum(z, params.field_params.z0 + 1e-6)
     Utbl = params.Uh * (np.log(zsafe / params.field_params.z0) / np.log(params.Zh / params.field_params.z0))
     cb = np.cos(beta)
-    a = 0.5 * (1.0 - np.sqrt(max(1.0 - params.Ct * cb ** 1.6 / cb, 0.0)))
+    a = params.a_at(beta)
     U_tx = (1 - a) * Utbl - omega * params.R * np.sin(params.phi) * np.sin(beta)
     U_ty = -omega * params.R * np.sin(params.phi) * cb
     U_tz = omega * params.R * np.cos(params.phi)
@@ -83,8 +85,8 @@ def compute_dgamma(params, Uhub):
 
     shape_b = _shed_shape(params, Uhub, params.beta)
     shape_0 = _shed_shape(params, Uhub, 0.0)
-    dgamma_b = gamma_ref / np.sum(shape_b[1:]) * shape_b
-    dgamma_0 = gamma_ref / np.sum(shape_0[1:]) * shape_0
+    dgamma_b = gamma_ref / np.sum(shape_b) * shape_b
+    dgamma_0 = gamma_ref / np.sum(shape_0) * shape_0
 
     # zero-mean, so rescaling it leaves the total (torque) circulation untouched
     asym_yaw = (dgamma_b - dgamma_b.mean()) - (dgamma_0 - dgamma_0.mean())
@@ -103,17 +105,54 @@ def calculate_efficiency(params, Uhub):
     return P / nominal_P
 
 
+def abl_nu_slope(params):
+    """d(nu_T)/dx for a vortex in the ABL -- Shapiro, Gayme & Meneveau (JFM), "Generation
+    and decay of counter-rotating vortices downstream of yawed wind turbines in the
+    atmospheric boundary layer", Eq (4.7):
+
+        nu_T(x) = u* * 2k(x - x0)/sqrt(24),   k = kappa/ln(z_h/z0),   u* = k*U_inf
+
+    Their argument (Sec 4): a vortex in the ABL is not diffused by its own swirl but by
+    boundary-layer turbulence, so the velocity scale is the friction velocity and the
+    length scale is the vortex size, which grows linearly as the Jensen wake scale. The
+    sqrt(24) converts a top-hat width to a Gaussian second moment. Every constant is
+    fixed by the log law -- there is no fitted decay rate.
+
+    Contrast Zong Sec 4.1's nu_E = 0.005*Gamma0, which is the Squire (1965) scaling on the
+    vortex's OWN circulation and carries no ambient turbulence at all; it is 6-32x smaller
+    over x/D = 2-10, which is why the model conserved circulation where the LES does not.
+    """
+    k = 0.4 / np.log(params.Zh / params.field_params.z0)
+    u_star = k * params.Uh
+    return u_star * 2.0 * k / np.sqrt(24.0)
+
+
+def squire_nu(params, Uhub):
+    """Zong Sec 4.1's core diffusivity, nu_E = 0.03*Gamma_0/(2pi) = 0.005*Gamma_0 -- the
+    Squire (1965) scaling, in which the vortex is diffused by the turbulence it generates
+    itself. Superseded by abl_nu_slope; retained only so the ablation in the paper can be
+    reproduced without editing the model."""
+    return 0.005 * abs(compute_gamma0(params, Uhub) * 0.45)
+
+
 def vortex_adapter(params, local):
-    """Builds a VortexSimConfig"""
+    """Builds a VortexSimConfig. field_params.vortex_nu selects the core-diffusion model:
+    'abl' (default, Shapiro Eq 4.7) or 'squire' (the original PVT closure)."""
+    if getattr(params.field_params, "vortex_nu", "abl") == "squire":
+        nu_slope, nu_const = 0.0, squire_nu(params, local.Uhub)
+    else:
+        nu_slope, nu_const = abl_nu_slope(params), 0.0
     return VortexSimConfig(
         D=params.D,
         Uhub=local.Uhub,
         dgamma=jnp.asarray(compute_dgamma(params, local.Uhub)),
-        calculation_domain=params.calculation_domain,
+        calculation_domain=local.calculation_domain,
         phi=jnp.asarray(params.phi),
         beta=params.beta,
         Yoffset=params.Yoffset,
         Zhub=params.Zhub,
+        nu_slope=nu_slope,
+        nu_const=nu_const,
         Nv=params.Nv,
         V=jnp.asarray(local.V),
         W=jnp.asarray(local.W),
@@ -125,7 +164,7 @@ def vortex_adapter(params, local):
 def initial_vortex_state(params, local):
     """The fresh ring + hub + mirror vortices this rotor sheds, before any evolution."""
     from .vortex_model import _define_location
-    return _define_location(vortex_adapter(params, local), params.field_params.NuT_max)[0]
+    return _define_location(vortex_adapter(params, local))[0]
 
 
 def simulate_vortex_field(params, local, seed=None, total_steps=1000):
@@ -134,7 +173,7 @@ def simulate_vortex_field(params, local, seed=None, total_steps=1000):
     """
     adapter = vortex_adapter(params, local)
     stacked, _was_active = _simulate_vortex_evolution_jit(
-        adapter, params.field_params.NuT_max, params.field_params.merge_threshold,
+        adapter, params.field_params.merge_threshold * params.D,  # config value is in diameters
         params.field_params.cfl_factor, total_steps, seed,
     )
     return stacked
@@ -160,9 +199,30 @@ def _ct_eff(params):
     return float(params.Ct_yawed / np.cos(params.beta))
 
 
+#: Members of a stacked VortexField that carry NO leading frame axis. The cross-plane
+#: grid is identical at every step, so the marches store one copy instead of one per
+#: step; see vortex_model._simulate_vortex_evolution_jit.
+_UNSTACKED_MEMBERS = ("yloc", "zloc")
+
+
+def _frame(stacked, i, unstacked=_UNSTACKED_MEMBERS):
+    """Frame `i` of a stacked VortexField, leaving the unstacked members alone.
+
+    Replaces a plain tree_map(leaf[i]), which would slice the grid's first row instead
+    of selecting a frame. `unstacked` differs between the two marches: U carries no
+    frame axis coming out of the vortex march (initialize_wake_field stores the single
+    seed field), but does carry one coming out of the deficit march, where it is the
+    quantity being marched.
+    """
+    sliced = {f.name: getattr(stacked, f.name)[i]
+              for f in dataclasses.fields(stacked)
+              if f.name not in unstacked}
+    return dataclasses.replace(stacked, **sliced)
+
+
 def initialize_wake_field(params, stacked, local):
-    yloc = np.asarray(stacked.yloc[0])
-    zloc = np.asarray(stacked.zloc[0])
+    yloc = np.asarray(stacked.yloc)
+    zloc = np.asarray(stacked.zloc)
     beta = params.beta
 
     dl = params.dl  # equivalent to yloc[1,0]-yloc[0,0]; verified in Step 1 sub-step 5
@@ -175,12 +235,9 @@ def initialize_wake_field(params, stacked, local):
 
     U_smooth = Uin - smooth_2d(Uin - U, kernel_size=3)
 
-    total_steps = stacked.t.shape[0]
-    U_field = jnp.zeros((total_steps,) + U_smooth.shape).at[0].set(jnp.asarray(U_smooth))
-
     new_stacked = dataclasses.replace(
         stacked,
-        U=U_field,
+        U=jnp.asarray(U_smooth),
         X=stacked.X.at[0].set(0.0),
         t=stacked.t.at[0].set(0.0),
     )
@@ -206,20 +263,19 @@ def calculate_deficit_field(params, local, stacked, dl, upstream_turbines, N_ups
     )
     dt_cap = min(dl / local.Uhub, 0.25 * params.D / local.Uhub)  # constant for the whole run -- plain floats
 
-    seed = jax.tree_util.tree_map(lambda leaf: leaf[0], stacked)
+    seed = _frame(stacked, 0, unstacked=_UNSTACKED_MEMBERS + ("U",))
     stacked_out, was_active = _calculate_deficit_field_jit(
         stacked, seed, adapter, params.field_params.I_amb, params.field_params.WV,
-        up_a, up_D, up_pos_x, up_Uhub, up_mask, dl, dt_cap, params.calculation_domain, max_steps,
+        up_a, up_D, up_pos_x, up_Uhub, up_mask, dl, dt_cap, local.calculation_domain, max_steps,
     )
     # was_active[k] corresponds to buffer index k+1 (the loop below is 1-indexed exactly like
     # the original); kept_count includes the seed (index 0) plus every real advance.
     kept_count = int(jnp.sum(was_active)) + 1
 
-    frames = [_vortex_field_to_numpy(seed)]
-    frames += [
-        _vortex_field_to_numpy(jax.tree_util.tree_map(lambda leaf, i=i: leaf[i], stacked_out))
-        for i in range(kept_count - 1)
-    ]
+    grid = (np.asarray(seed.yloc), np.asarray(seed.zloc))
+    frames = [_vortex_field_to_numpy(seed, grid)]
+    frames += [_vortex_field_to_numpy(_frame(stacked_out, i), grid)
+               for i in range(kept_count - 1)]
     return frames
 
 
@@ -250,23 +306,34 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, 
             return current, active
 
         next_state, next_active = lax.cond(active, when_active, when_inactive, operand=None)
-        return (next_state, next_active), (next_state, active)
+        emitted = dataclasses.replace(next_state, yloc=_UNSTACKED, zloc=_UNSTACKED)
+        return (next_state, next_active), (emitted, active)
 
     init_carry = (seed, True)
     _, (stacked_out, was_active) = lax.scan(scan_step, init_carry, xs=None, length=max_steps)
+    stacked_out = dataclasses.replace(stacked_out, yloc=seed.yloc, zloc=seed.zloc)
     return stacked_out, was_active
 
 
-def _vortex_field_to_numpy(vortex_field):
+def _vortex_field_to_numpy(vortex_field, grid=None):
     """Converts every array field of a VortexField from jnp back to plain numpy, and t/X
     (0-d jnp arrays once produced inside jax-based code) back to Python floats -- the Loop-2/
-    downstream (save_results, plotting) boundary contract."""
+    downstream (save_results, plotting) boundary contract.
+
+    `grid` is an optional pre-converted (yloc, zloc) pair. Every frame of a march has the
+    same cross-plane grid, so converting it per frame would give each of the hundreds of
+    retained frames its own identical copy; pass it once and share the reference. Nothing
+    downstream writes to yloc/zloc.
+    """
+    yloc, zloc = grid if grid is not None else (np.asarray(vortex_field.yloc),
+                                                np.asarray(vortex_field.zloc))
     return dataclasses.replace(
         vortex_field,
         Y=np.asarray(vortex_field.Y), Z=np.asarray(vortex_field.Z),
         Rv=np.asarray(vortex_field.Rv), Circ=np.asarray(vortex_field.Circ),
-        Nu=np.asarray(vortex_field.Nu), active=np.asarray(vortex_field.active),
-        yloc=np.asarray(vortex_field.yloc), zloc=np.asarray(vortex_field.zloc),
+        age=np.asarray(vortex_field.age),
+        active=np.asarray(vortex_field.active),
+        yloc=yloc, zloc=zloc,
         V=np.asarray(vortex_field.V), W=np.asarray(vortex_field.W),
         U=np.asarray(vortex_field.U), OmegaX=np.asarray(vortex_field.OmegaX),
         t=float(vortex_field.t), X=float(vortex_field.X),

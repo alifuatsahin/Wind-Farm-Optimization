@@ -8,11 +8,18 @@ import numpy as np
 import jax.numpy as jnp
 import os
 
-from .superposition import superpose, interpolate_local_velocity_field
+from .field_ops import interpolate_local_velocity_field
 from .viz_style import SURFACE, INK_PRIMARY, INK_SECONDARY, style_figure, style_axes, style_colorbar
 
 # Exponent of the p-norm combining added-turbulence contributions from several upstream
-# rotors, Li, Wang, Dong, Yang & Zhang (2023) Energy 276, 127491 Eq (22).
+# rotors, Li, Wang, Dong, Yang & Zhang (2023) Energy 276, 127491 Eq (22). m = 1 is the
+# linear sum, m -> inf the dominant-upstream rule.
+#
+# We use m = 2, NOT the m = 2.5 Li fits for aligned rows. m = 2 adds the contributions in
+# variance, which is what independent fluctuations do, and is the only value in the family
+# with a physical derivation rather than a fit. m is a level knob -- its optimum moves with
+# the dataset and often sits on a sweep boundary -- so it is fixed on principle and never
+# tuned, and a sweep over it is not a validation.
 CRESPO_M = 2.0
 
 
@@ -42,7 +49,9 @@ def NuT_model(wake_field, config, I_amb, up_a, up_D, up_pos_x, up_Uhub, up_mask)
 
     x_D_up = (x_global - up_pos_x) / up_D
     qualifies = up_mask & (x_D_up >= 3.0)
-    delta_I = 0.73 * up_a ** 0.8325 * I_amb ** (-0.03) * x_D_up ** (-0.32)
+    # Crespo & Hernandez (1996) JWEIA 61, 71-85, valid for 5 < x/D < 15, 0.07 < I0 < 0.14,
+    # 0.1 < a < 0.4.
+    delta_I = 0.73 * up_a ** 0.8325 * I_amb ** (-0.0325) * x_D_up ** (-0.32)
     contribution = jnp.where(qualifies, (delta_I * up_Uhub / config.U0) ** m, 0.0)
     Iu_sq = I_amb ** m + jnp.sum(contribution)
 
@@ -76,7 +85,7 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
         print("No turbines found in wind farm.")
         return
 
-    print("Generating Momentum Conserving Superposition Map...")
+    print("Generating Farm Deficit Map...")
 
     elevation_func = wind_farm.turbine_configs.elevation_func
 
@@ -118,28 +127,17 @@ def plot_farm_deficit_map(wind_farm, x_resolution=300, y_resolution=100, z_resol
     U_xy_map = np.zeros((len(Y_vis), len(X_vis))) # (Y, X)
     U_xz_map = np.zeros((len(Z_vis), len(X_vis))) # (Z, X)
 
-    # 3. Streamwise Iteration
+    # 3. Streamwise iteration. One marched field, so the velocity at each station is
+    #    whatever the nearest upstream rotor carried there -- no combination step.
     for i, x_global in enumerate(X_vis):
-        
-        U_wake_list = []
-        U_in_list = []
-        
-        for t in wind_farm.turbines:
-            dist = x_global - t.pos[0]
-            
-            if dist > 0 and dist < t.calculation_domain:
-                # Interpolate returns a (Y, Z) slice
-                u_local_abs, u_in_local = interpolate_local_velocity_field(
-                    t, dist, Y_loc, Z_loc, default=U_in
-                )
-                U_wake_list.append(u_local_abs)
-                U_in_list.append(u_in_local)
-
-        if len(U_wake_list) > 0:
-            # Pass 2D background and 2D wake list
-            U_total_slice = superpose(U_in, np.array(U_in_list), np.array(U_wake_list))[0]
-        else:
+        src = max((t for t in wind_farm.turbines if t.pos[0] < x_global),
+                  key=lambda t: t.pos[0], default=None)
+        if src is None:
             U_total_slice = U_in
+        else:
+            u_abs, _ = interpolate_local_velocity_field(
+                src, x_global - src.pos[0], Y_loc, Z_loc, default=U_in)
+            U_total_slice = np.asarray(u_abs)
 
         # Top View: Take all Y at fixed Z (Reference Hub Height)
         U_xy_map[:, i] = U_total_slice[:, z_ref_idx]

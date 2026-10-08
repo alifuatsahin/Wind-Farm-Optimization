@@ -1,3 +1,5 @@
+"""Interpolation of a turbine's marched wake field onto arbitrary grids.
+"""
 import numpy as np
 import jax.numpy as jnp
 from scipy.interpolate import RegularGridInterpolator
@@ -36,8 +38,11 @@ def interpolate_vec_data(stacked, t):
 
     return VortexField(
         Y=gather(stacked.Y), Z=gather(stacked.Z), Rv=gather(stacked.Rv), Circ=gather(stacked.Circ),
-        Nu=gather(stacked.Nu), active=gather(stacked.active),
-        yloc=gather(stacked.yloc), zloc=gather(stacked.zloc),
+        age=gather(stacked.age), active=gather(stacked.active),
+        # yloc/zloc are the cross-plane grid and carry no frame axis -- they are identical
+        # at every step, so the vortex march stores one copy rather than total_steps of
+        # them. Passing them through is exactly what gathering used to return.
+        yloc=stacked.yloc, zloc=stacked.zloc,
         V=interp_pair(stacked.V), W=interp_pair(stacked.W),
         OmegaX=gather(stacked.OmegaX),
         t=t,
@@ -157,233 +162,50 @@ def _interp_field(field, y_source, z_source, target_yloc, target_zloc, default=N
         result = np.nan_to_num(result, nan=0.0)
     return result
 
-def get_local_velocity_field(config, wind_farm, method='linear'):
-    """Compute the combined velocity field at a given downstream turbine plane."""
 
-    upstream_turbines = [t for t in wind_farm.turbines if t.pos[0] < config.pos[0]]
+# ------------------------------------------------------------------ field read-out
+# In a single marched field the velocity at any station is whatever the nearest upstream
+# rotor's march carried there -- no combination step, so these replace what used to be
+# superpose() over every turbine's wake.
 
-    # Freestream inflow at that turbine plane
-    U_base = config.init_Uin() # shape (Ny, Nz)
-    V_base = np.zeros_like(U_base)
-    W_base = np.zeros_like(U_base)
+def _source_turbine(turbines, x_m):
+    return max((t for t in turbines if t.pos[0] < x_m), key=lambda t: t.pos[0], default=None)
 
-    if not upstream_turbines:
-        return U_base, V_base, W_base
 
-    # Get wake fields at this x-plane (interpolated to downstream grid)
-    wake_fields = [interpolate_vortex_field(t, config.pos, config.yloc, config.zloc, config.init_Uin()) 
-                   for t in upstream_turbines]
-    
-    # Interpolate local_Uins to downstream grid to match u_yz spatial locations
-    local_Uins_interpolated = []
-    for t in upstream_turbines:
-        source_yloc = t.yloc + t.pos[1]
-        source_zloc = t.zloc + t.pos[2]
-        target_yloc = config.yloc + config.pos[1]
-        target_zloc = config.zloc + config.pos[2]
-        Uin_interp = _interp_field(t.Uin, source_yloc, source_zloc, target_yloc, target_zloc, default=U_base)
-        local_Uins_interpolated.append(Uin_interp)
-    
-    local_Uins = np.array(local_Uins_interpolated)
-    u_yz = np.array([wf.U for wf in wake_fields])
-    v_yz = np.array([wf.V for wf in wake_fields])
-    w_yz = np.array([wf.W for wf in wake_fields])
+def _log_profile(fp, Z):
+    return fp.Uh * (np.log(np.maximum(Z, fp.z0 + 1e-3) / fp.z0) / np.log(fp.Zh / fp.z0))
 
-    # Superpose wakes
-    U, V, W = superpose(U_base, local_Uins, u_yz, v_yz, w_yz, method=method)
 
-    return U, V, W
+def extract_cross_plane(wind_farm, x_m, y_grid, z_grid):
+    """Streamwise velocity on a (Y, Z) plane at one station. 1-D y/z vectors in."""
+    fp = wind_farm.field_params
+    Y, Z = np.meshgrid(y_grid, z_grid, indexing='ij')
+    U_in = _log_profile(fp, Z)
+    src = _source_turbine(wind_farm.turbines, x_m)
+    if src is None:
+        return U_in
+    U, _ = interpolate_local_velocity_field(src, x_m - src.pos[0], Y, Z, default=U_in)
+    return np.asarray(U)
 
-def superpose(U_in, local_Uins, u_yz, v_yz=None, w_yz=None, method='linear'):
-    """Superpose multiple wake velocity fields using specified method.
 
-        'linear' linear sum of local-inflow deficits (default; Zong's Method C)
-        'MCS'    momentum-conserving superposition
-        'RSS'    root-sum-square against freestream (Method B; unusable in deep arrays,
-                 R2 -8.4 on the 8-turbine case -- it sums many large quadrature terms
-                 against the freestream and collapses the field)
+def extract_hub_height_slice(wind_farm, x_m_target, y_m_target, nz=41):
+    """Hub-height (x, y) map of streamwise velocity, plus the reference Uh."""
+    ts = wind_farm.turbines
+    fp = wind_farm.field_params
+    D, Zhub = ts[0].D, ts[0].Zhub
+    x_global, y_global = np.asarray(x_m_target), np.asarray(y_m_target)
 
-    MCS has the stronger theoretical claim -- it is the only one derived from momentum
-    conservation, and it is the only one that measurably achieves it (combined wake
-    momentum / sum of parts = 1.000, where linear loses 5-10%). It is nonetheless NOT the
-    default, on measurement: on the 8-turbine case linear gives field R2 0.953 vs 0.920,
-    per-turbine power RMSE 0.085 vs 0.108, and LES R2 0.929 vs 0.923.
+    z_vec = np.linspace(0.0, max(t.Zhub + t.pos[2] for t in ts) + fp.max_Z * D, nz)
+    Y, Z = np.meshgrid(y_global, z_vec, indexing='ij')
+    k_hub = int(np.argmin(np.abs(z_vec - Zhub)))
+    U_in = _log_profile(fp, Z)
 
-    The reason is a structural artifact of MCS at the first genuinely superposed station.
-    There, two strong wakes overlap and nothing weak dilutes the deficit-weighted mean, so
-    U_c (Eq 2.7) comes out low -- 0.708*U_in vs 0.761-0.777 further downstream -- the
-    Eq 2.9 weights run high, and the combined deficit over-deepens. Turbine 3's predicted
-    power dips to 0.86 of measured while its neighbours sit at 1.06 and 1.14. MCS's
-    slightly better MEAN power bias (+6.3% vs +7.2%) is that dip cancelling against
-    over-prediction elsewhere, not better accuracy -- judge on power RMSE, not the mean.
-    """
-    if method == 'linear':
-        return linear_local_superposition(U_in, local_Uins, u_yz, v_yz, w_yz)
-    elif method == 'MCS':
-        return momentum_conserving_superposition(U_in, local_Uins, u_yz, v_yz, w_yz)
-    elif method == 'RSS':
-        return RSS_superposition(U_in, u_yz, v_yz, w_yz)
-    else:
-        raise ValueError(f"unknown superposition method {method!r}; expected 'linear', 'MCS' or 'RSS'")
-
-def linear_local_superposition(U_in, local_Uins, u_yz, v_yz=None, w_yz=None):
-    """
-    Linear superposition of local-inflow deficits -- Zong & Porte-Agel's method C
-    (Niayifar & Porte-Agel 2016).
-
-    U_in: Freestream velocity field (2D array of shape (Ny, Nz))
-    local_Uins: Freestream velocities at each turbine (3D array of shape (i_turbine, Ny, Nz))
-    u_yz: Wake velocity fields (3D array of shape (i_turbine, Ny, Nz))
-    Returns combined wake velocity field (2D array of shape (Ny, Nz))
-    """
-
-    # 1. Calculate Individual Deficits (u_i_s)
-    u_s = np.maximum(local_Uins - u_yz, 0)
-
-    # 2. Calculate Total Deficit
-    U_s = np.sum(u_s, axis=0)
-    U_s = np.minimum(U_s, U_in)  # prevent over-deficit
-
-    # 3. Combined Wake Velocity Field
-    U = U_in - U_s
-
-    if v_yz is not None:
-        V = np.sum(v_yz, axis=0)
-    else:
-        V = None
-    if w_yz is not None:
-        W = np.sum(w_yz, axis=0)
-    else:
-        W = None
-
-    return U, V, W
-
-def RSS_superposition(U_in, u_yz, v_yz=None, w_yz=None):
-    """
-    Root-Sum-Square (RSS) superposition of multiple wake velocity fields.
-    U_in: Freestream velocity field (2D array of shape (Ny, Nz))
-    u_yz: Wake velocity fields (3D array of shape (i_turbine, Ny, Nz))
-    Returns combined wake velocity field (2D array of shape (Ny, Nz))
-    """
-    
-    # 1. Calculate Individual Deficits (u_i_s)
-    u_s = np.maximum(U_in[None, :, :] - u_yz, 0)
-
-    # 2. Calculate Total Deficit (Eq 2.4)
-    U_s = np.sqrt(np.sum(u_s ** 2, axis=0))
-    U_s = np.minimum(U_s, U_in)  # prevent over-deficit
-
-    # 3. Combined Wake Velocity Field
-    U = U_in - U_s
-
-    if v_yz is not None:
-        V = np.sum(v_yz, axis=0)
-    else:
-        V = None
-    if w_yz is not None:
-        W = np.sum(w_yz, axis=0)
-    else:
-        W = None
-
-    return U, V, W
-
-def momentum_conserving_superposition(U_in, local_Uins, u_yz, v_yz=None, w_yz=None):
-    """
-    Momentum-Conserving Superposition (MCS) of multiple wake velocity fields.
-        U_in: Freestream velocity field (2D array of shape (Ny, Nz))
-        local_Uins: Freestream velocities at each turbine (3D array of shape (i_turbine, Ny, Nz))
-        u_yz: Wake velocity fields (3D array of shape (i_turbine, Ny, Nz))
-        v_yz: Transverse wake velocity fields (3D array of shape (i_turbine, Ny, Nz)) or None
-        w_yz: Vertical wake velocity fields (3D array of shape (i_turbine, Ny, Nz)) or None
-        Returns combined wake velocity field (2D array of shape (Ny, Nz))
-
-    Eq (2.9) is solved in closed form. u_c^i and u_s^i are fixed, so with
-    A = sum_i u_c^i u_s^i the update Uc <- sum(U*U_s)/sum(U_s) becomes
-    Uc = P/R - (Q/R)/Uc for P = sum(U_in*A), Q = sum(A^2), R = sum(A), i.e. a root of
-
-        Uc^2 - (P/R) Uc + Q/R = 0
-
-    with the larger root the stable one. A negative discriminant means no
-    momentum-conserving combined wake exists.
-
-    Writing <f>_A = sum(f*A)/sum(A), the quadratic is Uc^2 - <U_in>_A Uc + <A>_A = 0, so a
-    root exists iff <U_in>_A^2 >= 4<A>_A. For a SINGLE wake with u_c ~ U_in - u_s that
-    reduces to (2r - 1)^2 >= 0 with r = u_s/U_in: always satisfied, touching zero exactly
-    at r = 1/2. No-root is therefore a pure superposition effect, triggered once the
-    COMBINED deficit passes roughly half the local inflow.
-
-    Re-measured 2026-09-23 (after the d2Uin_dY2 solver fix, which invalidated the earlier
-    ~4% figure): 7.1% of multi-wake stations on the 8-turbine case, 9.9% on the aligned
-    LES, 0% on the yawed LES. In every case it fires ONLY where exactly two wakes overlap,
-    and only in a ~2D window immediately behind the second rotor.
-
-    This is a limit of MCS, not a defect in the wakes being fed to it. At those same
-    stations the reference data carries a peak deficit of 0.61 (LES) and 0.75 (PIV) versus
-    the model's summed 0.63 and 0.68 -- the flow really is that slow there, so the model is
-    not over-removing momentum. Zong never hits it because his individual wakes are the
-    smooth far-wake Gaussian of Eq 2.4, whose peak stays well under U_in/2; ours is a
-    marched PVT field that resolves the near wake, where a deficit above U_in/2 is real.
-
-    The discriminant is clamped to zero rather than branching to another superposition
-    law. That puts U_c at the parabola vertex P/(2R), which is exactly where the root
-    goes as the discriminant approaches zero, so the solution stays CONTINUOUS -- it
-    matters because this feeds a layout optimizer. Branching instead (to linear, or worse
-    to RSS) jumps the field by 19-24% of U_in at the switch. Measured cost of continuity:
-    0.012 in field R2, and none at all in predicted power.
-    """
-
-    # 1. Calculate Individual Deficits (u_i_s)
-    u_s = np.maximum(local_Uins - u_yz, 0) # shape (i_turbine, Ny, Nz)
-
-    deficit_sums = np.sum(u_s, axis=(1,2))
-    valid_mask = deficit_sums > 1e-6
-    n_valid = int(np.count_nonzero(valid_mask))
-
-    if n_valid == 0:
-        # No valid wakes, return freestream
-        V = np.sum(v_yz, axis=0) if v_yz is not None else None
-        W = np.sum(w_yz, axis=0) if w_yz is not None else None
-        return U_in, V, W
-
-    if n_valid == 1:
-        # A single wake superposed with nothing is itself
-        weights = valid_mask.astype(float)
-        U_s = np.minimum(np.sum(weights[:, None, None] * u_s, axis=0), U_in)
-        V = np.sum(weights[:, None, None] * v_yz, axis=0) if v_yz is not None else None
-        W = np.sum(weights[:, None, None] * w_yz, axis=0) if w_yz is not None else None
-        return U_in - U_s, V, W
-
-    # 2. Calculate Individual Convection Velocities (Uc_i)
-    u_c = np.zeros(u_s.shape[0])
-    u_c[valid_mask] = np.sum(u_yz * u_s, axis=(1,2))[valid_mask] / deficit_sums[valid_mask] # shape (i_turbine,)
-
-    # 3. Solve Eq (2.9) for the combined convection velocity Uc
-    A = np.tensordot(u_c, u_s, axes=(0, 0))  # shape (Ny, Nz)
-    P = np.sum(U_in * A)
-    Q = np.sum(A ** 2)
-    R = np.sum(A)
-    R = R if abs(R) > 1e-12 else 1e-12
-    discriminant = (P / R) ** 2 - 4.0 * Q / R
-
-    # Clamped, not branched -- see docstring. Continuous through discriminant = 0.
-    U_c = 0.5 * (P / R + np.sqrt(max(discriminant, 0.0)))
-
-    # 4. Combine using the momentum-conserving weights (Eq 2.7)
-    weights = u_c / max(U_c, 1e-6) # shape (i_turbine,)
-    U_s = np.sum(weights[:, None, None] * u_s, axis=0)  # shape (Ny, Nz)
-    U_s = np.minimum(U_s, U_in)  # prevent over-deficit
-
-    U = U_in - U_s
-
-    # Transverse
-    if v_yz is not None:
-        V = np.sum(weights[:, None, None] * v_yz, axis=0)
-    else:
-        V = None
-
-    if w_yz is not None:
-        W = np.sum(weights[:, None, None] * w_yz, axis=0)
-    else:
-        W = None
-
-    return U, V, W
+    U_map = np.zeros((len(y_global), len(x_global)))
+    for i, xg in enumerate(x_global):
+        src = _source_turbine(ts, xg)
+        if src is None:
+            U_map[:, i] = U_in[:, k_hub]
+            continue
+        U, _ = interpolate_local_velocity_field(src, xg - src.pos[0], Y, Z, default=U_in)
+        U_map[:, i] = np.asarray(U)[:, k_hub]
+    return {'U': U_map, 'Uh': float(fp.Uh)}

@@ -8,51 +8,27 @@ from jax import lax
 
 from .data_structures import VortexField
 
-def simulate_vortex_evolution(config, field_params, total_steps=1000, seed=None):
-    """
-    Simulate mutual induction of vortices in 2D plane with adaptive time stepping.
-
-    Args:
-        config: Simulation configuration
-        field_params: Field parameters
-        total_steps: Maximum (and, since this always runs a fixed trip count) number of time
-            steps taken; the returned list is trimmed to however many of those were naturally
-            reached before the domain-exit condition fired.
-
-    Returns:
-        list[VortexField] of evolved vortex states, length = however many steps were naturally
-        reached (see `_simulate_vortex_evolution_jit`'s docstring for the exact semantics).
-    """
-    stacked, was_active = _simulate_vortex_evolution_jit(
-        config, field_params.NuT_max, field_params.merge_threshold, field_params.cfl_factor,
-        total_steps, seed,
-    )
-    kept_count = int(jnp.sum(was_active))  # concrete Python int -- forces one sync point here,
-                                            # outside jit, exactly where the plan calls for it
-    return [jax.tree_util.tree_map(lambda leaf, i=i: leaf[i], stacked) for i in range(kept_count)]
+# Placeholder emitted in place of the stacked history's constant members, so lax.scan
+# stacks a (total_steps, 0) array instead of (total_steps, ny, nz). See the note at the
+# end of _simulate_vortex_evolution_jit.
+_UNSTACKED = jnp.zeros((0,))
 
 
 @partial(jax.jit, static_argnames=("total_steps",))
-def _simulate_vortex_evolution_jit(config, NuT_max, merge_threshold, cfl_factor, total_steps,
+def _simulate_vortex_evolution_jit(config, merge_threshold, cfl_factor, total_steps,
                                    seed=None):
     D = config.D
     Uhub = config.Uhub
     t_limit = 1.5 * config.calculation_domain / D  # dimensionless domain-exit threshold
 
-    # seed=None -> this rotor sheds a fresh ring (the normal path). An explicit seed lets a
-    # caller continue an existing vortex system, which is what the single-field march needs:
-    # turbine i+1's vortices are appended to turbine i's still-evolving cloud rather than
-    # starting a new one. See experiments/single_field_march.py.
     if seed is None:
-        seed = _define_location(config, NuT_max)[0]
+        seed = _define_location(config)[0]
     seed = dataclasses.replace(seed, yloc=config.yloc, zloc=config.zloc, OmegaX=jnp.zeros_like(config.yloc))
 
     def scan_step(carry, _):
         current_state, t, active = carry
 
         def when_active(_):
-            # Backfill: compute the induced-velocity field for THIS step's own (carried)
-            # position -- this is what gets emitted as this step's real output.
             current2 = _vortex2velocity(current_state, config)
             dY, dZ, dist2 = _get_relative_geometry(current2.Y, current2.Z, current2.active)
             Circ, Rv = current2.Circ, current2.Rv
@@ -63,10 +39,14 @@ def _simulate_vortex_evolution_jit(config, NuT_max, merge_threshold, cfl_factor,
 
             def do_advance(_):
                 new_Y, new_Z = RK4_step(current2.Y, current2.Z, V_induced, W_induced, Circ, Rv, dt, current2.active)
-                new_Rv = jnp.sqrt(Rv**2 + 4 * current2.Nu * dt)
+                # age advances with the convected distance; Rv^2 += 4*nu*dt then integrates
+                # to Rv^2 = Ri^2 + 4*eta^2(x), matching Shapiro Eq (4.3).
+                new_age = current2.age + Uhub * dt
+                nu = config.nu_const + config.nu_slope * 0.5 * (current2.age + new_age)
+                new_Rv = jnp.sqrt(Rv**2 + 4 * nu * dt)
                 new_vf = VortexField(
-                    Y=new_Y, Z=new_Z, Rv=new_Rv,
-                    Circ=current2.Circ, Nu=current2.Nu, active=current2.active, t=t_next,
+                    Y=new_Y, Z=new_Z, Rv=new_Rv, age=new_age,
+                    Circ=current2.Circ, active=current2.active, t=t_next,
                     yloc=current2.yloc, zloc=current2.zloc,
                     V=jnp.zeros_like(current2.V), W=jnp.zeros_like(current2.W), OmegaX=current2.OmegaX
                 )
@@ -86,10 +66,15 @@ def _simulate_vortex_evolution_jit(config, NuT_max, merge_threshold, cfl_factor,
             return (current_state, t, active), current_state
 
         next_carry, emitted = lax.cond(active, when_active, when_inactive, operand=None)
+        emitted = dataclasses.replace(emitted, yloc=_UNSTACKED, zloc=_UNSTACKED,
+                                      U=_UNSTACKED)
         return next_carry, (emitted, active)
 
     init_carry = (seed, 0.0, True)
     _, (stacked, was_active) = lax.scan(scan_step, init_carry, xs=None, length=total_steps)
+    # U is never written by this march; initialize_wake_field supplies the real one.
+    stacked = dataclasses.replace(stacked, yloc=config.yloc, zloc=config.zloc,
+                                  U=_UNSTACKED)
     return stacked, was_active
 
 def _vortex2velocity(data, config):
@@ -113,7 +98,7 @@ def _vortex2velocity(data, config):
 
     return dataclasses.replace(data, OmegaX=OmegaX, yloc=yloc, zloc=zloc, V=V, W=W)
 
-def _define_location(config, NuT_max):
+def _define_location(config):
     # 1. Initial ring vortices
     Y = config.D / 2 * jnp.cos(config.phi) * jnp.cos(config.beta) - config.Yoffset
     Z = config.D / 2 * jnp.sin(config.phi) + config.Zhub
@@ -133,8 +118,8 @@ def _define_location(config, NuT_max):
     Circ = jnp.concatenate([Circ, -Circ])
     active = jnp.ones_like(Y, dtype=bool)  # padding capacity for the whole run: Nv+1 real vortices
 
-    # 4. Core-growth viscosity
-    Nu = jnp.full(Y.shape, _calculate_viscosity(config.dgamma, NuT_max))
+    # 4. Vortex age (nu_T grows with it)
+    age = jnp.zeros_like(Y)        # distance travelled since shed; sets nu_T(x)
 
     # 5. Create VortexField object
     vordata = VortexField(
@@ -142,7 +127,7 @@ def _define_location(config, NuT_max):
         Z=Z,
         Rv=Rv,
         Circ=Circ,
-        Nu=Nu,
+        age=age,
         active=active,
         yloc=jnp.array([]),
         zloc=jnp.array([]),
@@ -152,15 +137,6 @@ def _define_location(config, NuT_max):
         t=0.0
     )
     return [vordata] # return a list of vordata for extensibility
-
-def _calculate_viscosity(dgamma, NuT_max):
-    """Cross-stream eddy viscosity governing the Lamb-Oseen core growth.
-
-    Zong & Porte-Agel (2020) Sec 4.1: nu_E = 0.03*Gamma0/(2*pi) = 0.005*Gamma0, taking
-    the peak vortex-induced velocity Gamma0/(2*pi*Rv) and the core radius Rv as the
-    reference scales. NuT_max*0.2 = 0.025*0.2 = 0.005 supplies that coefficient.
-    """
-    return NuT_max * 0.2 * jnp.abs(jnp.nansum(dgamma))
 
 def _compute_mutual_induction(Circ, Rv, dY, dZ, dist2):
     """Compute induced velocities using Biot-Savart law with core correction."""
@@ -202,7 +178,7 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
     Y0 = vortex_field.Y[:N_cap]
     Z0 = vortex_field.Z[:N_cap]
     Rv0 = vortex_field.Rv[:N_cap]
-    Nu0 = vortex_field.Nu[:N_cap]
+    age0 = vortex_field.age[:N_cap]
     Circ0 = Circ0_full[:N_cap]
     active0 = active_full[:N_cap]
 
@@ -211,11 +187,11 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
     qualifies_all = real_dist[i_idx, j_idx] <= threshold**2
 
     def merge_step(carry, xs):
-        Y, Z, Rv, Nu, claimed = carry
+        Y, Z, Rv, age, Circ, claimed, locked = carry
         i, j, qualifies = xs
-        can_merge = qualifies & active0[i] & active0[j] & (~claimed[i]) & (~claimed[j])
+        can_merge = qualifies & active0[i] & active0[j] & (~locked[i]) & (~locked[j])
 
-        Circ_i, Circ_j = Circ0[i], Circ0[j]
+        Circ_i, Circ_j = Circ[i], Circ[j]
         total_circ = Circ_i + Circ_j
         combine = jnp.abs(total_circ) > 1e-12
         denom = jnp.where(combine, total_circ, 1.0)
@@ -225,7 +201,7 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
         w_i, w_j = jnp.abs(Circ_i), jnp.abs(Circ_j)
         w_sum = jnp.where(w_i + w_j > 1e-12, w_i + w_j, 1.0)
         merged_Rv = jnp.sqrt((w_i * Rv[i]**2 + w_j * Rv[j]**2) / w_sum)
-        merged_Nu = (w_i * Nu[i] + w_j * Nu[j]) / w_sum  # same |Circ| weighting as Rv
+        merged_age = (w_i * age[i] + w_j * age[j]) / w_sum
 
         do_combine = can_merge & combine
         do_remove_both = can_merge & (~combine)
@@ -233,16 +209,27 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
         Y = Y.at[j].set(jnp.where(do_combine, merged_Y, Y[j]))
         Z = Z.at[j].set(jnp.where(do_combine, merged_Z, Z[j]))
         Rv = Rv.at[j].set(jnp.where(do_combine, merged_Rv, Rv[j]))
-        Nu = Nu.at[j].set(jnp.where(do_combine, merged_Nu, Nu[j]))
-        claimed = claimed.at[i].set(claimed[i] | can_merge)
-        claimed = claimed.at[j].set(claimed[j] | do_remove_both)
-        return (Y, Z, Rv, Nu, claimed), None
+        age = age.at[j].set(jnp.where(do_combine, merged_age, age[j]))
+        # The survivor must CARRY the absorbed vortex's circulation: Zong Sec 4.2 combines
+        # two vortices into one. Previously only position/radius/Nu were merged while Circ
+        # kept its own value and the absorbed Gamma was deleted, so EVERY merge destroyed
+        # circulation -- even a same-signed pair, which must conserve it exactly. That made
+        # the loss track the merge count and hence Nv, which is why Zong's reported
+        # insensitivity above N=20 could not be reproduced.
+        Circ = Circ.at[j].set(jnp.where(do_combine, total_circ, Circ[j]))
+        claimed = claimed.at[i].set(claimed[i] | can_merge)       # i is absorbed
+        claimed = claimed.at[j].set(claimed[j] | do_remove_both)  # j only if they cancelled
+        locked = locked.at[i].set(locked[i] | can_merge)
+        locked = locked.at[j].set(locked[j] | can_merge)          # j is done for this step
+        return (Y, Z, Rv, age, Circ, claimed, locked), None
 
-    init_carry = (Y0, Z0, Rv0, Nu0, jnp.zeros(N_cap, dtype=bool))
-    (Y, Z, Rv, Nu, claimed), _ = lax.scan(merge_step, init_carry, (i_idx, j_idx, qualifies_all))
+    _none = jnp.zeros(N_cap, dtype=bool)
+    init_carry = (Y0, Z0, Rv0, age0, Circ0, _none, _none)
+    (Y, Z, Rv, age, Circ, claimed, _locked), _ = lax.scan(
+        merge_step, init_carry, (i_idx, j_idx, qualifies_all))
 
     active_new = active0 & (~claimed)
-    Circ_new = jnp.where(claimed, 0.0, Circ0)
+    Circ_new = jnp.where(claimed, 0.0, Circ)
     Y_new = jnp.where(claimed, _GRAVEYARD, Y)
     Z_new = jnp.where(claimed, _GRAVEYARD, Z)
 
@@ -250,7 +237,7 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
         Y=jnp.concatenate([Y_new, Y_new]),
         Z=jnp.concatenate([Z_new, -Z_new]),
         Rv=jnp.concatenate([Rv, Rv]),
-        Nu=jnp.concatenate([Nu, Nu]),
+        age=jnp.concatenate([age, age]),
         Circ=jnp.concatenate([Circ_new, -Circ_new]),
         active=jnp.concatenate([active_new, active_new]),
         yloc=vortex_field.yloc,
@@ -282,9 +269,6 @@ def _oseenlamb(Circ, Y, Z, Rv, yloc, zloc):
 
 def RK4_step(Y, Z, V_k1, W_k1, Circ, Rv, dt, active=None):
     """Integrates positions using RK4 and enforces ground symmetry.
-
-    In-place slice assignment (Z2[N_real:] = ...) isn't allowed on immutable jnp arrays --
-    replaced with .at[].set(), which is the direct jax equivalent.
     """
     N_real = len(Circ) // 2
 

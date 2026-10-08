@@ -1,4 +1,4 @@
-from .superposition import get_local_velocity_field
+from .wake_solver import solve_single_field
 from .turbine_state import make_turbine_params, LocalConditions
 from . import turbine_physics as tp
 
@@ -14,36 +14,39 @@ class Turbine:
         self._params = make_turbine_params(config, field_params)
         local = tp.init_local_conditions(self._params)
 
-        self.pos = self._params.pos  # (x, y, z)
-        self.D = self._params.D
-        self.Zhub = self._params.Zhub
-        self.yaw = self._params.yaw
-        self.TSR = self._params.TSR
-        self.Uh = self._params.Uh
-        self.Zh = self._params.Zh
-        self.WV = self._params.WV
-        self.Nv = self._params.Nv
-        self.vortex_field = None  # to be filled after simulation
-        self.wake_field = None  # to be filled after wake calculation
-        self.dl = None  # grid spacing in y direction
-        self.calculation_domain = 0.0  # to be set by WindFarm
-
-        self.Ct = self._params.Ct
-        self.Cp = self._params.Cp  # Adjusted power coefficient
-
-        self.phi = self._params.phi
-        self.dphi = self._params.dphi
-        self.yloc = self._params.yloc
-        self.zloc = self._params.zloc
+        # Config-fixed quantities are READ-ONLY properties delegating to _params (below),
+        # not copies -- one source of truth. Only genuinely mutable state lives here.
+        self.vortex_field = None       # filled by simulate_vortex_field
+        self.wake_field = None         # filled by calculate_deficit_field
+        self.dl = None                 # grid spacing in y, set by initialize_wake_field
+        self.calculation_domain = 0.0  # set by WindFarm, then per segment by the march
 
         self.V = local.V
         self.W = local.W
         self.Uin = local.Uin
         self.Uhub = local.Uhub
 
+    # --- config-fixed, read-only: single source of truth is self._params ---
+    pos = property(lambda self: self._params.pos)
+    D = property(lambda self: self._params.D)
+    Zhub = property(lambda self: self._params.Zhub)
+    yaw = property(lambda self: self._params.yaw)
+    TSR = property(lambda self: self._params.TSR)
+    Uh = property(lambda self: self._params.Uh)
+    Zh = property(lambda self: self._params.Zh)
+    WV = property(lambda self: self._params.WV)
+    Nv = property(lambda self: self._params.Nv)
+    Ct = property(lambda self: self._params.Ct)
+    Cp = property(lambda self: self._params.Cp)
+    phi = property(lambda self: self._params.phi)
+    dphi = property(lambda self: self._params.dphi)
+    yloc = property(lambda self: self._params.yloc)
+    zloc = property(lambda self: self._params.zloc)
+
     def _current_local(self):
         """Snapshot of the state WindFarm.solve() mutates directly on this instance."""
-        return LocalConditions(Uhub=self.Uhub, V=self.V, W=self.W, Uin=self.Uin)
+        return LocalConditions(Uhub=self.Uhub, V=self.V, W=self.W, Uin=self.Uin,
+                               calculation_domain=self.calculation_domain)
 
     def init_Uin(self):
         return tp.init_Uin(self._params)
@@ -55,10 +58,6 @@ class Turbine:
     @property
     def R(self):
         return self._params.R
-
-    @property
-    def Rv(self):
-        return self._params.Rv
 
     @property
     def omega(self):
@@ -92,7 +91,6 @@ class Turbine:
         return tp.calculate_efficiency(self._params, self.Uhub)
 
     def simulate_vortex_field(self, seed=None, total_steps=1000):
-        self._params.calculation_domain = self.calculation_domain
         self.vortex_field = tp.simulate_vortex_field(self._params, self._current_local(),
                                                      seed=seed, total_steps=total_steps)
 
@@ -100,7 +98,6 @@ class Turbine:
         self.vortex_field, self.dl = tp.initialize_wake_field(self._params, self.vortex_field, self._current_local())
 
     def calculate_deficit_field(self, upstream_turbines, max_steps=1500, N_upstream_max=None):
-        self._params.calculation_domain = self.calculation_domain
         self.wake_field = tp.calculate_deficit_field(
             self._params, self._current_local(), self.vortex_field, self.dl, upstream_turbines,
             N_upstream_max=N_upstream_max, max_steps=max_steps
@@ -223,34 +220,9 @@ class WindFarm:
             print(f"Wind Farm Average Efficiency: {total_eff * 100:.2f} %")
         return total_eff
 
-    def solve(self):
-        N_upstream_max = max(len(self.turbines) - 1, 0)
-        for t in self.turbines:
-            U_local, V_local, W_local = get_local_velocity_field(t, self)
-
-            upstream_turbines = [
-                ut for ut in self.turbines
-                if (
-                    ut.pos[0] < t.pos[0] and  # Check if upstream
-                    np.abs(ut.pos[1] - t.pos[1]) < 3 * ut.D and  # Check lateral distance
-                    np.abs(ut.pos[2] - t.pos[2]) < 3 * ut.D  # Check vertical distance
-                )
-            ]
-
-            # Create a mask for the rotor disk
-            R = t.D / 2.0
-            dist_from_hub = np.sqrt((t.yloc / np.cos(t.beta))**2 + (t.zloc - t.Zhub)**2)
-            rotor_mask = dist_from_hub <= R
-            
-            t.Uhub = np.mean(U_local[rotor_mask])
-            t.V = V_local
-            t.W = W_local
-            t.Uin = U_local
-
-            # print(f"Simulating turbine at pos={t.pos} m, yaw={t.yaw}°")
-            t.simulate_vortex_field()
-            t.initialize_wake_field()
-            t.calculate_deficit_field(upstream_turbines, N_upstream_max=N_upstream_max)
+    def solve(self, verbose=False):
+        """March one field and one vortex cloud through the farm; see wake_solver."""
+        return solve_single_field(self, verbose=verbose)
 
     def save_results(self, out_path, limit_frames=None):
         os.makedirs(out_path, exist_ok=True)
