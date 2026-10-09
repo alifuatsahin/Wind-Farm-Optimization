@@ -195,8 +195,19 @@ def pack_upstream_turbines(upstream_turbines, n_max):
     return up_a, up_D, up_pos_x, up_Uhub, up_mask
 
 
-def make_turbine_params(config, field_params) -> TurbineParams:
-    """Replicates the static portion of the current Turbine.__init__."""
+def make_turbine_params(config, field_params, y_bounds=None) -> TurbineParams:
+    """Replicates the static portion of the current Turbine.__init__.
+
+    `y_bounds` is the (min, max) lateral position of EVERY rotor in the farm. The
+    cross-plane grid is built to span that whole extent plus the usual max_Y margin,
+    and is therefore shared in absolute y by every turbine. The single marched field
+    reads turbine i's inflow by interpolating turbine i-1's field onto i's grid, so
+    if the two grids do not overlap the interpolation falls back to the undisturbed
+    profile and the wake is silently lost -- a farm with two columns 7D apart used to
+    report every rotor as unwaked. Sharing the grid makes the chain correct for any
+    layout. With one turbine, or a single row, y_bounds collapses and the grid is
+    exactly the +-max_Y*D/2 it has always been.
+    """
     Nv = field_params.Nv
     phi = np.linspace(-np.pi, np.pi, Nv, endpoint=False)
     dphi = abs(phi[1] - phi[0])
@@ -204,7 +215,9 @@ def make_turbine_params(config, field_params) -> TurbineParams:
     beta = np.deg2rad(config.yaw)
     Cp = config.Cp * np.cos(beta) ** 1.88
 
-    Ly = field_params.max_Y * config.D
+    y_lo, y_hi = (config.pos[1], config.pos[1]) if y_bounds is None else y_bounds
+    # span the farm laterally, plus half the margin at each end
+    Ly = (y_hi - y_lo) + field_params.max_Y * config.D
     Lz = field_params.max_Z * config.D
     n_grids = field_params.n_grids
     # D cancels algebraically here (Ly = max_Y*D), so take the ratio directly rather
@@ -212,14 +225,20 @@ def make_turbine_params(config, field_params) -> TurbineParams:
     # 17.999999999999996 for D = 12.6, and the truncation then silently drops a grid
     # point and shifts results by ~0.5%. Whether it happens depends on the floating-
     # point representation of D alone, which is not something a user can anticipate.
-    Ny = max(2, int(round(field_params.max_Y * n_grids)))
+    # resolution is held fixed at n_grids points per diameter, so the point count
+    # grows with the span rather than the span being resampled onto a fixed count
+    Ny = max(2, int(round(Ly / config.D * n_grids)))
     Nz = max(2, int(round(field_params.max_Z * n_grids)))
     if config.Zhub - Lz / 2 < 0:
         zlims = (0, Lz)
     else:
         zlims = (config.Zhub - Lz / 2, config.Zhub + Lz / 2)
+    # yloc stays LOCAL to this rotor (the rotor disc sits at yloc = 0), but the
+    # absolute positions yloc + pos[1] are identical for every turbine in the farm.
+    y_centre = 0.5 * (y_lo + y_hi)
     yloc, zloc = np.meshgrid(
-        np.linspace(-Ly / 2, Ly / 2, Ny), np.linspace(*zlims, Nz), indexing='ij'
+        np.linspace(y_centre - Ly / 2, y_centre + Ly / 2, Ny) - config.pos[1],
+        np.linspace(*zlims, Nz), indexing='ij'
     )
 
     return TurbineParams(

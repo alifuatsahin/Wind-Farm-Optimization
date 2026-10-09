@@ -7,11 +7,14 @@ import pandas as pd
 import os
 
 class Turbine:
-    def __init__(self, config, field_params):
+    def __init__(self, config, field_params, y_bounds=None):
         self.config = config
         self.field_params = field_params
 
-        self._params = make_turbine_params(config, field_params)
+        # y_bounds is the farm's lateral extent; it makes every rotor share one
+        # absolute cross-plane grid, which the single marched field needs in order
+        # to carry a wake from one column to the next (see make_turbine_params).
+        self._params = make_turbine_params(config, field_params, y_bounds)
         local = tp.init_local_conditions(self._params)
 
         # Config-fixed quantities are READ-ONLY properties delegating to _params (below),
@@ -94,13 +97,17 @@ class Turbine:
         self.vortex_field = tp.simulate_vortex_field(self._params, self._current_local(),
                                                      seed=seed, total_steps=total_steps)
 
-    def initialize_wake_field(self):
-        self.vortex_field, self.dl = tp.initialize_wake_field(self._params, self.vortex_field, self._current_local())
+    def initialize_wake_field(self, companions=()):
+        """`companions` are the other rotors at this same streamwise station, as
+        (TurbineParams, dy) pairs with dy this turbine's local-y offset from theirs."""
+        self.vortex_field, self.dl = tp.initialize_wake_field(
+            self._params, self.vortex_field, self._current_local(), companions)
 
-    def calculate_deficit_field(self, upstream_turbines, max_steps=1500, N_upstream_max=None):
+    def calculate_deficit_field(self, upstream_turbines, max_steps=1500, N_upstream_max=None,
+                                companions=()):
         self.wake_field = tp.calculate_deficit_field(
             self._params, self._current_local(), self.vortex_field, self.dl, upstream_turbines,
-            N_upstream_max=N_upstream_max, max_steps=max_steps
+            N_upstream_max=N_upstream_max, max_steps=max_steps, companions=companions
         )
 
 class WindFarm:
@@ -204,7 +211,10 @@ class WindFarm:
             t.calculation_domain = (max_x + buffer - t.pos[0])
 
     def _construct_wind_farm(self):
-        self.turbines = [Turbine(t_config, self.field_params) for t_config in self.turbine_configs.turbines()]
+        ys = [float(t.pos[1]) for t in self.turbine_configs.turbines()]
+        y_bounds = (min(ys), max(ys))
+        self.turbines = [Turbine(t_config, self.field_params, y_bounds)
+                         for t_config in self.turbine_configs.turbines()]
         self.turbines = sorted(self.turbines, key=lambda t: t.pos[0])
         self._get_calculation_domain()
 

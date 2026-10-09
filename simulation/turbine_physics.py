@@ -119,8 +119,8 @@ def abl_nu_slope(params):
     fixed by the log law -- there is no fitted decay rate.
 
     Contrast Zong Sec 4.1's nu_E = 0.005*Gamma0, which is the Squire (1965) scaling on the
-    vortex's OWN circulation and carries no ambient turbulence at all; it is 6-32x smaller
-    over x/D = 2-10, which is why the model conserved circulation where the LES does not.
+    vortex's OWN circulation and carries no ambient turbulence at all; it is 7-33x smaller
+    over x/D = 2-10 (NREL-5MW, 25 deg, LES inflow; paper_metrics.py mNuRatioLo/Hi), which is why the model conserved circulation where the LES does not.
     """
     k = 0.4 / np.log(params.Zh / params.field_params.z0)
     u_star = k * params.Uh
@@ -220,7 +220,18 @@ def _frame(stacked, i, unstacked=_UNSTACKED_MEMBERS):
     return dataclasses.replace(stacked, **sliced)
 
 
-def initialize_wake_field(params, stacked, local):
+def _disc_mask(yloc, zloc, p, dy):
+    """Rotor p's disc on a grid whose local y is offset from p's own by `dy`.
+
+    Every turbine shares one absolute cross-plane grid, but `yloc` is stored local to
+    each rotor, so a companion rotor at the same station sits at yloc + dy where
+    dy = lead.pos[1] - p.pos[1].
+    """
+    r2 = ((yloc + dy + p.Yoffset) ** 2) / (np.cos(p.beta) ** 2) + (zloc - p.Zhub) ** 2
+    return np.sqrt(r2) <= p.R
+
+
+def initialize_wake_field(params, stacked, local, companions=()):
     yloc = np.asarray(stacked.yloc)
     zloc = np.asarray(stacked.zloc)
     beta = params.beta
@@ -228,10 +239,13 @@ def initialize_wake_field(params, stacked, local):
     dl = params.dl  # equivalent to yloc[1,0]-yloc[0,0]; verified in Step 1 sub-step 5
     Uin = np.asarray(local.Uin)
     U = Uin.copy()
-    r2 = ((yloc + params.Yoffset) ** 2) / (np.cos(beta) ** 2) + (zloc - params.Zhub) ** 2
-    mask = np.sqrt(r2) <= params.R
-    a0 = float(0.5 * (1.0 - np.sqrt(max(1.0 - _ct_eff(params) * 0.5, 0.0))))  # erf(0) = 0
-    U[mask] -= 2.0 * U[mask] * a0
+    # Rotors sharing this station shed simultaneously, so all their discs are carved
+    # into the same initial condition. `companions` is empty for one turbine per x,
+    # which is the single-row case and reduces to the original single-disc carve.
+    for p, dy in ((params, 0.0),) + tuple(companions):
+        mask = _disc_mask(yloc, zloc, p, dy)
+        a0 = float(0.5 * (1.0 - np.sqrt(max(1.0 - _ct_eff(p) * 0.5, 0.0))))  # erf(0) = 0
+        U[mask] -= 2.0 * U[mask] * a0
 
     U_smooth = Uin - smooth_2d(Uin - U, kernel_size=3)
 
@@ -245,21 +259,23 @@ def initialize_wake_field(params, stacked, local):
 
 
 def calculate_deficit_field(params, local, stacked, dl, upstream_turbines, N_upstream_max=None,
-                            max_steps=1500):
+                            max_steps=1500, companions=()):
     if N_upstream_max is None:
         N_upstream_max = len(upstream_turbines)
     up_a, up_D, up_pos_x, up_Uhub, up_mask = pack_upstream_turbines(upstream_turbines, N_upstream_max)
 
     yloc = np.asarray(params.yloc)
     zloc = np.asarray(params.zloc)
-    rotor_mask = (np.sqrt(((yloc + params.Yoffset) ** 2) / (np.cos(params.beta) ** 2)
-                          + (zloc - params.Zhub) ** 2) <= params.R).astype(float)
-    rotor_mask = np.asarray(smooth_2d(rotor_mask, kernel_size=3))
+    rotors = ((params, 0.0),) + tuple(companions)
+    rotor_mask = np.stack([np.asarray(smooth_2d(_disc_mask(yloc, zloc, p, dy).astype(float),
+                                                kernel_size=3))
+                           for p, dy in rotors])
+    Ct_eff = np.array([_ct_eff(p) for p, _ in rotors])
 
     adapter = DeficitFieldConfig(
         pos=jnp.asarray(params.pos), D=params.D, Uhub=local.Uhub, Uin=jnp.asarray(local.Uin), Zhub=params.Zhub,
         U0=float(nominal_hub_velocity(params)),
-        rotor_mask=jnp.asarray(rotor_mask), Ct_eff=_ct_eff(params),
+        rotor_mask=jnp.asarray(rotor_mask), Ct_eff=jnp.asarray(Ct_eff),
     )
     dt_cap = min(dl / local.Uhub, 0.25 * params.D / local.Uhub)  # constant for the whole run -- plain floats
 
@@ -292,10 +308,13 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, 
             new = interpolate_vec_data(stacked, current.t + dt)
             U, X_new = advance_wake_field(current, dt, NuT, adapter, WV)
 
+            # One station may carry several rotors side by side. They share an
+            # x-origin, so current.X is common and only Ct_eff and the disc differ;
+            # the masks do not overlap, so the per-rotor ramps simply add.
             a_old = axial_induction_ramped(adapter.Ct_eff, current.X / adapter.D)
             a_new = axial_induction_ramped(adapter.Ct_eff, X_new / adapter.D)
             ramp = (1.0 - 2.0 * a_new) / jnp.maximum(1.0 - 2.0 * a_old, 1e-6)
-            U = U * (1.0 + adapter.rotor_mask * (ramp - 1.0))
+            U = U * (1.0 + jnp.tensordot(ramp - 1.0, adapter.rotor_mask, axes=1))
 
             new = dataclasses.replace(new, U=U, X=X_new, t=current.t + dt)
 

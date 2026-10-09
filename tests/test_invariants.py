@@ -95,6 +95,68 @@ def test_yaw_trades_own_power_for_the_rotor_behind():
     assert eff25[1] > eff0[1], f'yaw did not help the rotor behind: {eff0} -> {eff25}'
 
 
+def _row(pos, max_Y=3.0):
+    """A farm at explicit absolute positions, in metres."""
+    n = len(pos)
+    wf = WindFarmConfig(pos=np.array(pos, float), D=np.array([80.0]),
+                        Zhub=np.array([70.0]), Ct=np.array([0.8]), Cp=np.array([0.47]),
+                        yaw=np.zeros(n), TSR=np.array([7.0]), dist_type='m')
+    fc = FieldConfig(Uh=8.0, Zh=70.0, z0=0.0002, I_amb=0.077, max_Y=max_Y, min_X=7.0,
+                     max_Z=2.0, n_grids=14, Nv=20)
+    sim = Simulation(Config(WindFarm=wf, Field=fc, run_prefix='_test'))
+    sim.run()
+    return {(round(t.pos[0] / 80.0), round(t.pos[1] / 80.0)): t.Uhub / 8.0
+            for t in sim.wind_farm.turbines}
+
+
+def test_lateral_neighbour_does_not_disturb_a_column():
+    """A rotor far to the side must not change what a column sees.
+
+    Two failures used to hide here. The cross-plane grid was sized per rotor, so a
+    second column simply fell outside it and the interpolation returned the undisturbed
+    profile -- a 2x2 farm reported every rotor unwaked. And the march was cut at every
+    rotor in x, so a neighbour at the same station shortened the segment to 0.5D and the
+    upstream wake stopped developing, worth +17.9%.
+    """
+    alone = _row([[0, 0, 0], [560, 0, 0]])[(7, 0)]
+    with_neighbour = _row([[0, 0, 0], [0, 560, 0], [560, 0, 0]])[(7, 0)]
+    err = abs(with_neighbour - alone) / alone
+    assert err < 0.01, (f'a rotor 7D to the side moved the column by {100*err:.1f}% '
+                        f'({alone:.6f} -> {with_neighbour:.6f})')
+
+
+def test_identical_rotors_see_identical_inflow():
+    """In a 2x2 farm the two downstream rotors are geometrically identical."""
+    d = _row([[0, 0, 0], [0, 560, 0], [560, 0, 0], [560, 560, 0]])
+    a, b = d[(7, 0)], d[(7, 7)]
+    assert abs(a - b) / a < 0.01, f'identical rotors disagree: {a:.6f} vs {b:.6f}'
+    assert a < 0.9, f'downstream rotor is not waked at all ({a:.6f}): wake chain broken'
+
+def test_isolated_yawed_turbine_loses_exactly_the_cosine_power():
+    """An isolated turbine's efficiency must be exactly Cp(beta)/Cp(0) = cos^1.88(beta).
+
+    It stands in undisturbed flow, so the disc-averaged inflow IS
+    nominal_hub_velocity and the ratio collapses. Any departure means the two sides are
+    being read over different discs. They were: the power disc sat at the tower axis
+    while the initial condition, the vortex ring and nominal_hub_velocity all sat at the
+    rotor centre, l_n*sin(beta) to the side -- a 0.085D mismatch at 25 deg that fed
+    straight into the objective the optimiser maximises.
+    """
+    for beta in (0.0, 10.0, 20.0, 25.0, 30.0):
+        wf = WindFarmConfig(pos=np.array([[0.0, 0.0, 0.0]]), D=np.array([80.0]),
+                            Zhub=np.array([70.0]), Ct=np.array([0.8]),
+                            Cp=np.array([0.47]), yaw=np.array([beta]),
+                            TSR=np.array([7.0]), dist_type='m')
+        fc = FieldConfig(Uh=8.0, Zh=70.0, z0=0.0002, I_amb=0.077, max_Y=3.0, min_X=7.0,
+                         max_Z=2.0, n_grids=14, Nv=20)
+        sim = Simulation(Config(WindFarm=wf, Field=fc, run_prefix='_test'))
+        sim.run()
+        eta = sim.calculate_objective()
+        ref = np.cos(np.deg2rad(beta)) ** 1.88
+        assert abs(eta - ref) / ref < 1e-12, (
+            f'beta={beta}: eta={eta:.10f} but Cp ratio is {ref:.10f}; the power disc and '
+            f'the reference disc disagree')
+
 if __name__ == '__main__':
     failures = 0
     for name, fn in sorted((k, v) for k, v in list(globals().items())
