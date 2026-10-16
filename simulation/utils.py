@@ -24,7 +24,7 @@ CRESPO_M = 2.0
 
 
 def NuT_model(wake_field, config, I_amb, up_a, up_D, up_pos_x, up_pos_y, up_Uhub,
-              up_mask):
+              up_mask, x_D_override=None):
     """
     Turbulent eddy viscosity closure for a single turbine's wake, following the
     piecewise-linear model of Du, Zhu, Li, Ge, Li & Liu (2025), "Modeling of
@@ -76,7 +76,10 @@ def NuT_model(wake_field, config, I_amb, up_a, up_D, up_pos_x, up_pos_y, up_Uhub
     Iu_sq = I_amb ** m + jnp.sum(jnp.where(qualifies, contribution, 0.0), axis=-1)
 
     TI_total = (Iu_sq ** (1 / m)) / IU_TO_TI
-    x_D = wake_field.X / config.D
+    # x is normally the distance from the MARCHING rotor -- a single-turbine reference,
+    # which is the one factor Crespo's accumulation does not extend. x_D_override lets a
+    # transported turbulence age stand in for it; see NUT_X_FROM_AGE.
+    x_D = wake_field.X / config.D if x_D_override is None else x_D_override
     x_D_threshold = xv1 / TI_total
     coeff = jnp.maximum(kv1 * TI_total - kv0, 0.0)
 
@@ -106,6 +109,48 @@ def du_psi(TI, age_D, D):
     """
     return (0.67 * (0.2 * TI + 0.015) ** 2 / (0.4 * TI + 0.010)
             * jnp.maximum(age_D, 1e-6) * D ** 2)
+
+
+#: Du et al. (2025) Sec 3.2: nu_T = c <k_w>^(1/2) l_m, with c = 0.67 the mean across his
+#: calibration cases.
+DU_C_NU = 0.67
+
+
+def ambient_tke(I_amb, U0):
+    """k_B from TI = sqrt(2k/3)/U0, with TI the ambient value Iu/1.28."""
+    return 1.5 * ((I_amb / IU_TO_TI) * U0) ** 2
+
+
+def advance_kwa(kwa, kw, yloc, zloc, dx, nu_t, psi, U0, prod):
+    """Transported turbulence age, carried as M = k_w * A:
+
+        U0 dM/dx = nu_t grad^2 M - (nu_t/Psi) M + A*P + U0 k_w
+
+    Diffusion and dissipation carry the age with the turbulence they move or destroy; `A*P`
+    makes newly generated turbulence carry the LOCAL age, so dA/dx = 1 exactly and A is the
+    distance the shear LAYER has travelled. That is right for a length scale -- turbulence
+    generated inside an already-thick layer is generated at that layer's scale, not at zero.
+    Injecting at age zero instead (tracer semantics) was tried and gives A = 3.56 D at a farm
+    distance of 14 D, because the layer is continuously regenerated.
+
+    There is no fitted constant here: every term is a k_w operator or the ageing source.
+    """
+    d2y = jnp.gradient(jnp.gradient(kwa, yloc[:, 0], axis=0), yloc[:, 0], axis=0)
+    d2z = jnp.gradient(jnp.gradient(kwa, zloc[0, :], axis=1), zloc[0, :], axis=1)
+    rhs = (nu_t * (d2y + d2z) - (nu_t / psi) * kwa + U0 * kw
+           + (kwa / jnp.maximum(kw, 1e-9)) * prod)
+    return jnp.maximum(kwa + (dx / U0) * rhs, 0.0)
+
+
+def age_from_kwa(kwa, kw, D, floor_D):
+    """Mean turbulence age in diameters, A = M/k_w, floored where there is no turbulence yet.
+
+    No cap: Du Eq (26) saturates at xv1/TI on its own, which is why pairing the age with
+    Eq (26) needs no saturation distance of ours -- unlike Sec 3.2's l_m = k_lm x, which has
+    no saturation and needed a fitted one.
+    """
+    A = kwa / jnp.maximum(kw, 1e-9) / D
+    return jnp.maximum(jnp.where(kw > 1e-8, A, floor_D), floor_D)
 
 
 def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):

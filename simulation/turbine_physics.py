@@ -8,7 +8,8 @@ from jax import lax
 from jax.scipy.special import erf as jerf
 
 from .turbine_state import LocalConditions, VortexSimConfig, DeficitFieldConfig, pack_upstream_turbines
-from .utils import smooth_2d, NuT_model, du_nu_t, du_psi, advance_kw
+from .utils import (smooth_2d, NuT_model, du_nu_t, du_psi, advance_kw,
+                    advance_kwa, age_from_kwa)
 from .vortex_model import _simulate_vortex_evolution_jit, _UNSTACKED
 from .model_solver import advance_wake_field
 from .field_ops import interpolate_vec_data
@@ -243,6 +244,49 @@ def simulate_vortex_field(params, local, seed=None, total_steps=1000):
 # scale at every rotor, though eddies do not shrink when they pass a turbine. Deep arrays
 # under-mix by ~25% and the 5D row declines monotonically instead of plateauing.
 
+#: Take Eq (26)'s TI from the marched k_w INCIDENT on the station plane, rather than from
+#: Crespo's accumulated correlation. This is Du's own usage: his TI is the INFLOW value for the
+#: rotor whose wake is modelled (Tables 1 and 3), and Eq (26)'s x/D factor already carries the
+#: wake's own turbulence growth -- so the TI is read at the rotor plane and FROZEN along the
+#: march. Letting it evolve with x double-counts and over-mixes T2 by ~45-50%, confirmed both
+#: from k_w and from the measured TI directly.
+#:
+#: No superposition rule is needed, because k_w is transported: each rotor adds production to a
+#: field already being carried, so the incident TI at rotor i is that field read at rotor i.
+#: That removes Crespo entirely -- its four 1996 regression constants, the m = 2 superposition
+#: exponent, and both hard gates.
+#:
+#: Measured against Crespo on all six cases, with the three layout probes:
+#:
+#:                         mean R2   power   grouping   companion   off-axis @2D
+#:   incident k_w TI        .9133    6.82%    0.357%     -0.05%        -0.04%
+#:   Crespo                 .9288    6.3%     9.325%     -0.05%       +13.70%
+#:
+#: It gives up 0.0155 of mean R2 and 0.5 points of power, and removes three layout
+#: discontinuities of 9-14%. For layout and yaw optimisation that is the binding trade: a
+#: discontinuous objective is disqualifying, 1.5% relative R2 is not. The remaining regression
+#: is the 8-turbine array (.9535 -> .9087), which is the k_w budget saturating down a row --
+#: incident TI flat at ~0.104 from T2 to T8 while Crespo climbs to 0.176.
+#:
+#: TI is a per-cell FIELD, not one number per rotor. A rotor-averaged scalar scores better
+#: (.9193, 5.64%) but applies the in-wake TI to undisturbed air, and gives a companion sharing
+#: a station with a waked rotor +10.72% of spurious speed-up. Rotor-scale smoothing of the
+#: field was tested as a middle ground and is monotonically worse (0.5/1.0/1.5 D ->
+#: .9128/.9108/.9073), so there is nothing to tune between them.
+#:
+#: NOTE this resolves nu_T per cell, where Du calibrates nu_t(x) as one value per cross-plane
+#: from rotor-level quantities (his Sec 3.2 reduces c and C_eps from 2-D to 1-D explicitly).
+#: That is an extension of his closure and should be stated as one.
+NUT_TI_FROM_KW = True
+
+#: DIAGNOSTIC, kept for the record. Use the transported turbulence age as the x in Eq (26)
+#: instead of the distance from the marching rotor. Tested and it OVER-corrects: mean R2
+#: .8994, power 12.08%, T3/T2 = 1.152 against a measured 1.079. Eq (26)'s length scale is
+#: already TI-dependent through min(x/D, xv1/TI), so the TI estimate extends BOTH factors and
+#: the rotor-referenced x is not the single-turbine remnant it looks like. See
+#: [[turn-around-is-saturation-not-ti]].
+NUT_X_FROM_AGE = False
+
 #: Distance in D past which the erf ramp has saturated, so a carried rotor's term is
 #: mathematically zero and its slot can be left empty. Bounds the PHYSICS, not the bits:
 #: carrying such a rotor still reassociates the tensordot below, which moved the 5D row by
@@ -302,7 +346,7 @@ def _disc_mask(yloc, zloc, p, dy):
     return np.sqrt(r2) <= p.R
 
 
-def initialize_wake_field(params, stacked, local, companions=(), kw0=None):
+def initialize_wake_field(params, stacked, local, companions=(), kw0=None, kwa0=None):
     yloc = np.asarray(stacked.yloc)
     zloc = np.asarray(stacked.zloc)
     beta = params.beta
@@ -322,10 +366,13 @@ def initialize_wake_field(params, stacked, local, companions=(), kw0=None):
 
     kw_seed = (np.zeros_like(U_smooth) if kw0 is None
                else np.asarray(kw0).reshape(U_smooth.shape))
+    kwa_seed = (np.zeros_like(U_smooth) if kwa0 is None
+                else np.asarray(kwa0).reshape(U_smooth.shape))
     new_stacked = dataclasses.replace(
         stacked,
         U=jnp.asarray(U_smooth),
         kw=jnp.asarray(kw_seed),
+        kwa=jnp.asarray(kwa_seed),
         X=stacked.X.at[0].set(0.0),
         t=stacked.t.at[0].set(0.0),
     )
@@ -367,15 +414,37 @@ def calculate_deficit_field(params, local, stacked, dl, upstream_turbines, N_ups
         Ct_eff[i] = _ct_eff(p)
         x_off[i] = off
 
+    # Total TI incident on this station, from the k_w the station was HANDED (the seed carries
+    # kw0, before any production from this rotor). FROZEN at the rotor plane and held constant
+    # along the march: Du's TI is the INFLOW value for the rotor whose wake is modelled, and
+    # the wake's own downstream growth is already carried by Eq (26)'s x/D factor -- letting TI
+    # evolve with x double-counts it and over-mixes T2 by ~45%.
+    #
+    # It is a FIELD, not one number per rotor, so that two rotors sharing a streamwise station
+    # each see their own inflow: a scalar from rotor_mask[0] gave a rotor in clean air the
+    # waked rotor's turbulence. A field needs no lateral gate to do that, which is what
+    # Crespo's |dy| < 3D criterion was for.
+    #
+    # Zero added TKE at the first rotor, so TI_in = ambient there -- Du's calibration condition.
+    _U0 = float(nominal_hub_velocity(params))
+    _kB = 1.5 * ((params.field_params.I_amb / 1.28) * _U0) ** 2
+    _kw_seed = np.asarray(stacked.kw)
+    if _kw_seed.ndim == 3:
+        _kw_seed = _kw_seed[0]
+    if _kw_seed.size == 0:
+        _kw_seed = np.zeros_like(yloc)
+    ti_in = np.sqrt(np.maximum(2.0 / 3.0 * (_kB + _kw_seed), 0.0)) / _U0
+
     adapter = DeficitFieldConfig(
         pos=jnp.asarray(params.pos), D=params.D, Uhub=local.Uhub, Uin=jnp.asarray(local.Uin), Zhub=params.Zhub,
         U0=float(nominal_hub_velocity(params)),
         rotor_mask=jnp.asarray(rotor_mask), Ct_eff=jnp.asarray(Ct_eff),
         x_off=jnp.asarray(x_off),
+        ti_in=jnp.asarray(ti_in),
     )
     dt_cap = min(dl / local.Uhub, 0.25 * params.D / local.Uhub)  # constant for the whole run -- plain floats
 
-    seed = _frame(stacked, 0, unstacked=_UNSTACKED_MEMBERS + ("U", "kw"))
+    seed = _frame(stacked, 0, unstacked=_UNSTACKED_MEMBERS + ("U", "kw", "kwa"))
     stacked_out, was_active = _calculate_deficit_field_jit(
         stacked, seed, adapter, params.field_params.I_amb, params.field_params.WV,
         up_a, up_D, up_pos_x, up_pos_y, up_Uhub, up_mask, dl, dt_cap,
@@ -413,8 +482,15 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, 
             # over the upstream rotors via Crespo & Hernandez (1996).
             nut_bud = du_nu_t(ti_amb, age_D, adapter.U0, adapter.D)
             psi_bud = du_psi(ti_amb, age_D, adapter.D)
-            NuT = NuT_model(current, adapter, I_amb, up_a, up_D, up_pos_x,
-                            up_pos_y, up_Uhub, up_mask)
+            if NUT_X_FROM_AGE:
+                x_eff = age_from_kwa(current.kwa, current.kw, adapter.D, age_D)
+            else:
+                x_eff = None
+            if NUT_TI_FROM_KW:
+                NuT = du_nu_t(adapter.ti_in, age_D, adapter.U0, adapter.D)
+            else:
+                NuT = NuT_model(current, adapter, I_amb, up_a, up_D, up_pos_x,
+                                up_pos_y, up_Uhub, up_mask, x_D_override=x_eff)
             # NuT is a FIELD now, but the step must stay scalar, so the diffusive limit
             # is taken at its largest value on the plane. For a uniform NuT this is the
             # same number it always was.
@@ -422,6 +498,11 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, 
 
             new = interpolate_vec_data(stacked, current.t + dt)
             U, X_new = advance_wake_field(current, dt, NuT, adapter, WV)
+            Uw_bud = adapter.Uin - current.U
+            dWy, dWz = jnp.gradient(Uw_bud, current.yloc[:, 0], current.zloc[0, :])
+            kwa_new = advance_kwa(current.kwa, current.kw, current.yloc, current.zloc,
+                                  X_new - current.X, nut_bud, psi_bud, adapter.U0,
+                                  nut_bud * (dWy ** 2 + dWz ** 2))
             kw_new = advance_kw(current.kw, current.U, adapter.Uin, current.yloc,
                                 current.zloc, X_new - current.X, nut_bud, psi_bud,
                                 adapter.U0)
@@ -450,7 +531,8 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, 
             ramp = (1.0 - 2.0 * a_new) / jnp.maximum(1.0 - 2.0 * a_old, 1e-6)
             U = U * (1.0 + jnp.tensordot(ramp - 1.0, adapter.rotor_mask, axes=1))
 
-            new = dataclasses.replace(new, U=U, kw=kw_new, X=X_new, t=current.t + dt)
+            new = dataclasses.replace(new, U=U, kw=kw_new, kwa=kwa_new, X=X_new,
+                                      t=current.t + dt)
 
             still_active = new.X <= calculation_domain  # this crossing entry stays the final real one
             return new, still_active
@@ -490,5 +572,6 @@ def _vortex_field_to_numpy(vortex_field, grid=None):
         V=np.asarray(vortex_field.V), W=np.asarray(vortex_field.W),
         U=np.asarray(vortex_field.U), OmegaX=np.asarray(vortex_field.OmegaX),
         kw=np.asarray(vortex_field.kw),
+        kwa=np.asarray(vortex_field.kwa),
         t=float(vortex_field.t), X=float(vortex_field.X),
     )

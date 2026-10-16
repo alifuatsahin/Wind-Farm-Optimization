@@ -48,7 +48,7 @@ def _concat_vortices(carried, fresh, V_bg, W_bg):
 
 
 def _march_segment(t, seed, need_m, up, N_up_max, U0, Uin_global, companions=(),
-                   carried=(), n_slots=None, kw0=None):
+                   carried=(), n_slots=None, kw0=None, kwa0=None):
     """March one turbine only as far as its field is actually read.
 
     Measured on the 8-turbine wind tunnel, one process, identical results throughout:
@@ -65,7 +65,7 @@ def _march_segment(t, seed, need_m, up, N_up_max, U0, Uin_global, companions=(),
 
     t.Uin = U0                       # initialize_wake_field carves the top-hat out of this
     t.simulate_vortex_field(seed=seed, total_steps=VOR_FULL)
-    t.initialize_wake_field(companions, kw0=kw0)
+    t.initialize_wake_field(companions, kw0=kw0, kwa0=kwa0)
     t.Uin = Uin_global               # solver reference: the GLOBAL profile
     t.calculate_deficit_field(up, N_upstream_max=N_up_max, max_steps=DEF_FULL,
                               companions=companions, carried=carried, n_slots=n_slots)
@@ -124,7 +124,7 @@ def solve_single_field(wf, verbose=False):
     _assert_shared_grid(ts)
     N_up_max = max(len(ts) - 1, 0)
     stations = _x_stations(ts, X_STATION_TOL_D * ts[0].D) if ts else []
-    prev, carried_vortex, carried_kw = None, None, None
+    prev, carried_vortex, carried_kw, carried_kwa = None, None, None, None
     audit = []
     # Rotors already shed, in march order. The ramp stack is padded to the whole farm
     # rather than to this list's current length, so the scan traces once per farm size
@@ -149,6 +149,9 @@ def solve_single_field(wf, verbose=False):
         # carried rather than restarted -- which is what removes the need for any
         # superposition rule.
         kw0 = np.zeros_like(U0) if carried_kw is None else np.asarray(carried_kw)
+        # The age is the age OF k_w, so the two must cross a station boundary together
+        # or the ratio A = M/k_w jumps.
+        kwa0 = np.zeros_like(U0) if carried_kwa is None else np.asarray(carried_kwa)
         # every rotor at this station reads its own disc out of the same incoming field
         for t in group:
             dy = lead.pos[1] - t.pos[1]
@@ -182,7 +185,7 @@ def solve_single_field(wf, verbose=False):
         need_m = (stations[g + 1][0].pos[0] - lead.pos[0] + 0.5 * lead.D
                   if g + 1 < len(stations) else lead.calculation_domain)
         _march_segment(lead, seed, need_m, up, N_up_max, U0, Uin_global, companions,
-                       carried, n_slots, kw0)
+                       carried, n_slots, kw0, kwa0)
         shed_before.extend(group)
 
         # companions share the station's marched field; nothing further is solved on them
@@ -204,6 +207,7 @@ def solve_single_field(wf, verbose=False):
                                          active=f.active, yloc=jnp.array([]), zloc=jnp.array([]),
                                          V=zeros, W=zeros, OmegaX=jnp.array([]), t=0.0)
             carried_kw = np.asarray(f.kw) if np.size(f.kw) else None
+            carried_kwa = np.asarray(f.kwa) if np.size(f.kwa) else None
         prev = lead
 
     if verbose:

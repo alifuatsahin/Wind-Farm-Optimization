@@ -17,11 +17,12 @@ class VortexField:
     U: np.ndarray = field(default_factory=lambda: np.array([]))      # Streamwise velocity field (optional)
     OmegaX: np.ndarray = field(default_factory=lambda: np.array([])) # Vorticity field (optional)
     kw: np.ndarray = field(default_factory=lambda: np.array([]))     # Wake-added TKE, marched with U
+    kwa: np.ndarray = field(default_factory=lambda: np.array([]))    # k_w * turbulence AGE, marched with k_w
     t: float = 0.0
     X: float = 0.0  # streamwise position
 
 jax.tree_util.register_dataclass(
     VortexField,
-    data_fields=["Y", "Z", "Rv", "Circ", "age", "active", "yloc", "zloc", "V", "W", "U", "OmegaX", "kw", "t", "X"],
+    data_fields=["Y", "Z", "Rv", "Circ", "age", "active", "yloc", "zloc", "V", "W", "U", "OmegaX", "kw", "kwa", "t", "X"],
     meta_fields=[],
 )
