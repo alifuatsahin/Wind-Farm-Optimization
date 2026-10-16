@@ -500,7 +500,7 @@ def validate_ti_field(case, yaw, save_dir='runs/validation_fullwake', n_grids=28
     ti_exp = exp['z'][:, ::x_stride]
     sim = run_fullwake_case(yaw, n_grids=n_grids, x_D_max=float(np.nanmax(exp['x_D'])),
                             y_D_halfwidth=float(np.nanmax(np.abs(y_D))))
-    ti_sim = model_ti_field(sim.wind_farm, x_D, y_D, i_amb=i_amb)
+    ti_sim = solver_ti_field(sim.wind_farm, x_D, y_D, i_amb=i_amb)
 
     msk = np.isfinite(ti_exp) & np.isfinite(ti_sim)
     d = ti_sim[msk] - ti_exp[msk]
@@ -514,7 +514,7 @@ def validate_ti_field(case, yaw, save_dir='runs/validation_fullwake', n_grids=28
     style_figure(fig)
     lo, hi = 0.04, 0.22
     for ax, F, ttl in ((axes[0], ti_exp, 'Experiment $I_u$'),
-                       (axes[1], ti_sim, 'Model $I_u$')):
+                       (axes[1], ti_sim, 'Model $I_u$ (marched $k_w$)')):
         im = ax.pcolormesh(x_D, y_D, F, cmap='turbo', vmin=lo, vmax=hi, shading='nearest')
         fig.colorbar(im, ax=ax, label='$I_u$')
         ax.set_ylabel('$y/D$')
@@ -630,8 +630,7 @@ def plot_ti_comparison(case, yaw, save_dir='runs/validation_fullwake', n_grids=2
     iq = ishihara_qian_ti_field(sim.wind_farm, x_D, y_D, i_amb=i_amb)
     iqd = ishihara_qian_ti_field(sim.wind_farm, x_D, y_D, i_amb=i_amb, y_centre=yc)
     sh = shear_ti_field(sim.wind_farm, x_D, y_D, sl['U'] / sl['Uh'], i_amb=i_amb)
-    mc = marched_ti_field_cyl(sim.wind_farm, x_D, y_D, sl['U'] / sl['Uh'],
-                              y_centre=yc, i_amb=i_amb)
+    mc = solver_ti_field(sim.wind_farm, x_D, y_D, i_amb=i_amb)
 
     def stat(F):
         m = np.isfinite(ti_exp) & np.isfinite(F)
@@ -640,7 +639,7 @@ def plot_ti_comparison(case, yaw, save_dir='runs/validation_fullwake', n_grids=2
         return np.sqrt(np.mean(d ** 2)), d.mean(), 1 - np.sum(d ** 2) / ss
     for lab, F in (('Crespo (current)', cr), ('Ishihara-Qian', iq),
                    ('Ishihara-Qian, deflected', iqd), ('shear, local equilib', sh),
-                   ('marched Du budget (cyl)', mc)):
+                   ('SOLVER marched k_w', mc)):
         r, b, r2 = stat(F)
         print('  case %s  %-26s RMSE=%.4f bias=%+.4f R2=%+.3f' % (case, lab, r, b, r2))
 
@@ -650,7 +649,7 @@ def plot_ti_comparison(case, yaw, save_dir='runs/validation_fullwake', n_grids=2
     fig, ax = plt.subplots(6, 1, figsize=(7.0, 10.0), sharex=True)
     style_figure(fig)
     for a, F, lbl in ((ax[0], ti_exp, 'Experiment'), (ax[1], cr, 'Crespo (current)'),
-                      (ax[2], iqd, 'Ishihara-Qian'), (ax[3], mc, 'marched Du budget')):
+                      (ax[2], iqd, 'Ishihara-Qian'), (ax[3], mc, 'solver, marched $k_w$')):
         im = a.pcolormesh(x_D, y_D, F, cmap='turbo', vmin=lo, vmax=hi, shading='nearest')
         fig.colorbar(im, ax=a, label='$I_u$')
         a.set_ylabel('$y/D$')
@@ -674,7 +673,7 @@ def plot_ti_comparison(case, yaw, save_dir='runs/validation_fullwake', n_grids=2
         a.plot(ti_exp[:, i], y_D, color='0.25', lw=1.3, label='Experiment')
         a.plot(cr[:, i], y_D, 'C3--', lw=1.1, label='Crespo (current)')
         a.plot(iqd[:, i], y_D, 'C0-', lw=1.1, label='I-Q, deflected')
-        a.plot(mc[:, i], y_D, 'C2-', lw=1.4, label='marched Du budget')
+        a.plot(mc[:, i], y_D, 'C2-', lw=1.4, label='solver, marched $k_w$')
         a.set_title('$x/D = %d$' % xt, fontsize=7)
         a.set_xlabel('$I_u$')
         style_axes(a)
@@ -967,3 +966,35 @@ def marched_ti_field_age(wind_farm, x_D, y_D, U_norm, age, y_centre=None, i_amb=
         kw[:, i] = np.interp(np.abs(y_m - yc[i]), r, k)
     added = IU_TO_TI * np.sqrt(2.0 / 3.0 * kw) / U0
     return (i_amb ** m + added ** m) ** (1.0 / m)
+
+
+def solver_ti_field(wind_farm, x_D, y_D, i_amb=I_AMB):
+    """The TI the SOLVER actually used, read back from the marched k_w field.
+
+    Everything else in this module reconstructs a TI post hoc from rotor positions. Now
+    that k_w is carried in the march, the model has its own internal TI and that is what
+    should be plotted against the measurement -- a reconstruction can agree with the data
+    while the solver uses something else.
+    """
+    from simulation.field_ops import _source_turbine
+    ts = wind_farm.turbines
+    U0 = float(np.mean([t.Uhub for t in ts
+                        if abs(t.pos[0] - min(q.pos[0] for q in ts)) < 1e-9]))
+    out = np.full((len(y_D), len(x_D)), i_amb)
+    for i, xd in enumerate(x_D):
+        x_m = xd * D
+        src = _source_turbine(ts, x_m)
+        if src is None or src.wake_field is None:
+            continue
+        frames = src.wake_field
+        j = int(np.argmin([abs(float(f.X) - (x_m - src.pos[0])) for f in frames]))
+        kw = np.asarray(frames[j].kw)
+        if kw.size == 0:
+            continue
+        zc = np.asarray(src.zloc)[0, :]
+        kz = int(np.argmin(np.abs(zc - src.Zhub)))          # hub-height row
+        y_abs = np.asarray(src.yloc)[:, kz] + src.pos[1]
+        kw_line = np.interp(y_D * D, y_abs, kw[:, kz])
+        iu_add = 1.28 * np.sqrt(np.maximum(2.0 / 3.0 * kw_line, 0.0)) / U0
+        out[:, i] = np.sqrt(i_amb ** 2 + iu_add ** 2)
+    return out

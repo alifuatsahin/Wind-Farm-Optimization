@@ -97,11 +97,11 @@ class Turbine:
         self.vortex_field = tp.simulate_vortex_field(self._params, self._current_local(),
                                                      seed=seed, total_steps=total_steps)
 
-    def initialize_wake_field(self, companions=()):
+    def initialize_wake_field(self, companions=(), kw0=None):
         """`companions` are the other rotors at this same streamwise station, as
         (TurbineParams, dy) pairs with dy this turbine's local-y offset from theirs."""
         self.vortex_field, self.dl = tp.initialize_wake_field(
-            self._params, self.vortex_field, self._current_local(), companions)
+            self._params, self.vortex_field, self._current_local(), companions, kw0=kw0)
 
     def calculate_deficit_field(self, upstream_turbines, max_steps=1500, N_upstream_max=None,
                                 companions=(), carried=(), n_slots=None):

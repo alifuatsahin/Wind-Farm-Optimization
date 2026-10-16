@@ -8,7 +8,7 @@ from jax import lax
 from jax.scipy.special import erf as jerf
 
 from .turbine_state import LocalConditions, VortexSimConfig, DeficitFieldConfig, pack_upstream_turbines
-from .utils import smooth_2d, NuT_model
+from .utils import smooth_2d, NuT_model, du_nu_t, du_psi, advance_kw, ti_from_kw
 from .vortex_model import _simulate_vortex_evolution_jit, _UNSTACKED
 from .model_solver import advance_wake_field
 from .field_ops import interpolate_vec_data
@@ -264,7 +264,7 @@ def _disc_mask(yloc, zloc, p, dy):
     return np.sqrt(r2) <= p.R
 
 
-def initialize_wake_field(params, stacked, local, companions=()):
+def initialize_wake_field(params, stacked, local, companions=(), kw0=None):
     yloc = np.asarray(stacked.yloc)
     zloc = np.asarray(stacked.zloc)
     beta = params.beta
@@ -282,9 +282,12 @@ def initialize_wake_field(params, stacked, local, companions=()):
 
     U_smooth = Uin - smooth_2d(Uin - U, kernel_size=3)
 
+    kw_seed = (np.zeros_like(U_smooth) if kw0 is None
+               else np.asarray(kw0).reshape(U_smooth.shape))
     new_stacked = dataclasses.replace(
         stacked,
         U=jnp.asarray(U_smooth),
+        kw=jnp.asarray(kw_seed),
         X=stacked.X.at[0].set(0.0),
         t=stacked.t.at[0].set(0.0),
     )
@@ -334,7 +337,7 @@ def calculate_deficit_field(params, local, stacked, dl, upstream_turbines, N_ups
     )
     dt_cap = min(dl / local.Uhub, 0.25 * params.D / local.Uhub)  # constant for the whole run -- plain floats
 
-    seed = _frame(stacked, 0, unstacked=_UNSTACKED_MEMBERS + ("U",))
+    seed = _frame(stacked, 0, unstacked=_UNSTACKED_MEMBERS + ("U", "kw"))
     stacked_out, was_active = _calculate_deficit_field_jit(
         stacked, seed, adapter, params.field_params.I_amb, params.field_params.WV,
         up_a, up_D, up_pos_x, up_pos_y, up_Uhub, up_mask, dl, dt_cap,
@@ -359,8 +362,18 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, 
         current, active = carry
 
         def when_active(_):
-            NuT = NuT_model(current, adapter, I_amb, up_a, up_D, up_pos_x, up_pos_y,
-                            up_Uhub, up_mask)
+            # Wake-added TKE replaces the Crespo correlation. The budget's own nu_t and
+            # Psi take the AMBIENT turbulence intensity, as Du intends -- that keeps the
+            # march non-circular, since the deficit's nu_T below then uses the local TI
+            # that k_w produces. age = current.X/D is the distance from THIS station's
+            # rotor, i.e. the shear-layer age, which is the reference that works: taking
+            # it from the farm inlet lets Psi grow without bound down a row.
+            age_D = jnp.maximum(current.X / adapter.D, 1e-6)
+            ti_amb = I_amb / 1.28
+            nut_bud = du_nu_t(ti_amb, age_D, adapter.U0, adapter.D)
+            psi_bud = du_psi(ti_amb, age_D, adapter.D)
+            NuT = du_nu_t(ti_from_kw(current.kw, I_amb, adapter.U0), age_D,
+                          adapter.U0, adapter.D)
             # NuT is a FIELD now, but the step must stay scalar, so the diffusive limit
             # is taken at its largest value on the plane. For a uniform NuT this is the
             # same number it always was.
@@ -368,6 +381,9 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, 
 
             new = interpolate_vec_data(stacked, current.t + dt)
             U, X_new = advance_wake_field(current, dt, NuT, adapter, WV)
+            kw_new = advance_kw(current.kw, current.U, adapter.Uin, current.yloc,
+                                current.zloc, X_new - current.X, nut_bud, psi_bud,
+                                adapter.U0)
 
             # EACH ROTOR AGES ON ITS OWN STREAMWISE ORIGIN.
             #
@@ -393,7 +409,7 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, 
             ramp = (1.0 - 2.0 * a_new) / jnp.maximum(1.0 - 2.0 * a_old, 1e-6)
             U = U * (1.0 + jnp.tensordot(ramp - 1.0, adapter.rotor_mask, axes=1))
 
-            new = dataclasses.replace(new, U=U, X=X_new, t=current.t + dt)
+            new = dataclasses.replace(new, U=U, kw=kw_new, X=X_new, t=current.t + dt)
 
             still_active = new.X <= calculation_domain  # this crossing entry stays the final real one
             return new, still_active
@@ -432,5 +448,6 @@ def _vortex_field_to_numpy(vortex_field, grid=None):
         yloc=yloc, zloc=zloc,
         V=np.asarray(vortex_field.V), W=np.asarray(vortex_field.W),
         U=np.asarray(vortex_field.U), OmegaX=np.asarray(vortex_field.OmegaX),
+        kw=np.asarray(vortex_field.kw),
         t=float(vortex_field.t), X=float(vortex_field.X),
     )

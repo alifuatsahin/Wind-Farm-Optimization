@@ -82,6 +82,75 @@ def NuT_model(wake_field, config, I_amb, up_a, up_D, up_pos_x, up_pos_y, up_Uhub
 
     return coeff * jnp.minimum(x_D, x_D_threshold) * config.U0 * config.D
 
+#: Du et al. (2025) Eq (26) eddy viscosity and Eq (28) dissipation length group, both as
+#: functions of a turbulence intensity and a shear-layer age. Kept in one place so the
+#: wake-added TKE budget and the deficit's own nu_T cannot drift apart.
+DU_KV1, DU_KV0, DU_XV1 = 0.05, 0.001, 0.5
+IU_TO_TI = 1.28   # Du et al. Sec 2.3: Iu ~ 1.28 TI under neutral conditions
+
+
+def du_nu_t(TI, age_D, U0, D):
+    """Du Eq (26): nu_t/(U0 D) = (kv1 TI - kv0) * min(age/D, xv1/TI)."""
+    return (jnp.maximum(DU_KV1 * TI - DU_KV0, 0.0)
+            * jnp.minimum(age_D, DU_XV1 / TI) * U0 * D)
+
+
+def du_psi(TI, age_D, D):
+    """Du Eq (28): Psi/D^2 = 0.67 (0.2 TI + 0.015)^2 / (0.4 TI + 0.010) * age/D.
+
+    Psi = c l_m^2 / C_eps sets the dissipation timescale Psi/nu_t, and because l_m is the
+    mixing length it grows with the age of the SHEAR LAYER -- which restarts at every
+    rotor. Referencing it to the farm inlet instead makes the amplitude (~sqrt(Psi)) grow
+    without bound down a row: measured on the three-turbine experiment, the peak I_u error
+    went -1% in bay 1 to +20% and +28% in bays 2 and 3.
+    """
+    return (0.67 * (0.2 * TI + 0.015) ** 2 / (0.4 * TI + 0.010)
+            * jnp.maximum(age_D, 1e-6) * D ** 2)
+
+
+def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
+    """One march step of Du et al. (2025) Eq (13), the wake-added TKE budget:
+
+        U0 dk_w/dx = nu_t grad^2 k_w - (nu_t/Psi) k_w + nu_t |grad_perp U|^2
+
+    i.e. cross-plane diffusion, dissipation, and shear production. Du's Eq (14) is the
+    analytic solution of this same equation; marching it instead avoids that solution's
+    modified-Bessel approximation, its unreconciled Psi vs psi, and the undefined delta in
+    its integration limit -- and because the cross-plane here is genuinely two-dimensional,
+    the operator is just the 2-D Laplacian, with no axis singularity and NO axisymmetry
+    assumption. Du's own formulation is axisymmetric in <k_w>_theta and therefore cannot
+    represent the unequal lateral peaks the measurements show; this can.
+
+    Replaces the Crespo & Hernandez correlation entirely. Two things go with it: there is
+    no superposition rule, because k_w is transported and each rotor simply adds production
+    to a field already being carried; and the correlation's lateral structure -- which was
+    none at all, one number per plane -- becomes the structure of the solved shear.
+    """
+    # Production comes from the gradient of the WAKE DEFICIT, not of the total velocity.
+    # k_w = k - k^B is the ADDED TKE, so the ambient shear that sustains k^B must not
+    # appear here. Using grad(U) instead injects the ABL's own dUin/dz across the whole
+    # domain and manufactures k_w outside the wake: measured as a uniform +0.019 bias in
+    # I_u everywhere, including the undisturbed far field where k_w must be exactly zero.
+    Uw = Uin - U
+    dWdY, dWdZ = jnp.gradient(Uw, yloc[:, 0], zloc[0, :])
+    prod = nu_t * (dWdY ** 2 + dWdZ ** 2)
+    d2y = jnp.gradient(jnp.gradient(kw, yloc[:, 0], axis=0), yloc[:, 0], axis=0)
+    d2z = jnp.gradient(jnp.gradient(kw, zloc[0, :], axis=1), zloc[0, :], axis=1)
+    rhs = nu_t * (d2y + d2z) - (nu_t / psi) * kw + prod
+    return jnp.maximum(kw + (dx / U0) * rhs, 0.0)
+
+
+def ti_from_kw(kw, I_amb, U0):
+    """Total turbulence intensity from ambient plus marched wake-added TKE.
+
+    TI = sqrt(2 k/3)/U0 (Du Sec 2.3), so the added part combines with the ambient in
+    quadrature exactly as the old p-norm did at m = 2 -- but the added part now comes from
+    transport rather than from a correlation.
+    """
+    iu_added = IU_TO_TI * jnp.sqrt(2.0 / 3.0 * kw) / U0
+    return jnp.sqrt(I_amb ** 2 + iu_added ** 2) / IU_TO_TI
+
+
 def smooth_2d(U, kernel_size=3, method='gaussian'):
     """
     2D smoothing with options:
