@@ -124,14 +124,8 @@ C_MU = 0.09
 #: agreement is a cross-check on Du's c = 0.67 with the standard c_mu, not a second fit.
 BRADSHAW_A1 = C_MU ** 0.5
 
-#: eps = c_eps k^(3/2)/l_m, determined by c*c_eps = c_mu rather than fitted.
-DU_C_EPS = C_MU / DU_C_NU
 
 
-#: von Karman constant, for the Prandtl-Blackadar ABL mixing length l = kappa*z/(1 + kappa*z/l0),
-#: which tends to kappa*z near the surface. Used to BOUND the wake mixing length -- see
-#: ABL_LENGTH_CAP in turbine_physics.
-KARMAN = 0.4
 
 
 #: l_m as a fraction of the wake width. Klemmer & Howland (2025) JRSE 17, 033304 take l_m to
@@ -139,28 +133,6 @@ KARMAN = 0.4
 #: and, measured on the full-wake set, it reproduces Du's own l_m at x = 3D to three figures
 #: (0.0776 vs 0.0775), so it is not an extra fit.
 LM_OVER_WIDTH = 0.08
-
-
-def wake_width(Uw, yloc, zloc):
-    """Equivalent top-hat DIAMETER of the deficit: A = int Uw dA / max(Uw), W = 2 sqrt(A/pi).
-
-    Unlike an age, this does not restart at a downstream rotor -- T2's fresh top-hat is added
-    to an already-wide profile, so W is continuous across a station boundary. Measured through
-    the three-turbine row: 0.978 at the end of bay 1, 1.049 at T2's rotor, 1.165, then 1.196 at
-    T3's rotor and 1.290. Also unlike the vorticity thickness, which a freshly seeded top-hat
-    pins through its max gradient.
-    """
-    dy = yloc[1, 0] - yloc[0, 0]
-    dz = zloc[0, 1] - zloc[0, 0]
-    Uw = jnp.maximum(Uw, 0.0)
-    A = jnp.sum(Uw) * dy * dz / (jnp.max(Uw) + 1e-9)
-    return 2.0 * jnp.sqrt(jnp.maximum(A, 0.0) / jnp.pi)
-
-
-def width_equivalent_age(Uw, yloc, zloc, TI, D):
-    """The age whose Du l_m equals LM_OVER_WIDTH * W, so Du's formulae are reused unchanged."""
-    W = wake_width(Uw, yloc, zloc)
-    return LM_OVER_WIDTH * (W / D) / (0.2 * TI + 0.015)
 
 
 def du_mixing_length(TI, age_D, D):
@@ -180,50 +152,6 @@ def du_mixing_length(TI, age_D, D):
     substituting one into the other.
     """
     return (0.2 * TI + 0.015) * age_D * D
-
-
-#: Fraction of the ambient LATERAL velocity rms surviving the DWM low-pass filter at
-#: f = U/(2D) (Larsen et al. 2008), i.e. streamwise wavelength 2D under Taylor's hypothesis.
-#: MEASURED from data/ABL_flow_3turbine.h5 at |y| > 220 m, outside the wakes: variance
-#: fraction 0.544, so phi = 0.738. Range 0.738-0.762 over C_meander = 1.9-2.1; 0.671 at the
-#: D_m mean of 2.5D.
-PHI_MEANDER = 0.738
-
-#: Lateral-to-streamwise turbulence intensity ratio. MEASURED in the same sample as 0.735
-#: (I_u = 0.0742, I_v = 0.0546); the usual ABL default is 0.8.
-I_V_OVER_IU = 0.735
-
-
-def meander_diffusivity(I_amb, age_D, U0, D):
-    """Apparent diffusivity of the time average produced by wake meandering.
-
-    A meandering wake is a rigid deficit whose centre wanders, so the TIME AVERAGE is exactly
-    a convolution of the instantaneous deficit with the displacement PDF:
-    <Uw>(y) = int p(eta) Uw(y-eta) deta. For Gaussian p of variance sigma_m^2 that is a
-    Gaussian smoothing of width sigma_m, and a diffusion operator acting over distance x at
-    speed U smooths by variance 2 nu x / U. Matching the GROWTH of the two,
-
-        nu_m = (U/2) d(sigma_m^2)/dx ,    sigma_m = I_vf x   (frozen advection)
-             = U I_vf^2 x ,               I_vf = PHI_MEANDER * I_V_OVER_IU * I_u
-
-    Both the convolution and the diffusion conserve int Uw dy, which is the quantity the wind
-    tunnel and the LES agree on while disagreeing 20% on width -- see
-    [[les-wake-too-narrow-meandering]].
-
-    THREE LIMITS, all stated rather than hidden:
-      * Correct for the mean velocity, NOT for power: a rotor reads <U^3> and meandering gives
-        <U^3> != <U>^3, so expect field R2 to gain more than power.
-      * Double-counting risk: Du's Psi constants were calibrated on time-averaged LES TKE,
-        which already contains meandering. The defence is empirical -- if it were double
-        counting, a multiplier of 1.0 would already be optimal, and the measured optimum is
-        1.6.
-      * age_D is the STATION-LOCAL age on purpose. sigma_m ~ x is unbounded, which is exactly
-        what made a farm-referenced l_m diverge on 8 turbines; the local age is bounded by
-        construction and is right for the freshly shed deficit that dominates each bay, while
-        under-counting the carried residual.
-    """
-    i_vf = PHI_MEANDER * I_V_OVER_IU * I_amb
-    return U0 * i_vf ** 2 * jnp.maximum(age_D, 0.0) * D
 
 
 def ambient_tke(I_amb, U0):
@@ -315,7 +243,7 @@ def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
     return jnp.maximum(kw + (dx / U0) * rhs, 0.0)
 
 
-def advance_kwa(kwa, kw, yloc, zloc, dx, nu_t, psi, U0, prod=None):
+def advance_kwa(kwa, kw, yloc, zloc, dx, nu_t, psi, U0, prod):
     """One march step of the TRANSPORTED turbulence age, carried as M = k_w * A.
 
         U0 dM/dx = nu_t grad^2 M - (nu_t/Psi) M + U0 k_w
@@ -350,9 +278,8 @@ def advance_kwa(kwa, kw, yloc, zloc, dx, nu_t, psi, U0, prod=None):
     """
     d2y = jnp.gradient(jnp.gradient(kwa, yloc[:, 0], axis=0), yloc[:, 0], axis=0)
     d2z = jnp.gradient(jnp.gradient(kwa, zloc[0, :], axis=1), zloc[0, :], axis=1)
-    rhs = nu_t * (d2y + d2z) - (nu_t / psi) * kwa + U0 * kw
-    if prod is not None:
-        rhs = rhs + (kwa / jnp.maximum(kw, 1e-9)) * prod
+    rhs = (nu_t * (d2y + d2z) - (nu_t / psi) * kwa + U0 * kw
+           + (kwa / jnp.maximum(kw, 1e-9)) * prod)
     return jnp.maximum(kwa + (dx / U0) * rhs, 0.0)
 
 
