@@ -429,7 +429,7 @@ Main simulation driver
 - `run()`: Execute wake simulation
 - `calculate_objective()`: Farm efficiency -- the mean over turbines of the power each
   produces relative to the same turbine unwaked and unyawed, so it already carries the
-  cos^1.88 power loss of misalignment. This is what the optimiser maximises.
+  cos^3 power loss of misalignment. This is what the optimiser maximises.
 - `save_results(out_path, limit_frames)`: Save wake field data
 
 #### `Optimizer`

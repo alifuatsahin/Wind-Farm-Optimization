@@ -23,7 +23,8 @@ from .viz_style import SURFACE, INK_PRIMARY, INK_SECONDARY, style_figure, style_
 CRESPO_M = 2.0
 
 
-def NuT_model(wake_field, config, I_amb, up_a, up_D, up_pos_x, up_Uhub, up_mask):
+def NuT_model(wake_field, config, I_amb, up_a, up_D, up_pos_x, up_pos_y, up_Uhub,
+              up_mask):
     """
     Turbulent eddy viscosity closure for a single turbine's wake, following the
     piecewise-linear model of Du, Zhu, Li, Ge, Li & Liu (2025), "Modeling of
@@ -48,12 +49,31 @@ def NuT_model(wake_field, config, I_amb, up_a, up_D, up_pos_x, up_Uhub, up_mask)
     x_global = config.pos[0] + wake_field.X
 
     x_D_up = (x_global - up_pos_x) / up_D
-    qualifies = up_mask & (x_D_up >= 3.0)
     # Crespo & Hernandez (1996) JWEIA 61, 71-85, valid for 5 < x/D < 15, 0.07 < I0 < 0.14,
     # 0.1 < a < 0.4.
     delta_I = 0.73 * up_a ** 0.8325 * I_amb ** (-0.0325) * x_D_up ** (-0.32)
-    contribution = jnp.where(qualifies, (delta_I * up_Uhub / config.U0) ** m, 0.0)
-    Iu_sq = I_amb ** m + jnp.sum(contribution)
+    contribution = (delta_I * up_Uhub / config.U0) ** m
+
+    # TI RESOLVED ACROSS THE PLANE, not averaged over it.
+    #
+    # An upstream rotor raises the turbulence where ITS wake is, and the lateral extent of
+    # that influence is the |dy| < 3D criterion this model already used -- it was simply
+    # evaluated once, at the marching rotor, and the single resulting value was applied to
+    # every wake on the cross-plane. With one turbine per streamwise station that is
+    # exactly right, so single rows are unaffected. With several it is not: the plane
+    # inherits whichever rotor happened to lead the station, and since the lead is just the
+    # first to sort there, two identical farms listed in a different order disagreed by up
+    # to 13.6% in rotor inflow. Evaluating the same criterion per grid column removes that
+    # without changing the correlation, its constants, or the accumulation rule.
+    #
+    # NuT therefore returns a FIELD. Its lateral variation sits at |dy| = 3D from a rotor,
+    # where the deficit gradient is negligible (measured: the transition occupied 2 of 140
+    # columns and overlapped none of the 69 in-wake ones), so nu_T may stay outside the
+    # divergence in model_solver -- the grad(nu_T).grad(U - Uin) term it would otherwise
+    # need is zero wherever it would act.
+    y_rel = (wake_field.yloc + config.pos[1])[..., None] - up_pos_y    # (ny, nz, n_up)
+    qualifies = up_mask & (x_D_up >= 3.0) & (jnp.abs(y_rel) < 3.0 * up_D)
+    Iu_sq = I_amb ** m + jnp.sum(jnp.where(qualifies, contribution, 0.0), axis=-1)
 
     TI_total = (Iu_sq ** (1 / m)) / IU_TO_TI
     x_D = wake_field.X / config.D

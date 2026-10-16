@@ -7,6 +7,38 @@ from dataclasses import dataclass, field
 # Exponent in Ct(beta) = Ct(0)*cos(beta)**CT_YAW_EXP.
 CT_YAW_EXP = 2.0
 
+# Exponent in Cp(beta) = Cp(0)*cos(beta)**CP_YAW_EXP.
+#
+# 3 is the momentum-theory partner of CT_YAW_EXP = 2: the rotor-normal inflow is
+# U*cos(beta), so T ~ (U cos b)^2 and P ~ (U cos b)^3.
+#
+# It is also the value Zong & Porte-Agel (2021) Renew. Energy 170, Eq (12) adopt for
+# WIRE-01. Be precise about what that is, though: their Fig 9 regresses data from THREE
+# OTHER studies' turbines (Adaramola & Krogstad 2011; Oabay et al. 2012; Bastankhah &
+# Porte-Agel 2016), all "extracted at the optimal tip speed ratios", and the text states
+# the resulting p = 1.8 and q = 3 "are under no means universal" and depend on the control
+# scheme and blade geometry. So q = 3 is a sourced, principled choice that coincides with
+# momentum theory -- NOT a measurement of this rotor. Fitting the full-wake dataset gives
+# 2.42 at 25 deg rising to 2.9 at 40 deg, which the authors' own caveat anticipates.
+#
+# This was 1.88 for a long time, as a bare literal with no citation. 1.88 is Fleming et
+# al. (2015), a NUMERICAL result for the NREL 5 MW -- a different turbine -- and it sits
+# one hundredth from WIRE-01's THRUST exponent of 1.8, so it looks like the thrust
+# coefficient was adopted as the power coefficient. Using 2 for thrust and 1.88 for power
+# cannot both follow from momentum theory, and the three-turbine full-wake experiment
+# rejects 1.88 outright: on the isolated upstream rotor, where no wake physics enters, it
+# over-predicts retained power at every yaw angle and by 14 points at 40 deg.
+#
+# A least-squares fit to that experiment gives 2.82, not 3, and the fit is marginally
+# better (sweep RMSE 0.0192 vs 0.0254). It is NOT used: a per-turbine parameter comes from
+# the spec sheet even at a cost in R2. The fit is also biased low, since that rig holds
+# RPM roughly constant under yaw, so its rotor runs 5-14% above baseline tip-speed ratio
+# and part of the measured loss is off-optimal operation rather than misalignment.
+#
+# Strictly this is per-turbine and belongs in TurbineConfig, not here. It is a module
+# constant only to mirror CT_YAW_EXP; move both together if a farm ever mixes rotors.
+CP_YAW_EXP = 3.0
+
 # Tower-to-rotor spacing as a fraction of D.
 L_NACELLE_D = 0.2
 
@@ -165,11 +197,12 @@ class DeficitFieldConfig:
     U0: float = 0.0  # rotor-averaged UNDISTURBED inflow (freestream), i.e. Du et al.'s U0
     rotor_mask: np.ndarray = None  # rotor disc, for the near-wake deficit ramp
     Ct_eff: float = 0.0            # Ct_yawed / cos(beta), i.e. the Ct entering Zong Eq 3.3
+    x_off: np.ndarray = None       # per-rotor streamwise age offset; see calculate_deficit_field
 
 
 jax.tree_util.register_dataclass(
     DeficitFieldConfig,
-    data_fields=["pos", "D", "Uhub", "Uin", "Zhub", "U0", "rotor_mask", "Ct_eff"],
+    data_fields=["pos", "D", "Uhub", "Uin", "Zhub", "U0", "rotor_mask", "Ct_eff", "x_off"],
     meta_fields=[],
 )
 
@@ -184,15 +217,17 @@ def pack_upstream_turbines(upstream_turbines, n_max):
     up_a = jnp.zeros(n_max)
     up_D = jnp.ones(n_max)
     up_pos_x = jnp.zeros(n_max)
+    up_pos_y = jnp.zeros(n_max)
     up_Uhub = jnp.ones(n_max)
     up_mask = jnp.zeros(n_max, dtype=bool)
     if n > 0:
         up_a = up_a.at[:n].set(jnp.array([t.a for t in upstream_turbines]))
         up_D = up_D.at[:n].set(jnp.array([t.D for t in upstream_turbines]))
         up_pos_x = up_pos_x.at[:n].set(jnp.array([t.pos[0] for t in upstream_turbines]))
+        up_pos_y = up_pos_y.at[:n].set(jnp.array([t.pos[1] for t in upstream_turbines]))
         up_Uhub = up_Uhub.at[:n].set(jnp.array([t.Uhub for t in upstream_turbines]))
         up_mask = up_mask.at[:n].set(True)
-    return up_a, up_D, up_pos_x, up_Uhub, up_mask
+    return up_a, up_D, up_pos_x, up_pos_y, up_Uhub, up_mask
 
 
 def make_turbine_params(config, field_params, y_bounds=None) -> TurbineParams:
@@ -213,7 +248,7 @@ def make_turbine_params(config, field_params, y_bounds=None) -> TurbineParams:
     dphi = abs(phi[1] - phi[0])
 
     beta = np.deg2rad(config.yaw)
-    Cp = config.Cp * np.cos(beta) ** 1.88
+    Cp = config.Cp * np.cos(beta) ** CP_YAW_EXP
 
     y_lo, y_hi = (config.pos[1], config.pos[1]) if y_bounds is None else y_bounds
     # span the farm laterally, plus half the margin at each end

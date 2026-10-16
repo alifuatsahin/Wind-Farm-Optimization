@@ -4,16 +4,6 @@ One velocity field and one accumulating vortex cloud are carried from rotor to r
 the model "requires no additional wake superposition laws". Each rotor's deficit is an
 initial condition added to the running field, and its shed vortices are appended to the
 still-evolving cloud rather than starting a fresh, isolated system.
-
-Two consequences shape the implementation:
-
-  * The solver's reference `Uin` is the GLOBAL, y-independent log profile. That is the
-    configuration Eq (3.7) actually assumes, and it makes d2Uin/dy2 identically zero, so
-    the correction that a superposed inflow needs cannot arise here at all.
-  * Turbine i's field is only ever read as far as turbine i+1, so its domain is cut to one
-    spacing. Superposition cannot do this -- there every wake is superposed over the whole
-    downstream domain -- and it is where most of the cost difference between the two
-    architectures comes from.
 """
 import dataclasses
 
@@ -57,7 +47,8 @@ def _concat_vortices(carried, fresh, V_bg, W_bg):
     )
 
 
-def _march_segment(t, seed, need_m, up, N_up_max, U0, Uin_global, companions=()):
+def _march_segment(t, seed, need_m, up, N_up_max, U0, Uin_global, companions=(),
+                   carried=(), n_slots=None):
     """March one turbine only as far as its field is actually read.
 
     Measured on the 8-turbine wind tunnel, one process, identical results throughout:
@@ -77,7 +68,7 @@ def _march_segment(t, seed, need_m, up, N_up_max, U0, Uin_global, companions=())
     t.initialize_wake_field(companions)
     t.Uin = Uin_global               # solver reference: the GLOBAL profile
     t.calculate_deficit_field(up, N_upstream_max=N_up_max, max_steps=DEF_FULL,
-                              companions=companions)
+                              companions=companions, carried=carried, n_slots=n_slots)
     if float(t.wake_field[-1].X) < need_m * 0.999:
         raise RuntimeError(f"march at x={t.pos[0]:.0f} reached only "
                            f"{float(t.wake_field[-1].X):.1f} m of {need_m:.1f} m")
@@ -135,6 +126,11 @@ def solve_single_field(wf, verbose=False):
     stations = _x_stations(ts, X_STATION_TOL_D * ts[0].D) if ts else []
     prev, carried_vortex = None, None
     audit = []
+    # Rotors already shed, in march order. The ramp stack is padded to the whole farm
+    # rather than to this list's current length, so the scan traces once per farm size
+    # instead of once per station -- and once per BO iteration rather than per layout.
+    shed_before = []
+    n_slots = max(len(ts), 1)
 
     for g, group in enumerate(stations):
         lead = group[0]
@@ -174,12 +170,16 @@ def solve_single_field(wf, verbose=False):
             carried_vortex, fresh, zeros, zeros)
 
         companions = tuple((t._params, lead.pos[1] - t.pos[1]) for t in group if t is not lead)
+        carried = tuple((t._params, lead.pos[1] - t.pos[1], lead.pos[0] - t.pos[0])
+                        for t in shed_before)
         up = [u for u in ts if u.pos[0] < lead.pos[0] - X_STATION_TOL_D * u.D
-              and abs(u.pos[1] - lead.pos[1]) < 3 * u.D and abs(u.pos[2] - lead.pos[2]) < 3 * u.D]
+              and abs(u.pos[2] - lead.pos[2]) < 3 * u.D]
         # only the LAST station's field is read to the end of the domain
         need_m = (stations[g + 1][0].pos[0] - lead.pos[0] + 0.5 * lead.D
                   if g + 1 < len(stations) else lead.calculation_domain)
-        _march_segment(lead, seed, need_m, up, N_up_max, U0, Uin_global, companions)
+        _march_segment(lead, seed, need_m, up, N_up_max, U0, Uin_global, companions,
+                       carried, n_slots)
+        shed_before.extend(group)
 
         # companions share the station's marched field; nothing further is solved on them
         for t in group:

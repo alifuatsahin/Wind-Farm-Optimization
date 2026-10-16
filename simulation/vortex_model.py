@@ -168,6 +168,18 @@ def _calculate_time_step(V_induced, W_induced, cfl_factor, dist2):
 _GRAVEYARD = 1.0e6  # finite (not inf, to avoid 0*inf -> nan if masking is ever bypassed),
                      # far outside any realistic domain for this model
 
+#: Critical core-to-separation ratio a/b above which two co-rotating vortices merge.
+#: None restores the legacy absolute-distance criterion (config.merge_threshold * D).
+#:
+#: SET TO None PENDING A VERDICT. The 0.29 criterion describes merger of physically
+#: DISTINCT vortices, and it is not obvious that adjacent elements of a discretised
+#: continuous sheet qualify -- with Nv = 20 on a circle of circumference pi*D the element
+#: spacing is 0.157 D against cores of 0.05 D, i.e. a/b = 0.32, already at the critical
+#: ratio. So the criterion would merge every adjacent pair on the first step and collapse
+#: the ring, which coarsens the discretisation rather than modelling physics. Measure
+#: before adopting; see the note on the result below.
+MERGE_CORE_RATIO = None
+
 def _merge_close_vortices(vortex_field, threshold, dist_matrix):
     """Merge vortices that are closer than the threshold distance.
     """
@@ -184,7 +196,20 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
 
     real_dist = dist_matrix[:N_cap, :N_cap]
     i_idx, j_idx = np.triu_indices(N_cap, k=1)  # static -- N_cap is a concrete Python int
-    qualifies_all = real_dist[i_idx, j_idx] <= threshold**2
+    if MERGE_CORE_RATIO is None:
+        qualifies_all = real_dist[i_idx, j_idx] <= threshold**2
+    else:
+        # Physical merger criterion instead of an absolute distance: two co-rotating
+        # vortices merge once their core-to-separation ratio a/b exceeds ~0.29
+        # (Meunier & Leweke 2001; Cerretelli & Williamson 2003; Griffiths & Hopfinger
+        # 1987 give 0.29-0.32, Dritschel's 2D stability bound is 0.32). Using the
+        # CURRENT core radius couples merging to the vortex viscosity the model already
+        # evolves -- cores grow as a^2 = a0^2 + 4*nu*t, so the merge distance grows
+        # downstream, which is the physically right behaviour and removes an absolute
+        # length from the model.
+        a_eff2 = 0.5 * (Rv0[i_idx] ** 2 + Rv0[j_idx] ** 2)   # RMS core; = a for equal cores
+        qualifies_all = real_dist[i_idx, j_idx] <= jnp.maximum(
+            a_eff2 / MERGE_CORE_RATIO ** 2, threshold ** 2)
 
     def merge_step(carry, xs):
         Y, Z, Rv, age, Circ, claimed, locked = carry

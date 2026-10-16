@@ -104,10 +104,15 @@ class Turbine:
             self._params, self.vortex_field, self._current_local(), companions)
 
     def calculate_deficit_field(self, upstream_turbines, max_steps=1500, N_upstream_max=None,
-                                companions=()):
+                                companions=(), carried=(), n_slots=None):
+        """`carried` are rotors shed at EARLIER stations whose near wake may still be
+        developing, as (TurbineParams, dy, x_off) triples. They take no part in the
+        initial condition -- they are already in the field -- and exist only so the ramp
+        can go on ageing them past the station boundary."""
         self.wake_field = tp.calculate_deficit_field(
             self._params, self._current_local(), self.vortex_field, self.dl, upstream_turbines,
-            N_upstream_max=N_upstream_max, max_steps=max_steps, companions=companions
+            N_upstream_max=N_upstream_max, max_steps=max_steps, companions=companions,
+            carried=carried, n_slots=n_slots
         )
 
 class WindFarm:

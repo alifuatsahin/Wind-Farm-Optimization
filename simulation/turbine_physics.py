@@ -77,11 +77,37 @@ def _shed_shape(params, Uhub, beta):
     return np.sin(alpha) * params.dphi
 
 
+#: Scaling on the trailing (root-vortex) circulation in Zong & Porte-Agel (2020) Eq (4.3),
+#: Gamma_0 = k*pi*Uh^2*Ct/Omega. 0.45 is Zong's value and it is MEASURED, not fitted: his
+#: figure 4(a) compares the azimuthal circulation distribution from stereo-PIV against
+#: Eq (4.4) at beta = -30, 0 and +30 deg, and states "the experimental circulation values
+#: are only 45% of the modelled values".
+#:
+#: It has a physical meaning. Eq (4.3) comes from vortex-cylinder theory assuming zero drag
+#: and uniform spanwise circulation. Real blades violate both: part of the thrust is
+#: drag-induced and generates no circulation, and non-uniform spanwise loading sheds some
+#: vorticity inboard rather than at the tip. The paper's appendix says k is therefore the
+#: ratio of lift-induced thrust to total thrust, obtainable per turbine from blade element
+#: momentum theory -- so it is a per-rotor physical parameter, not a universal constant.
+#:
+#: THIS WAS SET TO 1.0 AND THAT WAS WRONG. The reasoning was that Bastankhah et al. (2022)
+#: JFM 933 A2 Eq (38) derives Gamma_r = (pi R/lambda) U_h C_T cos^2(beta) parameter-free,
+#: which reduces exactly to compute_gamma0 and so implies k = 1. The algebra is right but
+#: the conclusion is not: Eq (38) is the same IDEALISED vortex-cylinder value as Zong's
+#: Eq (4.3) with k = 1, and Zong measured the real rotor to shed 45% of it. Deriving the
+#: ideal and measuring the actual are not in conflict -- k is the gap between them.
+#:
+#: Measured consequences of k = 1, all bad: the yawed wake width ratio ran past the
+#: unyawed one by 4D (1.036, unphysical), and the curl at 6D fell from 0.134 to 0.098 D
+#: against an LES value of 0.318 D.
+GAMMA_TRAILING_K = 0.45
+
+
 def compute_dgamma(params, Uhub):
     """Shed circulation per azimuthal element, with the torque- and force-driven parts
     scaled separately.
     """
-    gamma_ref = -compute_gamma0(params, Uhub) * 0.45  # Zong Eq (4.3), his own k
+    gamma_ref = -compute_gamma0(params, Uhub) * GAMMA_TRAILING_K
 
     shape_b = _shed_shape(params, Uhub, params.beta)
     shape_0 = _shed_shape(params, Uhub, 0.0)
@@ -179,6 +205,13 @@ def simulate_vortex_field(params, local, seed=None, total_steps=1000):
     return stacked
 
 
+#: Distance in D past which the erf ramp has saturated, so a carried rotor's term is
+#: mathematically zero and its slot can be left empty. Bounds the PHYSICS, not the bits:
+#: carrying such a rotor still reassociates the tensordot below, which moved the 5D row by
+#: 1.7e-13. Irrelevant physically, but do not claim bit-identity from this constant.
+RAMP_REACH_D = 6.0
+
+
 def axial_induction_ramped(Ct_eff, x_D):
     """Axial induction with the near-wake pressure-gradient development of Shapiro,
     Gayme & Meneveau (2018), as used by Zong & Porte-Agel (2020) JFM 889 A8 Sec 3.1:
@@ -259,30 +292,53 @@ def initialize_wake_field(params, stacked, local, companions=()):
 
 
 def calculate_deficit_field(params, local, stacked, dl, upstream_turbines, N_upstream_max=None,
-                            max_steps=1500, companions=()):
+                            max_steps=1500, companions=(), carried=(), n_slots=None):
     if N_upstream_max is None:
         N_upstream_max = len(upstream_turbines)
-    up_a, up_D, up_pos_x, up_Uhub, up_mask = pack_upstream_turbines(upstream_turbines, N_upstream_max)
+    up_a, up_D, up_pos_x, up_pos_y, up_Uhub, up_mask = pack_upstream_turbines(
+        upstream_turbines, N_upstream_max)
 
     yloc = np.asarray(params.yloc)
     zloc = np.asarray(params.zloc)
-    rotors = ((params, 0.0),) + tuple(companions)
-    rotor_mask = np.stack([np.asarray(smooth_2d(_disc_mask(yloc, zloc, p, dy).astype(float),
-                                                kernel_size=3))
-                           for p, dy in rotors])
-    Ct_eff = np.array([_ct_eff(p) for p, _ in rotors])
+    # (params, dy, x_off). x_off is how far UPSTREAM of this station the rotor sits, so
+    # its near wake is x_off older than the station-local march distance. Station members
+    # are at x_off = 0 and reproduce the original single-origin behaviour exactly.
+    rotors = (((params, 0.0, 0.0),)
+              + tuple((p, dy, 0.0) for p, dy in companions)
+              + tuple(carried))
+    # Fixed stack length, as pack_upstream_turbines does for the upstream arrays: the
+    # stack grows by one station per march, so a length that tracked it would retrace the
+    # scan once per station. Padding slots keep Ct_eff = 0, which makes a_old = a_new = 0
+    # and the ramp factor exactly 1.0 in any dtype -- see
+    # test_completed_and_padded_rotors_are_inert_in_the_ramp_stack.
+    n_slots = max(len(rotors) if n_slots is None else n_slots, len(rotors))
+    rotor_mask = np.zeros((n_slots,) + yloc.shape)
+    Ct_eff = np.zeros(n_slots)
+    x_off = np.zeros(n_slots)
+    for i, (p, dy, off) in enumerate(rotors):
+        # Beyond RAMP_REACH_D the erf has saturated and the factor is 1 to within 1e-12,
+        # so the slot is left inert rather than paying for a mask that cannot change U.
+        # This is an optimisation only; including it would give the same answer.
+        if off >= RAMP_REACH_D * p.D:
+            continue
+        rotor_mask[i] = np.asarray(smooth_2d(_disc_mask(yloc, zloc, p, dy).astype(float),
+                                             kernel_size=3))
+        Ct_eff[i] = _ct_eff(p)
+        x_off[i] = off
 
     adapter = DeficitFieldConfig(
         pos=jnp.asarray(params.pos), D=params.D, Uhub=local.Uhub, Uin=jnp.asarray(local.Uin), Zhub=params.Zhub,
         U0=float(nominal_hub_velocity(params)),
         rotor_mask=jnp.asarray(rotor_mask), Ct_eff=jnp.asarray(Ct_eff),
+        x_off=jnp.asarray(x_off),
     )
     dt_cap = min(dl / local.Uhub, 0.25 * params.D / local.Uhub)  # constant for the whole run -- plain floats
 
     seed = _frame(stacked, 0, unstacked=_UNSTACKED_MEMBERS + ("U",))
     stacked_out, was_active = _calculate_deficit_field_jit(
         stacked, seed, adapter, params.field_params.I_amb, params.field_params.WV,
-        up_a, up_D, up_pos_x, up_Uhub, up_mask, dl, dt_cap, local.calculation_domain, max_steps,
+        up_a, up_D, up_pos_x, up_pos_y, up_Uhub, up_mask, dl, dt_cap,
+        local.calculation_domain, max_steps,
     )
     # was_active[k] corresponds to buffer index k+1 (the loop below is 1-indexed exactly like
     # the original); kept_count includes the seed (index 0) plus every real advance.
@@ -296,23 +352,44 @@ def calculate_deficit_field(params, local, stacked, dl, upstream_turbines, N_ups
 
 
 @partial(jax.jit, static_argnames=("max_steps",))
-def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, up_pos_x, up_Uhub, up_mask,
+def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, up_pos_x,
+                                  up_pos_y, up_Uhub, up_mask,
                                   dl, dt_cap, calculation_domain, max_steps):
     def scan_step(carry, _):
         current, active = carry
 
         def when_active(_):
-            NuT = NuT_model(current, adapter, I_amb, up_a, up_D, up_pos_x, up_Uhub, up_mask)
-            dt = jnp.minimum(dt_cap, (dl ** 2) / (2 * (NuT + 1e-6)))  # stability condition
+            NuT = NuT_model(current, adapter, I_amb, up_a, up_D, up_pos_x, up_pos_y,
+                            up_Uhub, up_mask)
+            # NuT is a FIELD now, but the step must stay scalar, so the diffusive limit
+            # is taken at its largest value on the plane. For a uniform NuT this is the
+            # same number it always was.
+            dt = jnp.minimum(dt_cap, (dl ** 2) / (2 * (jnp.max(NuT) + 1e-6)))
 
             new = interpolate_vec_data(stacked, current.t + dt)
             U, X_new = advance_wake_field(current, dt, NuT, adapter, WV)
 
-            # One station may carry several rotors side by side. They share an
-            # x-origin, so current.X is common and only Ct_eff and the disc differ;
-            # the masks do not overlap, so the per-rotor ramps simply add.
-            a_old = axial_induction_ramped(adapter.Ct_eff, current.X / adapter.D)
-            a_new = axial_induction_ramped(adapter.Ct_eff, X_new / adapter.D)
+            # EACH ROTOR AGES ON ITS OWN STREAMWISE ORIGIN.
+            #
+            # The factor is a ratio of consecutive ages, so over a march it telescopes to
+            # (1 - 2a(age_end)) / (1 - 2a(age_start)), and the initial condition is carved
+            # with exactly a(0) -- a full segment therefore composes to the correctly
+            # developed deficit. But the stack used to hold only the current station's
+            # rotors and age them all by current.X, so a rotor dropped out when the march
+            # advanced and its ramp froze wherever it had reached. Cut a segment to
+            # L << 2D and the deficit sticks near the half-strength carve value 1 - 2a(0):
+            # a 3x3 farm rotated 0.01 deg, geometrically indistinguishable from aligned,
+            # read 21% high once its rows split into separate stations.
+            #
+            # Adding x_off and keeping shed rotors in the stack makes the handover exact,
+            # not merely better. A rotor leaves segment p at age dx_station + x_off_p
+            # (the field is read at the interpolation distance, not at need_m) and
+            # re-enters at x_off_{p+1} = x_off_p + dx_station -- the same number, so the
+            # telescoping continues across the cut with no jump.
+            age_old = (current.X + adapter.x_off) / adapter.D
+            age_new = (X_new + adapter.x_off) / adapter.D
+            a_old = axial_induction_ramped(adapter.Ct_eff, age_old)
+            a_new = axial_induction_ramped(adapter.Ct_eff, age_new)
             ramp = (1.0 - 2.0 * a_new) / jnp.maximum(1.0 - 2.0 * a_old, 1e-6)
             U = U * (1.0 + jnp.tensordot(ramp - 1.0, adapter.rotor_mask, axes=1))
 
