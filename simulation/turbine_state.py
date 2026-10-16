@@ -198,12 +198,11 @@ class DeficitFieldConfig:
     rotor_mask: np.ndarray = None  # rotor disc, for the near-wake deficit ramp
     Ct_eff: float = 0.0            # Ct_yawed / cos(beta), i.e. the Ct entering Zong Eq 3.3
     x_off: np.ndarray = None       # per-rotor streamwise age offset; see calculate_deficit_field
-    w_in: float = 0.0              # INCOMING wake width at this station; see BUDGET_AGE
 
 
 jax.tree_util.register_dataclass(
     DeficitFieldConfig,
-    data_fields=["pos", "D", "Uhub", "Uin", "Zhub", "U0", "rotor_mask", "Ct_eff", "x_off", "w_in"],
+    data_fields=["pos", "D", "Uhub", "Uin", "Zhub", "U0", "rotor_mask", "Ct_eff", "x_off"],
     meta_fields=[],
 )
 

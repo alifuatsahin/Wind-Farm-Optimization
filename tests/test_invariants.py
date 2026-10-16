@@ -140,14 +140,14 @@ def test_distant_upstream_rotor_does_not_change_a_column():
     x_farm is a streamwise distance irrespective of lateral position. The station-local
     reference gives 0.17% and the width floor 1.74%.
 
-    The bound below is deliberately loose enough for the width floor's 1.74%; it exists to
-    catch the 12% class, not to certify the 1.74%. Getting to <1% needs the turbulence age
-    transported as a field rather than read off rotor positions.
+    With the budget on Du's own station-local age the measured shift is 0.17%, so the 1%
+    bound below is a real budget rather than slack. It is what a farm-referenced age failed,
+    at 12.26%.
     """
     base = _row([[400, 0, 0], [800, 0, 0]])[(10, 0)]
     with_a = _row([[0, 560, 0], [400, 0, 0], [800, 0, 0]])[(10, 0)]
     err = abs(with_a - base) / base
-    assert err < 0.02, (
+    assert err < 0.01, (
         f'a rotor 7D to the side and 5D upstream moved the column by {100*err:.2f}% '
         f'({base:.6f} -> {with_a:.6f}): the budget length scale is reading rotor positions '
         f'rather than the local flow')
@@ -417,13 +417,13 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # varies across the plane only at |dy| = 3D, where the deficit gradient is zero, so
     # div(nu_T grad Uw) and nu_T*lap(Uw) agree to the last bit. Measured identical on all
     # three datasets. Under the k_w closures the row becomes
-    # Re-record deliberately if the closure default changes; do not relax. This row RISES from
-    # T2 to T4 and then flattens (0.651 / 0.666 / 0.690 / 0.681), which is the deep-array
-    # plateau. BUDGET_AGE = 'width' gave a monotonic 0.651 / 0.606 / 0.601 / 0.602; the
-    # disqualified 'farm' reference gave 0.651 / 0.673 / 0.691 / 0.681, i.e. the transported
-    # age recovers it without reading rotor positions.
-    golden_row = [0.99693986652197308, 0.65147963814922771, 0.66624274492671842,
-                  0.69037240002761913, 0.68096794287884532]
+    # Re-record deliberately if the closure changes; do not relax. This row declines
+    # MONOTONICALLY, which is the known missing deep-array plateau -- see
+    # [[no-deep-array-plateau]]. Variants that reproduced the plateau (0.651 / 0.666 / 0.690 /
+    # 0.681) needed either a transported age or a farm-referenced one, both removed as being
+    # outside the literature; the second was also non-local at 12.26%.
+    golden_row = [0.99693986652197308, 0.65147963814922771, 0.590133963599899,
+                  0.56868058444876324, 0.56115332323877298]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):

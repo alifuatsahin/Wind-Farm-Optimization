@@ -128,13 +128,6 @@ BRADSHAW_A1 = C_MU ** 0.5
 
 
 
-#: l_m as a fraction of the wake width. Klemmer & Howland (2025) JRSE 17, 033304 take l_m to
-#: be the wake width itself with their own coefficient; 0.08 is the plane-mixing-layer value
-#: and, measured on the full-wake set, it reproduces Du's own l_m at x = 3D to three figures
-#: (0.0776 vs 0.0775), so it is not an extra fit.
-LM_OVER_WIDTH = 0.08
-
-
 def du_mixing_length(TI, age_D, D):
     """Du's algebraic l_m = (0.2 TI + 0.015) * age, the k_lm implied by his Eq (28).
 
@@ -241,56 +234,6 @@ def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
     d2z = jnp.gradient(jnp.gradient(kw, zloc[0, :], axis=1), zloc[0, :], axis=1)
     rhs = nu_t * (d2y + d2z) - (nu_t / psi) * kw + prod
     return jnp.maximum(kw + (dx / U0) * rhs, 0.0)
-
-
-def advance_kwa(kwa, kw, yloc, zloc, dx, nu_t, psi, U0, prod):
-    """One march step of the TRANSPORTED turbulence age, carried as M = k_w * A.
-
-        U0 dM/dx = nu_t grad^2 M - (nu_t/Psi) M + U0 k_w
-
-    The first two terms are the k_w operators: diffusion and dissipation carry the age with
-    the turbulence they move or destroy. The last term is the ageing itself: with no other
-    term, dM/dx = k_w, i.e. dA/dx = 1, so every unit of k_w gets one unit older per unit x.
-
-    `prod` decides what age newly generated turbulence carries, and the choice matters a lot:
-
-      * prod = None -> age ZERO. Correct for a TRACER age, and it dilutes the mean age at
-        every rotor. Measured, A reaches only 3.56 D at a farm distance of 14 D, because the
-        layer is continuously regenerated, so the station-age floor dominates and the result
-        is barely better than the station-local reference.
-      * prod = P    -> the LOCAL age, by adding A*P. Then dA/dx = 1 exactly, independent of
-        production, so A is the distance the LAYER has travelled, accumulated through the
-        field rather than read off rotor positions.
-
-    The second is right for a LENGTH scale: l_m is a property of the shear layer, and
-    turbulence generated inside an already-thick layer is generated at that layer's scale,
-    not at zero scale. Only a passive tracer would start at zero.
-
-    WHY THIS EXISTS. Du's l_m = k_lm x needs an x, and reading it off rotor positions is
-    wrong in two different ways: the station-local age restarts the eddy size at every rotor
-    (eddies do not shrink when they pass a turbine), while a farm-referenced age is a
-    streamwise distance irrespective of lateral position, so a rotor off to the side and
-    upstream rewrote a column it never touched -- measured at 12.26%, worse than the 9.325%
-    that disqualified Crespo. A is LOCAL by construction: turbulence that never reaches a
-    column cannot contribute to the age there.
-
-    Returns M; the age is A = M/k_w, so read it through `age_from_kwa`.
-    """
-    d2y = jnp.gradient(jnp.gradient(kwa, yloc[:, 0], axis=0), yloc[:, 0], axis=0)
-    d2z = jnp.gradient(jnp.gradient(kwa, zloc[0, :], axis=1), zloc[0, :], axis=1)
-    rhs = (nu_t * (d2y + d2z) - (nu_t / psi) * kwa + U0 * kw
-           + (kwa / jnp.maximum(kw, 1e-9)) * prod)
-    return jnp.maximum(kwa + (dx / U0) * rhs, 0.0)
-
-
-def age_from_kwa(kwa, kw, D, floor_D, cap_D):
-    """Mean turbulence age in diameters, A = M/k_w, clipped to [floor_D, cap_D].
-
-    The floor keeps the fresh near wake on Du's own short-age branch where k_w is still tiny
-    and A is noise; the cap is the saturation discussed under BUDGET_AGE_CAP.
-    """
-    A = kwa / jnp.maximum(kw, 1e-9) / D
-    return jnp.clip(jnp.where(kw > 1e-8, A, floor_D), floor_D, cap_D)
 
 
 def ti_from_kw(kw, I_amb, U0):

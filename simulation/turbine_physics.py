@@ -9,8 +9,7 @@ from jax.scipy.special import erf as jerf
 
 from .turbine_state import LocalConditions, VortexSimConfig, DeficitFieldConfig, pack_upstream_turbines
 from .utils import (smooth_2d, NuT_model, du_nu_t, du_psi, advance_kw, ti_from_kw,
-                    nu_t_from_tke, nu_t_budget, LM_OVER_WIDTH, advance_kwa,
-                    age_from_kwa)
+                    nu_t_from_tke, nu_t_budget)
 from .vortex_model import _simulate_vortex_evolution_jit, _UNSTACKED
 from .model_solver import advance_wake_field
 from .field_ops import interpolate_vec_data
@@ -208,22 +207,42 @@ def simulate_vortex_field(params, local, seed=None, total_steps=1000):
 
 
 # ---------------------------------------------------------------------------------------
-# Eddy-viscosity closure. Every option below is traceable to a source except where marked
-# OURS. Measured on all six validation cases -- full-wake C/A/B (Zong & Porte-Agel 2021),
-# LES aligned/yawed, and the 8-turbine wind-tunnel array. "TI" is the solver's own k_w read
-# back against the measured I_u; "locality" is the shift a rotor 7D to the side and 5D
-# upstream produces in a column it never touches (numerical floor 0.22%).
+# Eddy-viscosity closure. Every surviving option is traceable to a source: Du et al. (2025)
+# arXiv:2511.19881 for the budget and Eq (26), Crespo & Hernandez (1996) for the added-TI
+# superposition, and the Prandtl-Kolmogorov relation for nu_t_from_tke. The budget's length
+# scale is Du's own station-local age, l_m = k_lm x with x measured from the marching rotor.
 #
-#   closure / budget l_m        mean R2   mean |P err|   TI R2 (C/A/B)      locality
-#   Crespo                       .9288       6.3%      +.82/+.75/+.78    9.3% (grouping)
-#   Du 3.2 + station l_m         .8929      13.4%      ~+.0 (not meas.)      0.17%
-#   Du 3.2 + width l_m           .9237      13.4%      +.75/+.55/+.60       1.74%
-#   Du 3.2 + transported l_m     .9234       5.07%     -.01/-1.00/-.73      0.17%
+# Measured on all six validation cases -- full-wake C/A/B (Zong & Porte-Agel 2021), LES
+# aligned/yawed, and the 8-turbine wind-tunnel array. "TI" is the solver's own k_w read back
+# against the measured I_u; "locality" is the shift a rotor 7D to the side and 5D upstream
+# produces in a column it never touches (numerical floor 0.22%).
 #
-# No option dominates: Crespo leads R2 and TI, the transported age leads power. The reason is
-# structural -- nu_t_from_tke ties nu_T to k_w through sqrt(c_mu) k/S, so mixing and TKE
-# cannot move independently, whereas Crespo takes momentum from a correlation and leaves the
-# budget free. See [[budget-length-scale-brackets]].
+#   closure                mean R2   mean |P err|   TI R2 (C/A/B)      locality
+#   Crespo                  .9288       6.3%      +.82/+.75/+.78    9.3% (grouping)
+#   Du 3.2, station l_m     .8929      13.4%      ~ +.0                0.17%
+#
+# Crespo is the more accurate of the two and is kept as the reference, but it must be TOLD
+# which rotors are upstream, which is why it is not the default -- see NUT_CRESPO.
+#
+# WHAT WAS REMOVED, and what it cost. Three length scales that scored better were taken out
+# for being outside the literature or non-local, after being measured in full:
+#   * a k_w-weighted TRANSPORTED age (ours): mean R2 .9234, power 5.07%, locality 0.17%. It
+#     alone reproduced the deep-array turn-around (T3/T2 = 1.04 against a measured 1.08,
+#     where every rotor-local variant gives 0.92-0.95) and the plateau, but no literature
+#     transports an age, and it over-predicted TKE in bays 2-3 by ~44%.
+#   * l_m floored at the incoming WAKE WIDTH, after Klemmer & Howland (2025) JRSE 17, 033304:
+#     mean R2 .9237, power 13.4%, locality 1.74%.
+#   * a FARM-referenced age, saturating: the best accuracy of all, and disqualified -- a rotor
+#     7D to the side and 5D upstream moved a column by 12.26%, worse than the 9.3% that
+#     disqualifies Crespo for layout work.
+# All three needed a fitted saturation distance. The full comparison, the cap frontier over
+# 2-9 D and the rejected kappa*z_h derivation are in [[budget-length-scale-brackets]]; the
+# locality measurements are in [[transported-turbulence-age]]. Reinstating any of them means
+# reinstating a constant this closure no longer has.
+#
+# KNOWN COST of the literature-only choice: the station-local age restarts the eddy length
+# scale at every rotor, though eddies do not shrink when they pass a turbine. Deep arrays
+# under-mix by ~25% and the 5D row declines monotonically instead of plateauing.
 
 #: Deficit nu_T from Du Eq (26) fed a TI accumulated over the upstream rotors via Crespo &
 #: Hernandez (1996). Most accurate overall, but it must be TOLD which rotors are upstream, so
@@ -239,25 +258,6 @@ NUT_FROM_TKE = True
 #: The budget's own nu_t in the same Prandtl-Kolmogorov form, removing Eq (26) and its three
 #: fitted constants from the model at no measurable cost (<= 0.006 R2 on every case).
 BUDGET_PK = True
-
-#: Age fed to the budget's l_m and Psi.
-#:   'station'      Du's own reference. Restarts at every rotor, though eddies do not shrink
-#:                  when they pass a turbine; under-mixes deep arrays by 25%.
-#:   'width'        floored at the incoming wake width -- Klemmer & Howland (2025) JRSE 17,
-#:                  033304 take l_m to be the wake width. Bounded, but grows too slowly to
-#:                  give the T3 > T2 turn-around (T3/T2 = 0.92-0.95 vs a measured 1.08).
-#:   'transported'  OURS. A k_w-weighted age field (utils.advance_kwa). Recovers the
-#:                  turn-around (1.04) and the deep-array plateau while staying local, but
-#:                  over-predicts TKE in bays 2-3 by ~44%, because the same l_m sets both the
-#:                  budget's nu_t and its dissipation length. No literature transports an age.
-BUDGET_AGE = 'transported'
-
-#: Saturation of the transported age, in diameters. FITTED -- the one calibrated constant in
-#: this closure. Uncapped it diverges on 8 turbines; 15 D diverges, and the frontier over
-#: 2-9 D shows velocity and power saturating by ~6 D while TI keeps degrading. The ABL anchor
-#: l_m <= kappa*z_h was tested and REJECTED: it diverges on the 8-turbine array and predicts
-#: the wrong ordering of optimal caps across cases. See [[budget-length-scale-brackets]].
-BUDGET_AGE_CAP = 7.5
 
 #: Distance in D past which the erf ramp has saturated, so a carried rotor's term is
 #: mathematically zero and its slot can be left empty. Bounds the PHYSICS, not the bits:
@@ -318,7 +318,7 @@ def _disc_mask(yloc, zloc, p, dy):
     return np.sqrt(r2) <= p.R
 
 
-def initialize_wake_field(params, stacked, local, companions=(), kw0=None, kwa0=None):
+def initialize_wake_field(params, stacked, local, companions=(), kw0=None):
     yloc = np.asarray(stacked.yloc)
     zloc = np.asarray(stacked.zloc)
     beta = params.beta
@@ -338,13 +338,10 @@ def initialize_wake_field(params, stacked, local, companions=(), kw0=None, kwa0=
 
     kw_seed = (np.zeros_like(U_smooth) if kw0 is None
                else np.asarray(kw0).reshape(U_smooth.shape))
-    kwa_seed = (np.zeros_like(U_smooth) if kwa0 is None
-                else np.asarray(kwa0).reshape(U_smooth.shape))
     new_stacked = dataclasses.replace(
         stacked,
         U=jnp.asarray(U_smooth),
         kw=jnp.asarray(kw_seed),
-        kwa=jnp.asarray(kwa_seed),
         X=stacked.X.at[0].set(0.0),
         t=stacked.t.at[0].set(0.0),
     )
@@ -352,8 +349,7 @@ def initialize_wake_field(params, stacked, local, companions=(), kw0=None, kwa0=
 
 
 def calculate_deficit_field(params, local, stacked, dl, upstream_turbines, N_upstream_max=None,
-                            max_steps=1500, companions=(), carried=(), n_slots=None,
-                            w_in=0.0):
+                            max_steps=1500, companions=(), carried=(), n_slots=None):
     if N_upstream_max is None:
         N_upstream_max = len(upstream_turbines)
     up_a, up_D, up_pos_x, up_pos_y, up_Uhub, up_mask = pack_upstream_turbines(
@@ -392,11 +388,10 @@ def calculate_deficit_field(params, local, stacked, dl, upstream_turbines, N_ups
         U0=float(nominal_hub_velocity(params)),
         rotor_mask=jnp.asarray(rotor_mask), Ct_eff=jnp.asarray(Ct_eff),
         x_off=jnp.asarray(x_off),
-        w_in=float(w_in),
     )
     dt_cap = min(dl / local.Uhub, 0.25 * params.D / local.Uhub)  # constant for the whole run -- plain floats
 
-    seed = _frame(stacked, 0, unstacked=_UNSTACKED_MEMBERS + ("U", "kw", "kwa"))
+    seed = _frame(stacked, 0, unstacked=_UNSTACKED_MEMBERS + ("U", "kw"))
     stacked_out, was_active = _calculate_deficit_field_jit(
         stacked, seed, adapter, params.field_params.I_amb, params.field_params.WV,
         up_a, up_D, up_pos_x, up_pos_y, up_Uhub, up_mask, dl, dt_cap,
@@ -429,21 +424,7 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, 
             # it from the farm inlet lets Psi grow without bound down a row.
             age_D = jnp.maximum(current.X / adapter.D, 1e-6)
             ti_amb = I_amb / 1.28
-            if BUDGET_AGE == 'station':
-                bud_age = age_D
-            elif BUDGET_AGE == 'transported':
-                # Local age from the k_w-weighted field, floored at the station-local age so
-                # the fresh near wake keeps Du's short-age branch, where k_w is still tiny
-                # and A is numerically meaningless.
-                bud_age = jnp.maximum(
-                    age_from_kwa(current.kwa, current.kw, adapter.D, 0.0, BUDGET_AGE_CAP),
-                    age_D)
-            else:                                   # 'width'
-                # Du's age, FLOORED at the scale the station inherited. The floor is zero at
-                # the first rotor, so its near wake is untouched; downstream it stops l_m
-                # restarting below the incoming scale.
-                floor = LM_OVER_WIDTH * (adapter.w_in / adapter.D) / (0.2 * ti_amb + 0.015)
-                bud_age = jnp.maximum(age_D, floor)
+            bud_age = age_D          # Du's own reference: distance from this rotor
             nut_bud = (nu_t_budget(current.kw, I_amb, bud_age, adapter.U0, adapter.D)
                        if BUDGET_PK else
                        du_nu_t(ti_amb, bud_age, adapter.U0, adapter.D))
@@ -464,12 +445,6 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, 
 
             new = interpolate_vec_data(stacked, current.t + dt)
             U, X_new = advance_wake_field(current, dt, NuT, adapter, WV)
-            Uw_bud = adapter.Uin - current.U
-            dWy, dWz = jnp.gradient(Uw_bud, current.yloc[:, 0], current.zloc[0, :])
-            prod_bud = nut_bud * (dWy ** 2 + dWz ** 2)
-            kwa_new = advance_kwa(current.kwa, current.kw, current.yloc, current.zloc,
-                                  X_new - current.X, nut_bud, psi_bud, adapter.U0,
-                                  prod=prod_bud)
             kw_new = advance_kw(current.kw, current.U, adapter.Uin, current.yloc,
                                 current.zloc, X_new - current.X, nut_bud, psi_bud,
                                 adapter.U0)
@@ -498,8 +473,7 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, 
             ramp = (1.0 - 2.0 * a_new) / jnp.maximum(1.0 - 2.0 * a_old, 1e-6)
             U = U * (1.0 + jnp.tensordot(ramp - 1.0, adapter.rotor_mask, axes=1))
 
-            new = dataclasses.replace(new, U=U, kw=kw_new, kwa=kwa_new, X=X_new,
-                                      t=current.t + dt)
+            new = dataclasses.replace(new, U=U, kw=kw_new, X=X_new, t=current.t + dt)
 
             still_active = new.X <= calculation_domain  # this crossing entry stays the final real one
             return new, still_active
@@ -539,6 +513,5 @@ def _vortex_field_to_numpy(vortex_field, grid=None):
         V=np.asarray(vortex_field.V), W=np.asarray(vortex_field.W),
         U=np.asarray(vortex_field.U), OmegaX=np.asarray(vortex_field.OmegaX),
         kw=np.asarray(vortex_field.kw),
-        kwa=np.asarray(vortex_field.kwa),
         t=float(vortex_field.t), X=float(vortex_field.X),
     )
