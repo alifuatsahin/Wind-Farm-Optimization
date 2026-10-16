@@ -8,8 +8,7 @@ from jax import lax
 from jax.scipy.special import erf as jerf
 
 from .turbine_state import LocalConditions, VortexSimConfig, DeficitFieldConfig, pack_upstream_turbines
-from .utils import (smooth_2d, NuT_model, du_nu_t, du_psi, advance_kw, ti_from_kw,
-                    nu_t_from_tke, nu_t_budget)
+from .utils import smooth_2d, NuT_model, du_nu_t, du_psi, advance_kw
 from .vortex_model import _simulate_vortex_evolution_jit, _UNSTACKED
 from .model_solver import advance_wake_field
 from .field_ops import interpolate_vec_data
@@ -244,21 +243,6 @@ def simulate_vortex_field(params, local, seed=None, total_steps=1000):
 # scale at every rotor, though eddies do not shrink when they pass a turbine. Deep arrays
 # under-mix by ~25% and the 5D row declines monotonically instead of plateauing.
 
-#: Deficit nu_T from Du Eq (26) fed a TI accumulated over the upstream rotors via Crespo &
-#: Hernandez (1996). Most accurate overall, but it must be TOLD which rotors are upstream, so
-#: its answer moves 9.3% with X_STATION_TOL_D -- disqualifying for layout optimisation. Kept
-#: as the accuracy reference. See [[closure-owns-grouping-invariance]].
-NUT_CRESPO = False
-
-#: Deficit nu_T from Du Sec 3.2 (utils.nu_t_from_tke) rather than Eq (26) fed the local
-#: in-wake TI, which extrapolates that correlation 1.7x past its calibration range. False
-#: selects the Eq (26) path, kept only for comparison.
-NUT_FROM_TKE = True
-
-#: The budget's own nu_t in the same Prandtl-Kolmogorov form, removing Eq (26) and its three
-#: fitted constants from the model at no measurable cost (<= 0.006 R2 on every case).
-BUDGET_PK = True
-
 #: Distance in D past which the erf ramp has saturated, so a carried rotor's term is
 #: mathematically zero and its slot can be left empty. Bounds the PHYSICS, not the bits:
 #: carrying such a rotor still reassociates the tensordot below, which moved the 5D row by
@@ -424,20 +408,13 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, 
             # it from the farm inlet lets Psi grow without bound down a row.
             age_D = jnp.maximum(current.X / adapter.D, 1e-6)
             ti_amb = I_amb / 1.28
-            bud_age = age_D          # Du's own reference: distance from this rotor
-            nut_bud = (nu_t_budget(current.kw, I_amb, bud_age, adapter.U0, adapter.D)
-                       if BUDGET_PK else
-                       du_nu_t(ti_amb, bud_age, adapter.U0, adapter.D))
-            psi_bud = du_psi(ti_amb, bud_age, adapter.D)
-            if NUT_CRESPO:
-                NuT = NuT_model(current, adapter, I_amb, up_a, up_D, up_pos_x,
-                                up_pos_y, up_Uhub, up_mask)
-            elif NUT_FROM_TKE:
-                NuT = nu_t_from_tke(current.kw, I_amb, adapter.U0,
-                                    adapter.Uin - current.U, current.yloc, current.zloc)
-            else:
-                NuT = du_nu_t(ti_from_kw(current.kw, I_amb, adapter.U0), age_D,
-                              adapter.U0, adapter.D)
+            # Du's Eq (26)/(28) on the AMBIENT TI, with x from the marching rotor, feed
+            # the wake-added TKE budget; the deficit's nu_T is Eq (26) on the TI accumulated
+            # over the upstream rotors via Crespo & Hernandez (1996).
+            nut_bud = du_nu_t(ti_amb, age_D, adapter.U0, adapter.D)
+            psi_bud = du_psi(ti_amb, age_D, adapter.D)
+            NuT = NuT_model(current, adapter, I_amb, up_a, up_D, up_pos_x,
+                            up_pos_y, up_Uhub, up_mask)
             # NuT is a FIELD now, but the step must stay scalar, so the diffusive limit
             # is taken at its largest value on the plane. For a uniform NuT this is the
             # same number it always was.

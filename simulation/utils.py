@@ -108,102 +108,6 @@ def du_psi(TI, age_D, D):
             * jnp.maximum(age_D, 1e-6) * D ** 2)
 
 
-#: Du et al. (2025) Sec 3.2: nu_T = c <k_w>^(1/2) l_m, with c = 0.67 the mean across his
-#: calibration cases.
-DU_C_NU = 0.67
-
-#: Standard Prandtl-Kolmogorov constant, nu_T = c_mu k^2/eps (Launder & Spalding 1974).
-C_MU = 0.09
-
-#: Bradshaw's structure parameter a1 = -<uv>/k. NOT an independent constant: consistency
-#: between nu_T = c sqrt(k) l_m, eps = c_eps k^(3/2)/l_m and nu_T = c_mu k^2/eps forces
-#: c*c_eps = c_mu, and the equilibrium length l_m = sqrt(c_eps/c) sqrt(k)/S then gives
-#: nu_T = sqrt(c*c_eps) k/S = sqrt(c_mu) k/S, independent of c. So a1 = sqrt(c_mu) = 0.30 --
-#: the textbook identity behind Menter's SST shear-stress limiter. Bradshaw's own measured
-#: value across boundary layers and free shear layers is 0.31, which agrees to 3%; that
-#: agreement is a cross-check on Du's c = 0.67 with the standard c_mu, not a second fit.
-BRADSHAW_A1 = C_MU ** 0.5
-
-
-
-
-
-def du_mixing_length(TI, age_D, D):
-    """Du's algebraic l_m = (0.2 TI + 0.015) * age, the k_lm implied by his Eq (28).
-
-    Used ONLY by the TKE budget. The budget cannot use the equilibrium length that
-    nu_t_from_tke uses: substituting it makes production and dissipation identically equal
-    for any k and S --
-
-        P   = nu_t S^2       = c sqrt(k) * sqrt(c_eps/c) sqrt(k)/S * S^2 = sqrt(c c_eps) k S
-        eps = c_eps k^(3/2)/l_m                                          = sqrt(c c_eps) k S
-
-    -- so the source vanishes, k_w stays at its seeded zero forever and the closure collapses
-    to the ambient. A length defined BY local equilibrium cannot also generate departures
-    from it, which is exactly why Du carries a separate Psi. Making the two length scales one
-    requires transporting a second variable (k-eps, or Klemmer & Howland's k-l), not
-    substituting one into the other.
-    """
-    return (0.2 * TI + 0.015) * age_D * D
-
-
-def ambient_tke(I_amb, U0):
-    """k_B from TI = sqrt(2k/3)/U0, with TI the ambient value Iu/1.28."""
-    return 1.5 * ((I_amb / IU_TO_TI) * U0) ** 2
-
-
-def nu_t_budget(kw, I_amb, age_D, U0, D):
-    """The TKE budget's own nu_t, in the same Prandtl-Kolmogorov form as the deficit's.
-
-    Replaces Du Eq (26) here. Eq (26) takes the AMBIENT turbulence intensity, so using it for
-    the budget was defensible, but it left an algebraic correlation and its three fitted
-    constants inside an otherwise transport-based closure, and it is the one piece of the
-    model applied outside its calibration range elsewhere. c sqrt(k) l_m uses the same c and
-    the same k the rest of the closure uses; only l_m differs, and it has to -- see
-    du_mixing_length.
-    """
-    k = jnp.maximum(ambient_tke(I_amb, U0) + kw, 0.0)
-    return DU_C_NU * jnp.sqrt(k) * du_mixing_length(I_amb / IU_TO_TI, age_D, D)
-
-
-def nu_t_from_tke(kw, I_amb, U0, Uw, yloc, zloc):
-    """Eddy viscosity from the TKE field, Du Sec 3.2, rather than from his Eq (26).
-
-    Eq (26) takes the AMBIENT turbulence intensity as its input and is calibrated over
-    TI = 0.041-0.071 (his Table 2). Feeding it the LOCAL in-wake TI puts it at TI ~ 0.117 in
-    the shear layers -- 1.7x past that maximum -- and since it is linear in TI with no
-    saturation it simply keeps growing: measured 2.8x Crespo's nu_T there, which recovers
-    T1's wake too fast and over-predicts T2's power by 45%. nu_T = c sqrt(k_B + k_w) l_m
-    instead uses k_w as the turbulence kinetic energy it is and stays inside the regime each
-    piece was built for.
-
-    The length scale is fixed by local equilibrium rather than by a wake age. Equating
-    production nu_t S^2 to dissipation c_eps k^(3/2)/l_m inside nu_t = c sqrt(k) l_m gives
-    l_m = sqrt(c_eps/c) sqrt(k)/S, i.e. nu_t = a1 k/S -- Bradshaw's structure-parameter
-    relation. So both scales come from fields the march already solves, and no reference to
-    any rotor's x is needed.
-
-    That reference is what the age proxies could not supply down a row. Du's
-    l_m/D = (0.2 TI + 0.015) x/D describes a single isolated rotor; taken from each station
-    it restarts the mixing length at zero although T2's shear layer is already ~1D wide, and
-    taken from the farm inlet it grows without bound. Here l_m is read AT the point of
-    maximum shear, so a rotor entering an already turbulent field finds a large k there as
-    well as a large S, instead of being reset. Reading both fields at that one point also
-    keeps the ratio finite, since S vanishes on the wake axis and in the free stream.
-
-    Measured against Eq (26) on the full-wake set (cases C/A/B): bay-1 bias
-    +17.8/+6.7/+9.4 -> +4.9/+2.7/+5.6 and T2 power error +45.1/+18.1/+28.6 -> +1.0/-1.6/+6.0.
-    It does not move bays 2-3, and that is not its job -- see NUT_FROM_TKE in
-    turbine_physics.
-    """
-    k = jnp.maximum(ambient_tke(I_amb, U0) + kw, 0.0)
-    dWdY, dWdZ = jnp.gradient(Uw, yloc[:, 0], zloc[0, :])
-    S = jnp.sqrt(dWdY ** 2 + dWdZ ** 2)
-    i = jnp.argmax(S)
-    l_m = BRADSHAW_A1 / DU_C_NU * jnp.sqrt(jnp.ravel(k)[i]) / (jnp.ravel(S)[i] + 1e-9)
-    return DU_C_NU * jnp.sqrt(k) * l_m
-
-
 def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
     """One march step of Du et al. (2025) Eq (13), the wake-added TKE budget:
 
@@ -234,17 +138,6 @@ def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
     d2z = jnp.gradient(jnp.gradient(kw, zloc[0, :], axis=1), zloc[0, :], axis=1)
     rhs = nu_t * (d2y + d2z) - (nu_t / psi) * kw + prod
     return jnp.maximum(kw + (dx / U0) * rhs, 0.0)
-
-
-def ti_from_kw(kw, I_amb, U0):
-    """Total turbulence intensity from ambient plus marched wake-added TKE.
-
-    TI = sqrt(2 k/3)/U0 (Du Sec 2.3), so the added part combines with the ambient in
-    quadrature exactly as the old p-norm did at m = 2 -- but the added part now comes from
-    transport rather than from a correlation.
-    """
-    iu_added = IU_TO_TI * jnp.sqrt(2.0 / 3.0 * kw) / U0
-    return jnp.sqrt(I_amb ** 2 + iu_added ** 2) / IU_TO_TI
 
 
 def smooth_2d(U, kernel_size=3, method='gaussian'):

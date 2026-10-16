@@ -140,9 +140,10 @@ def test_distant_upstream_rotor_does_not_change_a_column():
     x_farm is a streamwise distance irrespective of lateral position. The station-local
     reference gives 0.17% and the width floor 1.74%.
 
-    With the budget on Du's own station-local age the measured shift is 0.17%, so the 1%
-    bound below is a real budget rather than slack. It is what a farm-referenced age failed,
-    at 12.26%.
+    Crespo PASSES this at 0.12%: its non-locality is purely the streamwise station grouping,
+    and a rotor 7D to the side is gated out by its own |dy| < 3D criterion, so it never
+    contributes. The bound is a real budget -- a farm-referenced budget age failed it at
+    12.26%, while the grouping invariant rated that same option at 0.014%.
     """
     base = _row([[400, 0, 0], [800, 0, 0]])[(10, 0)]
     with_a = _row([[0, 560, 0], [400, 0, 0], [800, 0, 0]])[(10, 0)]
@@ -353,15 +354,15 @@ def test_grouping_tolerance_does_not_change_the_answer():
     # reach it (both front rotors end up ~7D upstream of the only other station, where a
     # shed rotor is inert). Pin it, so the test cannot be satisfied by both branches
     # drifting to the split branch's 0.91, which has T3 nearly unwaked.
-    # NUT_CRESPO's value here is 0.7574209144261419, and under it the 1% assertion above
-    # FAILS at 9.3%. The discrepancy is
+    # THIS TEST IS EXPECTED RED. The 1% assertion above fails at 9.3% with the Crespo
+    # closure, which is the only one in the model now. The discrepancy is
     # OWNED BY THE CLOSURE, not by the march: NuT_model measures x from each UPSTREAM rotor,
     # so its nu_T depends on which rotors the station grouping put upstream. Both k_w-based
     # closures read nu_T from local fields instead and are grouping-invariant -- measured
     # 0.267%, and this test passes under them. Three points isolate it: Crespo with the old
     # non-conservative operator 9.3%, Crespo with the conservative operator 9.3%, Du Eq (26)
     # with the conservative operator 0.267%. The diffusion operator is NOT the cause.
-    assert abs(grouped - 0.72433053902390099) / 0.72433053902390099 < 1e-9, (
+    assert abs(grouped - 0.7574209144261419) / 0.7574209144261419 < 1e-9, (
         f'the grouped branch itself moved: {grouped:.17g}; re-record only if this was '
         f'deliberate, since it is the reference the split branch is held to')
 
@@ -417,13 +418,11 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # varies across the plane only at |dy| = 3D, where the deficit gradient is zero, so
     # div(nu_T grad Uw) and nu_T*lap(Uw) agree to the last bit. Measured identical on all
     # three datasets. Under the k_w closures the row becomes
-    # Re-record deliberately if the closure changes; do not relax. This row declines
-    # MONOTONICALLY, which is the known missing deep-array plateau -- see
-    # [[no-deep-array-plateau]]. Variants that reproduced the plateau (0.651 / 0.666 / 0.690 /
-    # 0.681) needed either a transported age or a farm-referenced one, both removed as being
-    # outside the literature; the second was also non-local at 12.26%.
-    golden_row = [0.99693986652197308, 0.65147963814922771, 0.590133963599899,
-                  0.56868058444876324, 0.56115332323877298]
+    # These are the Crespo-closure values, unchanged since before the k_w work: the
+    # experimental closures were removed again, so the row is back to its original numbers,
+    # reproduced to 1.7e-13 (the reassociation noise this docstring describes).
+    golden_row = [0.99693986652197308, 0.68561188238556825, 0.70839363258543719,
+                  0.69427784837223705, 0.68659866597497632]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):
