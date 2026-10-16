@@ -609,12 +609,17 @@ def ishihara_qian_ti_field(wind_farm, x_D, y_D, i_amb=I_AMB, y_centre=None):
 
 def plot_ti_comparison(case, yaw, save_dir='runs/validation_fullwake', n_grids=28,
                        x_stride=4, i_amb=I_AMB):
-    """Measured vs current (Crespo) vs Ishihara-Qian added TI, as contours and profiles.
+    """Measured turbulence intensity, the model's own, and the difference.
 
-    All three are I_u, so they are directly comparable -- the model's internal TI is
-    I_u/1.28 and must NOT be used against this measurement.
+    The model field is `solver_ti_field` -- the TI read back from the marched k_w, i.e. what
+    the solver actually carries, not a reconstruction from rotor positions. Both are I_u, so
+    they are directly comparable; the model's internal TI is I_u/1.28 and must NOT be used
+    against this measurement.
+
+    The alternative added-TI correlations (model_ti_field, ishihara_qian_ti_field,
+    shear_ti_field) are still in this module and can be scored against the same data, but
+    they are deliberately not plotted here.
     """
-    ea = load_fullwake_case(case, 'avg')
     es = load_fullwake_case(case, 'std')
     x_D = es['x_D'][::x_stride]
     y_D = es['y_D']
@@ -622,46 +627,31 @@ def plot_ti_comparison(case, yaw, save_dir='runs/validation_fullwake', n_grids=2
     sim = run_fullwake_case(yaw, i_amb=i_amb, n_grids=n_grids,
                             x_D_max=float(np.nanmax(es['x_D'])),
                             y_D_halfwidth=float(np.nanmax(np.abs(y_D))))
-    sl = extract_farm_hub_height_slice(sim.wind_farm, x_D * D, y_D * D)
-    yc = wake_centre(y_D, sl['U'] / sl['Uh'])
-    yc = np.where(np.isfinite(yc), yc, 0.0)
-
-    cr = model_ti_field(sim.wind_farm, x_D, y_D, i_amb=i_amb)
-    iq = ishihara_qian_ti_field(sim.wind_farm, x_D, y_D, i_amb=i_amb)
-    iqd = ishihara_qian_ti_field(sim.wind_farm, x_D, y_D, i_amb=i_amb, y_centre=yc)
-    sh = shear_ti_field(sim.wind_farm, x_D, y_D, sl['U'] / sl['Uh'], i_amb=i_amb)
     mc = solver_ti_field(sim.wind_farm, x_D, y_D, i_amb=i_amb)
 
-    def stat(F):
-        m = np.isfinite(ti_exp) & np.isfinite(F)
-        d = F[m] - ti_exp[m]
-        ss = np.sum((ti_exp[m] - ti_exp[m].mean()) ** 2)
-        return np.sqrt(np.mean(d ** 2)), d.mean(), 1 - np.sum(d ** 2) / ss
-    for lab, F in (('Crespo (current)', cr), ('Ishihara-Qian', iq),
-                   ('Ishihara-Qian, deflected', iqd), ('shear, local equilib', sh),
-                   ('SOLVER marched k_w', mc)):
-        r, b, r2 = stat(F)
-        print('  case %s  %-26s RMSE=%.4f bias=%+.4f R2=%+.3f' % (case, lab, r, b, r2))
+    m = np.isfinite(ti_exp) & np.isfinite(mc)
+    d = mc[m] - ti_exp[m]
+    r2 = 1 - np.sum(d ** 2) / np.sum((ti_exp[m] - ti_exp[m].mean()) ** 2)
+    print('  case %s  model I_u  RMSE=%.4f bias=%+.4f R2=%+.3f'
+          % (case, np.sqrt(np.mean(d ** 2)), d.mean(), r2))
 
     os.makedirs(save_dir, exist_ok=True)
     plt.close('all')
     lo, hi = 0.04, 0.22
-    fig, ax = plt.subplots(6, 1, figsize=(7.0, 10.0), sharex=True)
+    fig, ax = plt.subplots(3, 1, figsize=(7.0, 5.4), sharex=True)
     style_figure(fig)
-    for a, F, lbl in ((ax[0], ti_exp, 'Experiment'), (ax[1], cr, 'Crespo (current)'),
-                      (ax[2], iqd, 'Ishihara-Qian'), (ax[3], mc, 'solver, marched $k_w$')):
+    for a, F in ((ax[0], ti_exp), (ax[1], mc)):
         im = a.pcolormesh(x_D, y_D, F, cmap='turbo', vmin=lo, vmax=hi, shading='nearest')
         fig.colorbar(im, ax=a, label='$I_u$')
         a.set_ylabel('$y/D$')
         style_axes(a)
-    for a, F in ((ax[4], iqd - ti_exp), (ax[5], mc - ti_exp)):
-        im = a.pcolormesh(x_D, y_D, F, cmap='RdBu_r', vmin=-0.10, vmax=0.10,
+    im = ax[2].pcolormesh(x_D, y_D, mc - ti_exp, cmap='RdBu_r', vmin=-0.10, vmax=0.10,
                           shading='nearest')
-        fig.colorbar(im, ax=a, label=r'$\Delta I_u$')
-        a.set_ylabel('$y/D$')
-        style_axes(a)
+    fig.colorbar(im, ax=ax[2], label=r'$\Delta I_u$')
+    ax[2].set_ylabel('$y/D$')
+    style_axes(ax[2])
     ax[-1].set_xlabel('$x/D$')
-    for a, L in zip(ax, 'abcdef'):
+    for a, L in zip(ax, 'abc'):
         _panel_label(a, L)
     fig.savefig(os.path.join(save_dir, 'ti_compare_contour_%s.png' % case), dpi=200,
                 bbox_inches='tight')
@@ -671,14 +661,12 @@ def plot_ti_comparison(case, yaw, save_dir='runs/validation_fullwake', n_grids=2
     for a, xt in zip(axs, (2, 3, 7, 8, 12, 14)):
         i = int(np.argmin(np.abs(x_D - xt)))
         a.plot(ti_exp[:, i], y_D, color='0.25', lw=1.3, label='Experiment')
-        a.plot(cr[:, i], y_D, 'C3--', lw=1.1, label='Crespo (current)')
-        a.plot(iqd[:, i], y_D, 'C0-', lw=1.1, label='I-Q, deflected')
-        a.plot(mc[:, i], y_D, 'C2-', lw=1.4, label='solver, marched $k_w$')
+        a.plot(mc[:, i], y_D, 'C2-', lw=1.4, label='Model')
         a.set_title('$x/D = %d$' % xt, fontsize=7)
         a.set_xlabel('$I_u$')
         style_axes(a)
     axs[0].set_ylabel('$y/D$')
-    axs[0].legend(fontsize=5.5, frameon=False)
+    axs[0].legend(fontsize=6, frameon=False)
     fig2.savefig(os.path.join(save_dir, 'ti_compare_profiles_%s.png' % case), dpi=200,
                  bbox_inches='tight')
 
