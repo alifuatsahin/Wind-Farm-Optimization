@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 
+
 def _lateral_bc(U, Uin):
     """Zero-gradient on the DEFICIT at the two lateral edges.
 
@@ -55,21 +56,30 @@ def advance_wake_field(data, dt, NuT, config, WV):
 
     # prediction step
     dUdY, dUdZ = jnp.gradient(U, yloc[:, 0], zloc[0, :])   # dUdY = ∂(U)/∂y, dUdZ = ∂(U)/∂z
-    dUin_dZ = jnp.gradient(Uin, zloc[0, :], axis=1)
-    dUin_dY = jnp.gradient(Uin, yloc[:, 0], axis=0)
+    def _diffusion(Ufield):
+        """Turbulent diffusion of the DEFICIT, in divergence form.
 
-    Sxy = dUdY
-    Sxz = dUdZ
+        Zong & Porte-Agel (2020) Sec 3.1 close the Reynolds stresses as -<uv> = nu_T dU/dy,
+        so his Eq (3.5) is genuinely div(nu_T grad U); he then drops grad(nu_T).grad(U)
+        legitimately, because he assumes "the eddy viscosity nu_T is ... uniform in the
+        cross-stream plane, dependent only on the x-coordinate", and Du's Eq (26) returns
+        such a field too. That assumption does not hold here: nu_T is cell-wise and, under
+        the marched k_w closure, peaks AT the shear layers where the deficit gradient is
+        largest, so the dropped term is first order rather than zero and nu_T*lap(Uw) does
+        not conserve the integrated momentum deficit.
 
-    # derivatives of strains -- each only needs its own axis, not both
-    dSxydY = jnp.gradient(Sxy, yloc[:, 0], axis=0)   # = ∂Sxy/∂y
-    dSxzdZ = jnp.gradient(Sxz, zloc[0, :], axis=1)   # = ∂Sxz/∂z
-    d2Uin_dZ2 = jnp.gradient(dUin_dZ, zloc[0, :], axis=1)
-    d2Uin_dY2 = jnp.gradient(dUin_dY, yloc[:, 0], axis=0)
-    lap_Uin = d2Uin_dY2 + d2Uin_dZ2
+        The non-conservative form was carried as an option for one round of measurements and
+        then removed: it changed the RANKING of the nu_T closures, not just their scores, so
+        keeping it available only invited benchmarking on the wrong equation.
+        """
+        dev = Ufield - Uin
+        qy = NuT * jnp.gradient(dev, yloc[:, 0], axis=0)
+        qz = NuT * jnp.gradient(dev, zloc[0, :], axis=1)
+        return (jnp.gradient(qy, yloc[:, 0], axis=0)
+                + jnp.gradient(qz, zloc[0, :], axis=1))
 
     # assemble numerator
-    numer = -V * dUdY - W * dUdZ + NuT * dSxydY + NuT * dSxzdZ - NuT * lap_Uin
+    numer = -V * dUdY - W * dUdZ + _diffusion(U)
     U_floor = jnp.maximum(0.1 * Uin, 1e-6)
     denom_safe = jnp.maximum(U, U_floor)
 
@@ -81,12 +91,7 @@ def advance_wake_field(data, dt, NuT, config, WV):
 
     # correction step
     dUdY, dUdZ = jnp.gradient(Up, yloc[:, 0], zloc[0, :])   # dUdY = ∂(Up)/∂y, dUdZ = ∂(Up)/∂z
-    Sxz = dUdZ
-    Sxy = dUdY
-
-    dSxydY = jnp.gradient(Sxy, yloc[:, 0], axis=0)   # = ∂Sxy/∂y
-    dSxzdZ = jnp.gradient(Sxz, zloc[0, :], axis=1)   # = ∂Sxz/∂z
-    numer = -V * dUdY - W * dUdZ + NuT * dSxydY + NuT * dSxzdZ - NuT * lap_Uin
+    numer = -V * dUdY - W * dUdZ + _diffusion(Up)
     denom_safe = jnp.maximum(Up, U_floor)
 
     dUcdx = numer / denom_safe

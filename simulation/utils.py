@@ -108,6 +108,181 @@ def du_psi(TI, age_D, D):
             * jnp.maximum(age_D, 1e-6) * D ** 2)
 
 
+#: Du et al. (2025) Sec 3.2: nu_T = c <k_w>^(1/2) l_m, with c = 0.67 the mean across his
+#: calibration cases.
+DU_C_NU = 0.67
+
+#: Standard Prandtl-Kolmogorov constant, nu_T = c_mu k^2/eps (Launder & Spalding 1974).
+C_MU = 0.09
+
+#: Bradshaw's structure parameter a1 = -<uv>/k. NOT an independent constant: consistency
+#: between nu_T = c sqrt(k) l_m, eps = c_eps k^(3/2)/l_m and nu_T = c_mu k^2/eps forces
+#: c*c_eps = c_mu, and the equilibrium length l_m = sqrt(c_eps/c) sqrt(k)/S then gives
+#: nu_T = sqrt(c*c_eps) k/S = sqrt(c_mu) k/S, independent of c. So a1 = sqrt(c_mu) = 0.30 --
+#: the textbook identity behind Menter's SST shear-stress limiter. Bradshaw's own measured
+#: value across boundary layers and free shear layers is 0.31, which agrees to 3%; that
+#: agreement is a cross-check on Du's c = 0.67 with the standard c_mu, not a second fit.
+BRADSHAW_A1 = C_MU ** 0.5
+
+#: eps = c_eps k^(3/2)/l_m, determined by c*c_eps = c_mu rather than fitted.
+DU_C_EPS = C_MU / DU_C_NU
+
+
+#: von Karman constant, for the Prandtl-Blackadar ABL mixing length l = kappa*z/(1 + kappa*z/l0),
+#: which tends to kappa*z near the surface. Used to BOUND the wake mixing length -- see
+#: ABL_LENGTH_CAP in turbine_physics.
+KARMAN = 0.4
+
+
+#: l_m as a fraction of the wake width. Klemmer & Howland (2025) JRSE 17, 033304 take l_m to
+#: be the wake width itself with their own coefficient; 0.08 is the plane-mixing-layer value
+#: and, measured on the full-wake set, it reproduces Du's own l_m at x = 3D to three figures
+#: (0.0776 vs 0.0775), so it is not an extra fit.
+LM_OVER_WIDTH = 0.08
+
+
+def wake_width(Uw, yloc, zloc):
+    """Equivalent top-hat DIAMETER of the deficit: A = int Uw dA / max(Uw), W = 2 sqrt(A/pi).
+
+    Unlike an age, this does not restart at a downstream rotor -- T2's fresh top-hat is added
+    to an already-wide profile, so W is continuous across a station boundary. Measured through
+    the three-turbine row: 0.978 at the end of bay 1, 1.049 at T2's rotor, 1.165, then 1.196 at
+    T3's rotor and 1.290. Also unlike the vorticity thickness, which a freshly seeded top-hat
+    pins through its max gradient.
+    """
+    dy = yloc[1, 0] - yloc[0, 0]
+    dz = zloc[0, 1] - zloc[0, 0]
+    Uw = jnp.maximum(Uw, 0.0)
+    A = jnp.sum(Uw) * dy * dz / (jnp.max(Uw) + 1e-9)
+    return 2.0 * jnp.sqrt(jnp.maximum(A, 0.0) / jnp.pi)
+
+
+def width_equivalent_age(Uw, yloc, zloc, TI, D):
+    """The age whose Du l_m equals LM_OVER_WIDTH * W, so Du's formulae are reused unchanged."""
+    W = wake_width(Uw, yloc, zloc)
+    return LM_OVER_WIDTH * (W / D) / (0.2 * TI + 0.015)
+
+
+def du_mixing_length(TI, age_D, D):
+    """Du's algebraic l_m = (0.2 TI + 0.015) * age, the k_lm implied by his Eq (28).
+
+    Used ONLY by the TKE budget. The budget cannot use the equilibrium length that
+    nu_t_from_tke uses: substituting it makes production and dissipation identically equal
+    for any k and S --
+
+        P   = nu_t S^2       = c sqrt(k) * sqrt(c_eps/c) sqrt(k)/S * S^2 = sqrt(c c_eps) k S
+        eps = c_eps k^(3/2)/l_m                                          = sqrt(c c_eps) k S
+
+    -- so the source vanishes, k_w stays at its seeded zero forever and the closure collapses
+    to the ambient. A length defined BY local equilibrium cannot also generate departures
+    from it, which is exactly why Du carries a separate Psi. Making the two length scales one
+    requires transporting a second variable (k-eps, or Klemmer & Howland's k-l), not
+    substituting one into the other.
+    """
+    return (0.2 * TI + 0.015) * age_D * D
+
+
+#: Fraction of the ambient LATERAL velocity rms surviving the DWM low-pass filter at
+#: f = U/(2D) (Larsen et al. 2008), i.e. streamwise wavelength 2D under Taylor's hypothesis.
+#: MEASURED from data/ABL_flow_3turbine.h5 at |y| > 220 m, outside the wakes: variance
+#: fraction 0.544, so phi = 0.738. Range 0.738-0.762 over C_meander = 1.9-2.1; 0.671 at the
+#: D_m mean of 2.5D.
+PHI_MEANDER = 0.738
+
+#: Lateral-to-streamwise turbulence intensity ratio. MEASURED in the same sample as 0.735
+#: (I_u = 0.0742, I_v = 0.0546); the usual ABL default is 0.8.
+I_V_OVER_IU = 0.735
+
+
+def meander_diffusivity(I_amb, age_D, U0, D):
+    """Apparent diffusivity of the time average produced by wake meandering.
+
+    A meandering wake is a rigid deficit whose centre wanders, so the TIME AVERAGE is exactly
+    a convolution of the instantaneous deficit with the displacement PDF:
+    <Uw>(y) = int p(eta) Uw(y-eta) deta. For Gaussian p of variance sigma_m^2 that is a
+    Gaussian smoothing of width sigma_m, and a diffusion operator acting over distance x at
+    speed U smooths by variance 2 nu x / U. Matching the GROWTH of the two,
+
+        nu_m = (U/2) d(sigma_m^2)/dx ,    sigma_m = I_vf x   (frozen advection)
+             = U I_vf^2 x ,               I_vf = PHI_MEANDER * I_V_OVER_IU * I_u
+
+    Both the convolution and the diffusion conserve int Uw dy, which is the quantity the wind
+    tunnel and the LES agree on while disagreeing 20% on width -- see
+    [[les-wake-too-narrow-meandering]].
+
+    THREE LIMITS, all stated rather than hidden:
+      * Correct for the mean velocity, NOT for power: a rotor reads <U^3> and meandering gives
+        <U^3> != <U>^3, so expect field R2 to gain more than power.
+      * Double-counting risk: Du's Psi constants were calibrated on time-averaged LES TKE,
+        which already contains meandering. The defence is empirical -- if it were double
+        counting, a multiplier of 1.0 would already be optimal, and the measured optimum is
+        1.6.
+      * age_D is the STATION-LOCAL age on purpose. sigma_m ~ x is unbounded, which is exactly
+        what made a farm-referenced l_m diverge on 8 turbines; the local age is bounded by
+        construction and is right for the freshly shed deficit that dominates each bay, while
+        under-counting the carried residual.
+    """
+    i_vf = PHI_MEANDER * I_V_OVER_IU * I_amb
+    return U0 * i_vf ** 2 * jnp.maximum(age_D, 0.0) * D
+
+
+def ambient_tke(I_amb, U0):
+    """k_B from TI = sqrt(2k/3)/U0, with TI the ambient value Iu/1.28."""
+    return 1.5 * ((I_amb / IU_TO_TI) * U0) ** 2
+
+
+def nu_t_budget(kw, I_amb, age_D, U0, D):
+    """The TKE budget's own nu_t, in the same Prandtl-Kolmogorov form as the deficit's.
+
+    Replaces Du Eq (26) here. Eq (26) takes the AMBIENT turbulence intensity, so using it for
+    the budget was defensible, but it left an algebraic correlation and its three fitted
+    constants inside an otherwise transport-based closure, and it is the one piece of the
+    model applied outside its calibration range elsewhere. c sqrt(k) l_m uses the same c and
+    the same k the rest of the closure uses; only l_m differs, and it has to -- see
+    du_mixing_length.
+    """
+    k = jnp.maximum(ambient_tke(I_amb, U0) + kw, 0.0)
+    return DU_C_NU * jnp.sqrt(k) * du_mixing_length(I_amb / IU_TO_TI, age_D, D)
+
+
+def nu_t_from_tke(kw, I_amb, U0, Uw, yloc, zloc):
+    """Eddy viscosity from the TKE field, Du Sec 3.2, rather than from his Eq (26).
+
+    Eq (26) takes the AMBIENT turbulence intensity as its input and is calibrated over
+    TI = 0.041-0.071 (his Table 2). Feeding it the LOCAL in-wake TI puts it at TI ~ 0.117 in
+    the shear layers -- 1.7x past that maximum -- and since it is linear in TI with no
+    saturation it simply keeps growing: measured 2.8x Crespo's nu_T there, which recovers
+    T1's wake too fast and over-predicts T2's power by 45%. nu_T = c sqrt(k_B + k_w) l_m
+    instead uses k_w as the turbulence kinetic energy it is and stays inside the regime each
+    piece was built for.
+
+    The length scale is fixed by local equilibrium rather than by a wake age. Equating
+    production nu_t S^2 to dissipation c_eps k^(3/2)/l_m inside nu_t = c sqrt(k) l_m gives
+    l_m = sqrt(c_eps/c) sqrt(k)/S, i.e. nu_t = a1 k/S -- Bradshaw's structure-parameter
+    relation. So both scales come from fields the march already solves, and no reference to
+    any rotor's x is needed.
+
+    That reference is what the age proxies could not supply down a row. Du's
+    l_m/D = (0.2 TI + 0.015) x/D describes a single isolated rotor; taken from each station
+    it restarts the mixing length at zero although T2's shear layer is already ~1D wide, and
+    taken from the farm inlet it grows without bound. Here l_m is read AT the point of
+    maximum shear, so a rotor entering an already turbulent field finds a large k there as
+    well as a large S, instead of being reset. Reading both fields at that one point also
+    keeps the ratio finite, since S vanishes on the wake axis and in the free stream.
+
+    Measured against Eq (26) on the full-wake set (cases C/A/B): bay-1 bias
+    +17.8/+6.7/+9.4 -> +4.9/+2.7/+5.6 and T2 power error +45.1/+18.1/+28.6 -> +1.0/-1.6/+6.0.
+    It does not move bays 2-3, and that is not its job -- see NUT_FROM_TKE in
+    turbine_physics.
+    """
+    k = jnp.maximum(ambient_tke(I_amb, U0) + kw, 0.0)
+    dWdY, dWdZ = jnp.gradient(Uw, yloc[:, 0], zloc[0, :])
+    S = jnp.sqrt(dWdY ** 2 + dWdZ ** 2)
+    i = jnp.argmax(S)
+    l_m = BRADSHAW_A1 / DU_C_NU * jnp.sqrt(jnp.ravel(k)[i]) / (jnp.ravel(S)[i] + 1e-9)
+    return DU_C_NU * jnp.sqrt(k) * l_m
+
+
 def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
     """One march step of Du et al. (2025) Eq (13), the wake-added TKE budget:
 
@@ -138,6 +313,57 @@ def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
     d2z = jnp.gradient(jnp.gradient(kw, zloc[0, :], axis=1), zloc[0, :], axis=1)
     rhs = nu_t * (d2y + d2z) - (nu_t / psi) * kw + prod
     return jnp.maximum(kw + (dx / U0) * rhs, 0.0)
+
+
+def advance_kwa(kwa, kw, yloc, zloc, dx, nu_t, psi, U0, prod=None):
+    """One march step of the TRANSPORTED turbulence age, carried as M = k_w * A.
+
+        U0 dM/dx = nu_t grad^2 M - (nu_t/Psi) M + U0 k_w
+
+    The first two terms are the k_w operators: diffusion and dissipation carry the age with
+    the turbulence they move or destroy. The last term is the ageing itself: with no other
+    term, dM/dx = k_w, i.e. dA/dx = 1, so every unit of k_w gets one unit older per unit x.
+
+    `prod` decides what age newly generated turbulence carries, and the choice matters a lot:
+
+      * prod = None -> age ZERO. Correct for a TRACER age, and it dilutes the mean age at
+        every rotor. Measured, A reaches only 3.56 D at a farm distance of 14 D, because the
+        layer is continuously regenerated, so the station-age floor dominates and the result
+        is barely better than the station-local reference.
+      * prod = P    -> the LOCAL age, by adding A*P. Then dA/dx = 1 exactly, independent of
+        production, so A is the distance the LAYER has travelled, accumulated through the
+        field rather than read off rotor positions.
+
+    The second is right for a LENGTH scale: l_m is a property of the shear layer, and
+    turbulence generated inside an already-thick layer is generated at that layer's scale,
+    not at zero scale. Only a passive tracer would start at zero.
+
+    WHY THIS EXISTS. Du's l_m = k_lm x needs an x, and reading it off rotor positions is
+    wrong in two different ways: the station-local age restarts the eddy size at every rotor
+    (eddies do not shrink when they pass a turbine), while a farm-referenced age is a
+    streamwise distance irrespective of lateral position, so a rotor off to the side and
+    upstream rewrote a column it never touched -- measured at 12.26%, worse than the 9.325%
+    that disqualified Crespo. A is LOCAL by construction: turbulence that never reaches a
+    column cannot contribute to the age there.
+
+    Returns M; the age is A = M/k_w, so read it through `age_from_kwa`.
+    """
+    d2y = jnp.gradient(jnp.gradient(kwa, yloc[:, 0], axis=0), yloc[:, 0], axis=0)
+    d2z = jnp.gradient(jnp.gradient(kwa, zloc[0, :], axis=1), zloc[0, :], axis=1)
+    rhs = nu_t * (d2y + d2z) - (nu_t / psi) * kwa + U0 * kw
+    if prod is not None:
+        rhs = rhs + (kwa / jnp.maximum(kw, 1e-9)) * prod
+    return jnp.maximum(kwa + (dx / U0) * rhs, 0.0)
+
+
+def age_from_kwa(kwa, kw, D, floor_D, cap_D):
+    """Mean turbulence age in diameters, A = M/k_w, clipped to [floor_D, cap_D].
+
+    The floor keeps the fresh near wake on Du's own short-age branch where k_w is still tiny
+    and A is noise; the cap is the saturation discussed under BUDGET_AGE_CAP.
+    """
+    A = kwa / jnp.maximum(kw, 1e-9) / D
+    return jnp.clip(jnp.where(kw > 1e-8, A, floor_D), floor_D, cap_D)
 
 
 def ti_from_kw(kw, I_amb, U0):

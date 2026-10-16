@@ -126,6 +126,33 @@ def test_lateral_neighbour_does_not_disturb_a_column():
                         f'({alone:.6f} -> {with_neighbour:.6f})')
 
 
+def test_distant_upstream_rotor_does_not_change_a_column():
+    """A rotor to the side AND upstream must not change a column it never touches.
+
+    The sibling test above puts its neighbour at the SAME x as the column's first rotor, so
+    any quantity referenced to "the farm's first rotor" is unchanged and the test is blind to
+    a whole class of defect. Here A is 7D to the side and 5D further upstream, so it becomes
+    the farm's first rotor without ever entering the column.
+
+    Measured: the pure lateral leak (A moved onto B's station) is 0.22% for every closure, the
+    numerical floor, so nothing transmits sideways. But a farm-referenced budget length scale
+    moved the probe by 12.26% -- worse than the 9.325% that disqualified Crespo -- because
+    x_farm is a streamwise distance irrespective of lateral position. The station-local
+    reference gives 0.17% and the width floor 1.74%.
+
+    The bound below is deliberately loose enough for the width floor's 1.74%; it exists to
+    catch the 12% class, not to certify the 1.74%. Getting to <1% needs the turbulence age
+    transported as a field rather than read off rotor positions.
+    """
+    base = _row([[400, 0, 0], [800, 0, 0]])[(10, 0)]
+    with_a = _row([[0, 560, 0], [400, 0, 0], [800, 0, 0]])[(10, 0)]
+    err = abs(with_a - base) / base
+    assert err < 0.02, (
+        f'a rotor 7D to the side and 5D upstream moved the column by {100*err:.2f}% '
+        f'({base:.6f} -> {with_a:.6f}): the budget length scale is reading rotor positions '
+        f'rather than the local flow')
+
+
 def test_identical_rotors_see_identical_inflow():
     """In a 2x2 farm the two downstream rotors are geometrically identical."""
     d = _row([[0, 0, 0], [0, 560, 0], [560, 0, 0], [560, 560, 0]])
@@ -326,7 +353,15 @@ def test_grouping_tolerance_does_not_change_the_answer():
     # reach it (both front rotors end up ~7D upstream of the only other station, where a
     # shed rotor is inert). Pin it, so the test cannot be satisfied by both branches
     # drifting to the split branch's 0.91, which has T3 nearly unwaked.
-    assert abs(grouped - 0.7574209144261419) / 0.7574209144261419 < 1e-9, (
+    # NUT_CRESPO's value here is 0.7574209144261419, and under it the 1% assertion above
+    # FAILS at 9.3%. The discrepancy is
+    # OWNED BY THE CLOSURE, not by the march: NuT_model measures x from each UPSTREAM rotor,
+    # so its nu_T depends on which rotors the station grouping put upstream. Both k_w-based
+    # closures read nu_T from local fields instead and are grouping-invariant -- measured
+    # 0.267%, and this test passes under them. Three points isolate it: Crespo with the old
+    # non-conservative operator 9.3%, Crespo with the conservative operator 9.3%, Du Eq (26)
+    # with the conservative operator 0.267%. The diffusion operator is NOT the cause.
+    assert abs(grouped - 0.72433053902390099) / 0.72433053902390099 < 1e-9, (
         f'the grouped branch itself moved: {grouped:.17g}; re-record only if this was '
         f'deliberate, since it is the reference the split branch is held to')
 
@@ -360,10 +395,10 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     1e-9 below is a real budget, not slack -- it sits four orders above the reassociation
     noise and four below anything physical.
 
-    NOTE these guard the RAMP change specifically. The separate eddy-viscosity age change
-    -- carrying a per-cell wake age and excluding a cell's own parent from its turbulence
-    sum -- does shift the wake fringes and is EXPECTED to move the row values. If that
-    change lands, these goldens must be re-recorded deliberately, not relaxed.
+    NOTE these guard the RAMP change specifically. Any change to the eddy-viscosity closure
+    or to the diffusion operator does shift the wake fringes and is EXPECTED to move the row
+    values; when one lands, these goldens must be re-recorded deliberately, not relaxed. That
+    has happened once, for the conservative operator -- see the note on golden_row.
     """
     golden_isolated = {0.0: 0.99693986652197308, 25.0: 0.99761049965016602}
     for beta, ref in golden_isolated.items():
@@ -376,8 +411,19 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # k went back to Zong's measured 0.45 -- see GAMMA_TRAILING_K's own note. That episode
     # is why this test records numbers rather than tolerating drift: it is the only thing
     # that would have caught the constant changing underneath the row cases.
-    golden_row = [0.99693986652197308, 0.68561188238556825, 0.70839363258543719,
-                  0.69427784837223705, 0.68659866597497632]
+    # These are the NUT_FROM_TKE values. Under NUT_CRESPO the row is
+    # [.., 0.68561188238556825, 0.70839363258543719, 0.69427784837223705, 0.68659866597497632],
+    # which is operator-independent because Crespo's nu_T
+    # varies across the plane only at |dy| = 3D, where the deficit gradient is zero, so
+    # div(nu_T grad Uw) and nu_T*lap(Uw) agree to the last bit. Measured identical on all
+    # three datasets. Under the k_w closures the row becomes
+    # Re-record deliberately if the closure default changes; do not relax. This row RISES from
+    # T2 to T4 and then flattens (0.651 / 0.666 / 0.690 / 0.681), which is the deep-array
+    # plateau. BUDGET_AGE = 'width' gave a monotonic 0.651 / 0.606 / 0.601 / 0.602; the
+    # disqualified 'farm' reference gave 0.651 / 0.673 / 0.691 / 0.681, i.e. the transported
+    # age recovers it without reading rotor positions.
+    golden_row = [0.99693986652197308, 0.65147963814922771, 0.66624274492671842,
+                  0.69037240002761913, 0.68096794287884532]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):
