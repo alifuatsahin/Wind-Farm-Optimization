@@ -422,8 +422,15 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # exactly ambient, which is both closures' bay-1 condition and Du's calibration condition.
     # The row then declines where Crespo's rises, which is the k_w budget saturating down a row
     # -- see [[crespo-validity-envelope]].
-    golden_row = [0.99693986652197308, 0.68561188242279869, 0.67758420189154345,
-                  0.65566538917142658, 0.64025876052842401]
+    # Re-recorded 2026-10-17 when the budget's nu_t and Psi moved from the farm-ambient TI
+    # to the TI INCIDENT on each rotor, which is what Du's Eq (26)/(28) coefficients are
+    # functions of. T1-T3 are UNCHANGED to the last digit and only T4-T5 move (+0.88%,
+    # +1.23%), which is the consistency check that the change did what it claims: the
+    # deficit already used ti_in, so bay 2's VELOCITY is untouched; only its k_w changes,
+    # and that first reaches the velocity field one bay later, through ti_in at T3. For the
+    # same reason the grouped 3-rotor anchor above did not move.
+    golden_row = [0.9969398665219731, 0.6856118824227987, 0.6775842018915434,
+                  0.6614627668787942, 0.6481093438976727]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):

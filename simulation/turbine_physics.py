@@ -415,7 +415,7 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
 
     seed = _frame(stacked, 0, unstacked=_UNSTACKED_MEMBERS + ("U", "kw"))
     stacked_out, was_active = _calculate_deficit_field_jit(
-        stacked, seed, adapter, params.field_params.I_amb, params.field_params.WV,
+        stacked, seed, adapter, params.field_params.WV,
         dl, dt_cap,
         local.calculation_domain, max_steps,
     )
@@ -431,7 +431,7 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
 
 
 @partial(jax.jit, static_argnames=("max_steps",))
-def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV,
+def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
                                   dl, dt_cap, calculation_domain, max_steps):
     def scan_step(carry, _):
         current, active = carry
@@ -444,14 +444,33 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV,
             # rotor, i.e. the shear-layer age, which is the reference that works: taking
             # it from the farm inlet lets Psi grow without bound down a row.
             age_D = jnp.maximum(current.X / adapter.D, 1e-6)
-            ti_amb = I_amb / 1.28
-            # The BUDGET's own nu_t and Psi take Du's Eq (26)/(28) on the AMBIENT TI, which
-            # is their calibrated input. The DEFICIT's nu_T takes Eq (26) on the TI incident
-            # on this station (adapter.ti_in), read from the marched k_w. Both measure x from
-            # the marching rotor, as Du does.
-            nut_bud = du_nu_t(ti_amb, age_D, adapter.U0, adapter.D)
-            psi_bud = du_psi(ti_amb, age_D, adapter.D)
+            # ONE eddy viscosity, Du's Eq (26), evaluated on the TI INCIDENT on this rotor
+            # (adapter.ti_in) -- for the deficit AND for the budget's own nu_t and Psi.
+            #
+            # Du's nu_t(x) and Psi(x) are functions of the inflow TI OF THE ROTOR WHOSE WAKE
+            # IS MODELLED (his Tables 1 and 3, and Sec 3.3's fits against "the ambient
+            # turbulence variable"). For an isolated rotor -- every case he calibrates on --
+            # that inflow TI IS the farm-ambient value, which is why the distinction never
+            # appears in his paper. For rotor n of a row it is the elevated incident value.
+            #
+            # This code previously fed the budget the farm-AMBIENT TI for every rotor. That
+            # was a divergence from Du with a real consequence: Psi was then identical in
+            # every bay, so every bay equilibrated to the same k_w = Psi|grad Uw|^2 and the
+            # accumulation hard-saturated. Feeding it ti_in lets each bay's equilibrium rise
+            # with the turbulence it actually sits in. The feedback is self-limiting rather
+            # than divergent, because Psi -> 0.1 TI at large TI makes k_eq ~ TI while
+            # TI ~ sqrt(k_B + k_w), i.e. k_w ~ sqrt(k_w): a fixed point. The measured
+            # accumulation saturates the same way (k_w/k_B = 4.98 at rotor 2, 5.51 at rotor 3).
+            #
+            # No circularity: ti_in is frozen at the station plane, read from the k_w the
+            # station was HANDED, so nothing inside the march feeds back on it.
+            #
+            # Measured on the 8-turbine row: R2 .9087 -> .9177, bias -.0218 -> -.0197, and
+            # the measured three-rotor TI BIAS improves to ~0 (-.0016/-.0004/-.0014 ->
+            # +.0003/+.0013/+.0001) while its R2 slips (+.874/+.781/+.787 ->
+            # +.868/+.751/+.773). Adopted for the semantics, not the score.
             NuT = du_nu_t(adapter.ti_in, age_D, adapter.U0, adapter.D)
+            nut_bud, psi_bud = NuT, du_psi(adapter.ti_in, age_D, adapter.D)
             # NuT is a FIELD now, but the step must stay scalar, so the diffusive limit
             # is taken at its largest value on the plane. For a uniform NuT this is the
             # same number it always was.
