@@ -111,6 +111,11 @@ def du_psi(TI, age_D, D):
             * jnp.maximum(age_D, 1e-6) * D ** 2)
 
 
+#: von Karman constant, for the Prandtl-Blackadar ABL mixing length l -> kappa*z near the
+#: surface. Used to BOUND the budget's turbulence age; see BUDGET_AGE_CAP_D.
+KARMAN = 0.4
+
+
 #: Du et al. (2025) Sec 3.2: nu_T = c <k_w>^(1/2) l_m, with c = 0.67 the mean across his
 #: calibration cases.
 DU_C_NU = 0.67

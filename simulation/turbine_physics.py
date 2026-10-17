@@ -9,7 +9,7 @@ from jax.scipy.special import erf as jerf
 
 from .turbine_state import LocalConditions, VortexSimConfig, DeficitFieldConfig, pack_upstream_turbines
 from .utils import (smooth_2d, NuT_model, du_nu_t, du_psi, advance_kw,
-                    advance_kwa, age_from_kwa)
+                    advance_kwa, age_from_kwa, KARMAN)
 from .vortex_model import _simulate_vortex_evolution_jit, _UNSTACKED
 from .model_solver import advance_wake_field
 from .field_ops import interpolate_vec_data
@@ -287,6 +287,35 @@ NUT_TI_FROM_KW = True
 #: [[turn-around-is-saturation-not-ti]].
 NUT_X_FROM_AGE = False
 
+#: Give the BUDGET's nu_t and Psi the transported turbulence age instead of the distance from
+#: the marching rotor. Du's Psi = c l_m^2/C_eps is linear in x measured from that rotor, so it
+#: RESTARTS at every one -- and since k_w,eq = Psi |grad Uw|^2 with comparable gradients per
+#: bay, every bay equilibrates to the same k_w and nothing accumulates across rows. Measured:
+#: incident TI jumps 0.043 -> 0.104 at T2 then stays flat to 0.103 at T8, where Crespo climbs
+#: to 0.176. That missing BUILD-UP is the 8-turbine regression.
+#:
+#: The turbulence reaching bay 2 genuinely IS older than the bay-local distance; Du's Psi ~ x
+#: is right for a stand-alone rotor, where turbulence age and rotor distance coincide.
+#:
+#: The objection that killed a growing age inside Sec 3.2 does not apply here: there BOTH
+#: factors of c sqrt(k) l_m grew without bound, so it diverged on 8 turbines and needed a
+#: fitted 7.5 D cap. Eq (26) saturates by itself -- plateau 0.025 - 0.0005/TI, bounded above by
+#: 0.025 -- so an unbounded Psi can raise k_w without the mixing ever diverging. Du's own
+#: correlation supplies the cap we previously had to fit.
+BUDGET_X_FROM_AGE = False
+
+#: Saturation of the budget's transported age, in diameters. An UNBOUNDED Psi gives build-up
+#: with no plateau, so k_w accumulates past what a real farm reaches: measured, the deep-array
+#: velocity is fixed (.9087 -> .9507) but TI over-predicts bays 2-3 by +38/+56% and its R2 goes
+#: negative. A real farm's turbulence rises over ~3-5 rows and then plateaus, so Psi should
+#: grow and then saturate.
+#:
+#: 'abl' derives the cap from the Prandtl-Blackadar limit l_m <= kappa*z_h, i.e.
+#: A_cap = kappa*z_h/(k_lm D), which is parameter-free beyond kappa = 0.4. It evaluates to
+#: ~12.9 D on the full-wake rig, ~14.1 D on the 8-turbine array and ~10.1 D on the LES. A bare
+#: number is a fitted constant.
+BUDGET_AGE_CAP_D = float('inf')
+
 #: Distance in D past which the erf ramp has saturated, so a carried rotor's term is
 #: mathematically zero and its slot can be left empty. Bounds the PHYSICS, not the bits:
 #: carrying such a rotor still reassociates the tensordot below, which moved the 5D row by
@@ -480,8 +509,15 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, I_amb, WV, up_a, up_D, 
             # Du's Eq (26)/(28) on the AMBIENT TI, with x from the marching rotor, feed
             # the wake-added TKE budget; the deficit's nu_T is Eq (26) on the TI accumulated
             # over the upstream rotors via Crespo & Hernandez (1996).
-            nut_bud = du_nu_t(ti_amb, age_D, adapter.U0, adapter.D)
-            psi_bud = du_psi(ti_amb, age_D, adapter.D)
+            if BUDGET_X_FROM_AGE:
+                _cap = (KARMAN * adapter.Zhub / ((0.2 * ti_amb + 0.015) * adapter.D)
+                        if BUDGET_AGE_CAP_D == 'abl' else BUDGET_AGE_CAP_D)
+                bud_x = jnp.minimum(
+                    age_from_kwa(current.kwa, current.kw, adapter.D, age_D), _cap)
+            else:
+                bud_x = age_D
+            nut_bud = du_nu_t(ti_amb, bud_x, adapter.U0, adapter.D)
+            psi_bud = du_psi(ti_amb, bud_x, adapter.D)
             if NUT_X_FROM_AGE:
                 x_eff = age_from_kwa(current.kwa, current.kw, adapter.D, age_D)
             else:
