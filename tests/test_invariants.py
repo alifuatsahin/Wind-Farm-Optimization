@@ -354,15 +354,17 @@ def test_grouping_tolerance_does_not_change_the_answer():
     # reach it (both front rotors end up ~7D upstream of the only other station, where a
     # shed rotor is inert). Pin it, so the test cannot be satisfied by both branches
     # drifting to the split branch's 0.91, which has T3 nearly unwaked.
-    # This PASSES at 0.357% with the shipped closure, whose incident TI is read from the
-    # transported k_w field rather than looked up from rotor positions. Under NUT_TI_FROM_KW =
-    # False (Crespo) it FAILS at 9.3%, and that discrepancy is
-    # OWNED BY THE CLOSURE, not by the march: NuT_model measures x from each UPSTREAM rotor,
-    # so its nu_T depends on which rotors the station grouping put upstream. Both k_w-based
-    # closures read nu_T from local fields instead and are grouping-invariant -- measured
-    # 0.267%, and this test passes under them. Three points isolate it: Crespo with the old
+    # This PASSES at 0.357% with the shipped closure, whose incident TI is read per cell
+    # from the transported k_w field rather than looked up from rotor positions. The
+    # now-removed Crespo & Hernandez closure FAILED here at 9.3%, and that discrepancy was
+    # OWNED BY THE CLOSURE, not by the march: Crespo measures x from each UPSTREAM rotor, so
+    # its nu_T depended on which rotors the station grouping put upstream. A closure that
+    # reads nu_T from local fields cannot. Three points isolated it: Crespo with the old
     # non-conservative operator 9.3%, Crespo with the conservative operator 9.3%, Du Eq (26)
-    # with the conservative operator 0.267%. The diffusion operator is NOT the cause.
+    # with the conservative operator 0.267%. The diffusion operator was NOT the cause.
+    # This is the invariant that made the k_w-fed closure the default -- see also
+    # test_distant_upstream_rotor_does_not_change_a_column, which catches an off-axis
+    # non-locality this one is blind to.
     assert abs(grouped - 0.75742091442718429) / 0.75742091442718429 < 1e-9, (
         f'the grouped branch itself moved: {grouped:.17g}; re-record only if this was '
         f'deliberate, since it is the reference the split branch is held to')
@@ -413,12 +415,8 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # k went back to Zong's measured 0.45 -- see GAMMA_TRAILING_K's own note. That episode
     # is why this test records numbers rather than tolerating drift: it is the only thing
     # that would have caught the constant changing underneath the row cases.
-    # These are the NUT_FROM_TKE values. Under NUT_CRESPO the row is
-    # [.., 0.68561188238556825, 0.70839363258543719, 0.69427784837223705, 0.68659866597497632],
-    # which is operator-independent because Crespo's nu_T
-    # varies across the plane only at |dy| = 3D, where the deficit gradient is zero, so
-    # div(nu_T grad Uw) and nu_T*lap(Uw) agree to the last bit. Measured identical on all
-    # three datasets. Under the k_w closures the row becomes
+    # The now-removed Crespo closure gave
+    # [.., 0.68561188238556825, 0.70839363258543719, 0.69427784837223705, 0.68659866597497632].
     # Shipped-closure values (incident TI from the marched k_w). T1 and T2 match the Crespo
     # row to 4e-11 and are unchanged in substance: the incident TI at the FIRST rotor is
     # exactly ambient, which is both closures' bay-1 condition and Du's calibration condition.

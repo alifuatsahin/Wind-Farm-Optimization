@@ -11,83 +11,6 @@ import os
 from .field_ops import interpolate_local_velocity_field
 from .viz_style import SURFACE, INK_PRIMARY, INK_SECONDARY, style_figure, style_axes, style_colorbar
 
-# Exponent of the p-norm combining added-turbulence contributions from several upstream
-# rotors, Li, Wang, Dong, Yang & Zhang (2023) Energy 276, 127491 Eq (22). m = 1 is the
-# linear sum, m -> inf the dominant-upstream rule.
-#
-# We use m = 2, NOT the m = 2.5 Li fits for aligned rows. m = 2 adds the contributions in
-# variance, which is what independent fluctuations do, and is the only value in the family
-# with a physical derivation rather than a fit. m is a level knob -- its optimum moves with
-# the dataset and often sits on a sweep boundary -- so it is fixed on principle and never
-# tuned, and a sweep over it is not a validation.
-CRESPO_M = 2.0
-
-
-def NuT_model(wake_field, config, I_amb, up_a, up_D, up_pos_x, up_pos_y, up_Uhub,
-              up_mask, x_D_override=None):
-    """
-    Turbulent eddy viscosity closure for a single turbine's wake, following the
-    piecewise-linear model of Du, Zhu, Li, Ge, Li & Liu (2025), "Modeling of
-    turbulence kinetic energy added by wind-turbine wakes in the atmospheric
-    boundary layer", arXiv:2511.19881, Eq. (26):
-
-        NuT(x) / (U0*D) = (kv1*TI - kv0) * x/D,      x/D <= xv1/TI
-                        = (kv1*TI - kv0) * xv1/TI,   x/D >  xv1/TI
-
-    with kv1=0.05, kv0=0.001, xv1=0.5 (paper's fitted constants). Extended here
-    to multi-turbine wakes by accumulating turbulence intensity across upstream
-    wakes via the Crespo & Hernandez (1996) added-turbulence correlation, and by
-    measuring x/D relative to 'config' itself (whose wake is being marched) --
-    the paper's model was validated only for a stand-alone turbine with a fixed
-    ambient TI, so this multi-turbine accumulation is an extension, not something
-    the source paper tested directly.
-    """
-    kv1, kv0, xv1 = 0.05, 0.001, 0.5
-    IU_TO_TI = 1.28  #(1.28) Du et al. (2025), Sec 2.3: Iu ~ 1.28 * TI under neutral conditions
-    m = CRESPO_M
-
-    x_global = config.pos[0] + wake_field.X
-
-    x_D_up = (x_global - up_pos_x) / up_D
-    # Crespo & Hernandez (1996) JWEIA 61, 71-85, valid for 5 < x/D < 15, 0.07 < I0 < 0.14,
-    # 0.1 < a < 0.4.
-    delta_I = 0.73 * up_a ** 0.8325 * I_amb ** (-0.0325) * x_D_up ** (-0.32)
-    contribution = (delta_I * up_Uhub / config.U0) ** m
-
-    # TI RESOLVED ACROSS THE PLANE, not averaged over it.
-    #
-    # An upstream rotor raises the turbulence where ITS wake is, and the lateral extent of
-    # that influence is the |dy| < 3D criterion this model already used -- it was simply
-    # evaluated once, at the marching rotor, and the single resulting value was applied to
-    # every wake on the cross-plane. With one turbine per streamwise station that is
-    # exactly right, so single rows are unaffected. With several it is not: the plane
-    # inherits whichever rotor happened to lead the station, and since the lead is just the
-    # first to sort there, two identical farms listed in a different order disagreed by up
-    # to 13.6% in rotor inflow. Evaluating the same criterion per grid column removes that
-    # without changing the correlation, its constants, or the accumulation rule.
-    #
-    # NuT therefore returns a FIELD. Its lateral variation sits at |dy| = 3D from a rotor,
-    # where the deficit gradient is negligible (measured: the transition occupied 2 of 140
-    # columns and overlapped none of the 69 in-wake ones), so nu_T may stay outside the
-    # divergence in model_solver -- the grad(nu_T).grad(U - Uin) term it would otherwise
-    # need is zero wherever it would act.
-    y_rel = (wake_field.yloc + config.pos[1])[..., None] - up_pos_y    # (ny, nz, n_up)
-    qualifies = up_mask & (x_D_up >= 3.0) & (jnp.abs(y_rel) < 3.0 * up_D)
-    Iu_sq = I_amb ** m + jnp.sum(jnp.where(qualifies, contribution, 0.0), axis=-1)
-
-    TI_total = (Iu_sq ** (1 / m)) / IU_TO_TI
-    # x is normally the distance from the MARCHING rotor -- a single-turbine reference,
-    # which is the one factor Crespo's accumulation does not extend. x_D_override lets a
-    # transported turbulence age stand in for it; see NUT_X_FROM_AGE.
-    x_D = wake_field.X / config.D if x_D_override is None else x_D_override
-    x_D_threshold = xv1 / TI_total
-    coeff = jnp.maximum(kv1 * TI_total - kv0, 0.0)
-
-    return coeff * jnp.minimum(x_D, x_D_threshold) * config.U0 * config.D
-
-#: Du et al. (2025) Eq (26) eddy viscosity and Eq (28) dissipation length group, both as
-#: functions of a turbulence intensity and a shear-layer age. Kept in one place so the
-#: wake-added TKE budget and the deficit's own nu_T cannot drift apart.
 DU_KV1, DU_KV0, DU_XV1 = 0.05, 0.001, 0.5
 IU_TO_TI = 1.28   # Du et al. Sec 2.3: Iu ~ 1.28 TI under neutral conditions
 
@@ -111,11 +34,6 @@ def du_psi(TI, age_D, D):
             * jnp.maximum(age_D, 1e-6) * D ** 2)
 
 
-#: von Karman constant, for the Prandtl-Blackadar ABL mixing length l -> kappa*z near the
-#: surface. Used to BOUND the budget's turbulence age; see BUDGET_AGE_CAP_D.
-KARMAN = 0.4
-
-
 #: Du et al. (2025) Sec 3.2: nu_T = c <k_w>^(1/2) l_m, with c = 0.67 the mean across his
 #: calibration cases.
 DU_C_NU = 0.67
@@ -124,38 +42,6 @@ DU_C_NU = 0.67
 def ambient_tke(I_amb, U0):
     """k_B from TI = sqrt(2k/3)/U0, with TI the ambient value Iu/1.28."""
     return 1.5 * ((I_amb / IU_TO_TI) * U0) ** 2
-
-
-def advance_kwa(kwa, kw, yloc, zloc, dx, nu_t, psi, U0, prod):
-    """Transported turbulence age, carried as M = k_w * A:
-
-        U0 dM/dx = nu_t grad^2 M - (nu_t/Psi) M + A*P + U0 k_w
-
-    Diffusion and dissipation carry the age with the turbulence they move or destroy; `A*P`
-    makes newly generated turbulence carry the LOCAL age, so dA/dx = 1 exactly and A is the
-    distance the shear LAYER has travelled. That is right for a length scale -- turbulence
-    generated inside an already-thick layer is generated at that layer's scale, not at zero.
-    Injecting at age zero instead (tracer semantics) was tried and gives A = 3.56 D at a farm
-    distance of 14 D, because the layer is continuously regenerated.
-
-    There is no fitted constant here: every term is a k_w operator or the ageing source.
-    """
-    d2y = jnp.gradient(jnp.gradient(kwa, yloc[:, 0], axis=0), yloc[:, 0], axis=0)
-    d2z = jnp.gradient(jnp.gradient(kwa, zloc[0, :], axis=1), zloc[0, :], axis=1)
-    rhs = (nu_t * (d2y + d2z) - (nu_t / psi) * kwa + U0 * kw
-           + (kwa / jnp.maximum(kw, 1e-9)) * prod)
-    return jnp.maximum(kwa + (dx / U0) * rhs, 0.0)
-
-
-def age_from_kwa(kwa, kw, D, floor_D):
-    """Mean turbulence age in diameters, A = M/k_w, floored where there is no turbulence yet.
-
-    No cap: Du Eq (26) saturates at xv1/TI on its own, which is why pairing the age with
-    Eq (26) needs no saturation distance of ours -- unlike Sec 3.2's l_m = k_lm x, which has
-    no saturation and needed a fitted one.
-    """
-    A = kwa / jnp.maximum(kw, 1e-9) / D
-    return jnp.maximum(jnp.where(kw > 1e-8, A, floor_D), floor_D)
 
 
 def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):

@@ -97,23 +97,21 @@ class Turbine:
         self.vortex_field = tp.simulate_vortex_field(self._params, self._current_local(),
                                                      seed=seed, total_steps=total_steps)
 
-    def initialize_wake_field(self, companions=(), kw0=None, kwa0=None):
+    def initialize_wake_field(self, companions=(), kw0=None):
         """`companions` are the other rotors at this same streamwise station, as
         (TurbineParams, dy) pairs with dy this turbine's local-y offset from theirs."""
         self.vortex_field, self.dl = tp.initialize_wake_field(
-            self._params, self.vortex_field, self._current_local(), companions, kw0=kw0,
-            kwa0=kwa0)
+            self._params, self.vortex_field, self._current_local(), companions, kw0=kw0)
 
-    def calculate_deficit_field(self, upstream_turbines, max_steps=1500, N_upstream_max=None,
-                                companions=(), carried=(), n_slots=None):
+    def calculate_deficit_field(self, max_steps=1500, companions=(), carried=(),
+                                n_slots=None):
         """`carried` are rotors shed at EARLIER stations whose near wake may still be
         developing, as (TurbineParams, dy, x_off) triples. They take no part in the
         initial condition -- they are already in the field -- and exist only so the ramp
         can go on ageing them past the station boundary."""
         self.wake_field = tp.calculate_deficit_field(
-            self._params, self._current_local(), self.vortex_field, self.dl, upstream_turbines,
-            N_upstream_max=N_upstream_max, max_steps=max_steps, companions=companions,
-            carried=carried, n_slots=n_slots
+            self._params, self._current_local(), self.vortex_field, self.dl,
+            max_steps=max_steps, companions=companions, carried=carried, n_slots=n_slots
         )
 
 class WindFarm:

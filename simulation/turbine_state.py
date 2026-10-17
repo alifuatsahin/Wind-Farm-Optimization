@@ -187,7 +187,7 @@ jax.tree_util.register_dataclass(
 @dataclass
 class DeficitFieldConfig:
     """Registered-pytree replacement for the SimpleNamespace adapter
-    turbine_physics.calculate_deficit_field builds to call utils.NuT_model and
+    turbine_physics.calculate_deficit_field builds to call utils.du_nu_t and
     model_solver.advance_wake_field."""
     pos: np.ndarray
     D: float
@@ -198,7 +198,7 @@ class DeficitFieldConfig:
     rotor_mask: np.ndarray = None  # rotor disc, for the near-wake deficit ramp
     Ct_eff: float = 0.0            # Ct_yawed / cos(beta), i.e. the Ct entering Zong Eq 3.3
     x_off: np.ndarray = None       # per-rotor streamwise age offset; see calculate_deficit_field
-    ti_in: np.ndarray = None       # total TI INCIDENT on the station plane; see NUT_TI_FROM_KW
+    ti_in: np.ndarray = None       # total TI INCIDENT on the station plane, per cell; feeds Du Eq (26)
 
 
 jax.tree_util.register_dataclass(
@@ -206,29 +206,6 @@ jax.tree_util.register_dataclass(
     data_fields=["pos", "D", "Uhub", "Uin", "Zhub", "U0", "rotor_mask", "Ct_eff", "x_off", "ti_in"],
     meta_fields=[],
 )
-
-
-def pack_upstream_turbines(upstream_turbines, n_max):
-    """Packs a variable-length list of upstream Turbine objects into fixed-size (n_max, always
-    the same across every turbine in a farm) arrays for utils.NuT_model, so its per-step call
-    inside Loop 2's lax.scan body doesn't trace a structurally different program (and therefore
-    recompile) per distinct upstream turbine count. Padding values are never observed (up_mask
-    gates them out via jnp.where inside NuT_model) -- chosen only to avoid a division by zero."""
-    n = len(upstream_turbines)
-    up_a = jnp.zeros(n_max)
-    up_D = jnp.ones(n_max)
-    up_pos_x = jnp.zeros(n_max)
-    up_pos_y = jnp.zeros(n_max)
-    up_Uhub = jnp.ones(n_max)
-    up_mask = jnp.zeros(n_max, dtype=bool)
-    if n > 0:
-        up_a = up_a.at[:n].set(jnp.array([t.a for t in upstream_turbines]))
-        up_D = up_D.at[:n].set(jnp.array([t.D for t in upstream_turbines]))
-        up_pos_x = up_pos_x.at[:n].set(jnp.array([t.pos[0] for t in upstream_turbines]))
-        up_pos_y = up_pos_y.at[:n].set(jnp.array([t.pos[1] for t in upstream_turbines]))
-        up_Uhub = up_Uhub.at[:n].set(jnp.array([t.Uhub for t in upstream_turbines]))
-        up_mask = up_mask.at[:n].set(True)
-    return up_a, up_D, up_pos_x, up_pos_y, up_Uhub, up_mask
 
 
 def make_turbine_params(config, field_params, y_bounds=None) -> TurbineParams:
