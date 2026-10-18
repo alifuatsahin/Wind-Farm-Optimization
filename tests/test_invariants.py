@@ -449,8 +449,18 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # time, to bound max(nu_T/U) rather than max(nu_T) -- the pseudo-time the operator
     # sees is dx/U, not dt. T1-T2 are bit-identical and T3-T5 move +0.016/+0.036/+0.020%,
     # i.e. only the bays whose cores are deep enough for the U in that ratio to bind.
-    golden_row = [0.9969398665219731, 0.6873108379201782, 0.677139750946937,
-                  0.6614469953075315, 0.6494729064589908]
+    #
+    # Amended again when utils.advance_kw's diffusion term went to the conservative flux
+    # form, div(nu_t grad k_w), the momentum equation's form having been carried through
+    # first. T1-T3 are BIT-IDENTICAL and only T4-T5 move, +0.53/+0.47%, which is the
+    # one-bay lag spelled out above arriving a second time: in bay 1 the budget's nu_t is
+    # the scalar ambient TI, so grad(nu_t) = 0 and the two forms are the same equation
+    # there; bay 2 is the first with a ti_in FIELD, so its k_w is the first to move, and
+    # that k_w reaches a velocity through ti_in at T3, hence a Uhub at T4. Both moves are
+    # UPWARD, i.e. toward the measurement, and the grouped anchor above did not move at all
+    # -- it is a 3-rotor case, and T1-T3 are exactly the rotors this cannot reach.
+    golden_row = [0.99693986652197308, 0.68731083792017822, 0.67713975094693701,
+                  0.66497546793678164, 0.65252419991295707]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):

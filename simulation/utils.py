@@ -45,14 +45,14 @@ def ambient_tke(I_amb, U0):
 
 
 # ---------------------------------------------------------------------------------------
-# COMPACT cross-plane diffusion operators.
+# COMPACT cross-plane diffusion operator.
 #
 # jnp.gradient applied twice is NOT a usable second derivative here. Central-differencing
 # twice gives (f[i+2] - 2 f[i] + f[i-2]) / (4h^2) -- a stencil on the 2h lattice, which
 # decouples the odd and even sublattices. The grid-scale checkerboard mode is then damped
 # EXACTLY zero, so any checkerboard noise is free to grow. Measured on an alternating
-# field: the double-gradient operator returns 0 where the three-point operator below
-# returns -4/h^2, while the two agree to ~1% on smooth fields.
+# field: the double-gradient operator returns 0 where a three-point operator returns
+# -4/h^2, while the two agree to ~1% on smooth fields.
 #
 # With Du's nu_T, which is small and smooth, the mode never gets excited and the error is
 # invisible -- which is why this stood for so long. It is not invisible for a larger or
@@ -60,17 +60,25 @@ def ambient_tke(I_amb, U0):
 # growing mode appeared at the lateral edges, where jnp.gradient falls back to one-sided
 # differences; this is the interior form of the same defect.
 #
-# Edge rows carry no diffusion. Of the four boundaries, three are already overwritten
-# after every step (the ground by a Dirichlet condition, the two lateral edges by
-# _lateral_bc), so only the top is affected.
+# The boundary ring carries only its TANGENTIAL term. The y-flux divergence is written to
+# rows 1:-1 of every column and the z-flux divergence to columns 1:-1 of every row, so the
+# top row still diffuses laterally and the lateral columns still diffuse vertically -- what
+# is zero at each edge is the NORMAL flux. Three of the four edges are overwritten after
+# every step anyway (the ground by a Dirichlet condition, the two lateral edges by
+# _lateral_bc), so only the top keeps a condition of its own, and that condition is now zero
+# vertical flux -- a perfectly reflecting lid, where the old one-sided jnp.gradient leaked.
+# Measured on the 8-turbine row, raising max_Z from 2D to 4D moves R2 0.9195 -> 0.9188 and
+# T8's Uhub/U0 0.6309 -> 0.6238, so the 2D lid retains about 0.007 of deficit at the last
+# rotor. One-signed and growing down the row, hence it flatters the deep-array result
+# slightly; small enough to leave, but it is a physical choice now rather than a by-product
+# of the stencil. (The earlier max_Z 2 -> 4 check, which moved R2 by 0.001, predates this
+# operator and was made with a leaking top.)
+#
+# This is also what licenses the reduction in turbine_physics' diffusive step limit: the
+# ring cannot go unstable in the normal direction, and in the tangential one it is bounded
+# by the looser one-dimensional limit at the LARGEST U on the plane, so that limit takes its
+# maximum over the interior only.
 # ---------------------------------------------------------------------------------------
-
-def laplacian_compact(f, dy, dz):
-    """grad^2 f on the three-point stencil, non-conservative form."""
-    out = jnp.zeros_like(f)
-    out = out.at[1:-1, :].add((f[2:, :] - 2.0 * f[1:-1, :] + f[:-2, :]) / dy ** 2)
-    return out.at[:, 1:-1].add((f[:, 2:] - 2.0 * f[:, 1:-1] + f[:, :-2]) / dz ** 2)
-
 
 def div_nu_grad(nu, f, dy, dz):
     """div(nu grad f) on the three-point stencil, in conservative flux form.
@@ -88,7 +96,7 @@ def div_nu_grad(nu, f, dy, dz):
 def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
     """One march step of Du et al. (2025) Eq (13), the wake-added TKE budget:
 
-        U0 dk_w/dx = nu_t grad^2 k_w - (nu_t/Psi) k_w + nu_t |grad_perp U|^2
+        U0 dk_w/dx = div_perp(nu_t grad_perp k_w) - (nu_t/Psi) k_w + nu_t |grad_perp U|^2
 
     i.e. cross-plane diffusion, dissipation, and shear production. Du's Eq (14) is the
     analytic solution of this same equation; marching it instead avoids that solution's
@@ -97,6 +105,23 @@ def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
     the operator is just the 2-D Laplacian, with no axis singularity and NO axisymmetry
     assumption. Du's own formulation is axisymmetric in <k_w>_theta and therefore cannot
     represent the unequal lateral peaks the measurements show; this can.
+
+    Du writes the first term as `nu_t grad^2 k_w`, and for him the two forms are the same
+    equation: his Eq (26) returns an eddy viscosity that is a function of x and the rotor's
+    inflow TI alone, so grad_perp(nu_t) = 0 identically. Here nu_t is Eq (26) evaluated on
+    the incident-TI FIELD, which varies across the plane, so the forms differ by
+    grad_perp(nu_t).grad_perp(k_w) -- first order, not zero. The term being modelled is the
+    divergence of the turbulent flux of k, so the divergence form is the faithful one; this
+    is the same argument model_solver.advance_wake_field._diffusion makes for the momentum
+    equation, which it reached first. Carrying it over here moves everything the same way
+    and nothing the other: 8-turbine R2 .9195 -> .9235 and bias -.0194 -> -.0185, LES
+    aligned .9263 -> .9266, full-wake C/A/B .9343/.8878/.8989 -> .9356/.8887/.8998, and the
+    TI the budget is actually scored on, R2 +.759/+.703/+.680 -> +.782/+.714/+.692 with the
+    case-C bias -.0076 -> -.0066. Deflection and runtime are unchanged. Deep in the array it
+    goes the right way at every rotor (T4 Uhub/U0 .6609 -> .6708, T8 .6309 -> .6345 against
+    a measured ~.643), recovering about a fifth of the k_w under-prediction that the wake-TI
+    rescaling exposed -- not a fix for the deep-array limit, which is a mean-flow one, but
+    free.
 
     Replaces the Crespo & Hernandez correlation entirely. Two things go with it: there is
     no superposition rule, because k_w is transported and each rotor simply adds production
@@ -111,8 +136,8 @@ def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
     Uw = Uin - U
     dWdY, dWdZ = jnp.gradient(Uw, yloc[:, 0], zloc[0, :])
     prod = nu_t * (dWdY ** 2 + dWdZ ** 2)
-    lap = laplacian_compact(kw, yloc[1, 0] - yloc[0, 0], zloc[0, 1] - zloc[0, 0])
-    rhs = nu_t * lap - (nu_t / psi) * kw + prod
+    dif = div_nu_grad(nu_t, kw, yloc[1, 0] - yloc[0, 0], zloc[0, 1] - zloc[0, 0])
+    rhs = dif - (nu_t / psi) * kw + prod
     return jnp.maximum(kw + (dx / U0) * rhs, 0.0)
 
 
