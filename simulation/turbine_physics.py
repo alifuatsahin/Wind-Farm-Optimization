@@ -10,7 +10,7 @@ from jax.scipy.special import erf as jerf
 from .turbine_state import LocalConditions, VortexSimConfig, DeficitFieldConfig
 from .utils import smooth_2d, du_nu_t, du_psi, advance_kw
 from .vortex_model import _simulate_vortex_evolution_jit, _UNSTACKED
-from .model_solver import advance_wake_field
+from .model_solver import advance_wake_field, representative_velocity, velocity_floor
 from .field_ops import interpolate_vec_data
 
 
@@ -492,9 +492,31 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
             # together -- the compact stencil of utils.div_nu_grad at the old dt diverges
             # outright (LES R2 -77), and at exactly this bound with no margin it is only
             # marginally stable (LES R2 0.78 against 0.93).
+            #
+            # The bound is on the PSEUDO-TIME the diffusion operator actually sees, which
+            # is NOT dt. This is a parabolic march: advance_wake_field forms dx = dt*U_rep
+            # and then steps dU/dx = (... + div(nu grad U))/U, so the diffusive step is
+            # dx/U, inflated by U_rep/U. That is largest exactly where U is smallest --
+            # the deep wake core, which is also where nu_T peaks. Bounding max(nu_T)
+            # alone left bay 3 of the 8-turbine row unstable at x ~ 1.7D downstream of
+            # its rotor: a checkerboard burst (hub-row roughness 0.011 -> 0.289, the
+            # deficit minimum hopping 8 cells), which then diffused away but left that
+            # wake permanently 0.52 deep instead of 0.42, and showed up in the contour
+            # figures as a crescent notch in every bay from the third on. Bounding
+            # max(nu_T/U) is the condition the scheme actually has to satisfy.
+            #
+            # Taken over the INTERIOR only. The boundary ring carries no diffusion
+            # (div_nu_grad leaves it at zero, and the ground row is overwritten with Uin
+            # every step anyway), while the log profile sends U -> 0 there, so including
+            # it lets a cell that cannot go unstable set the step for the whole plane --
+            # measured as the first station failing to march at all.
             _dz = current.zloc[0, 1] - current.zloc[0, 0]
             _inv2d = 1.0 / dl ** 2 + 1.0 / _dz ** 2
-            dt = jnp.minimum(dt_cap, DIFFUSIVE_CFL / (2.0 * (jnp.max(NuT) + 1e-6) * _inv2d))
+            _Urep = representative_velocity(current.U, adapter.Uin)
+            _ratio = NuT / jnp.maximum(current.U, velocity_floor(adapter.Uin))
+            _nu_over_u = jnp.max(_ratio[1:-1, 1:-1])
+            dt = jnp.minimum(dt_cap, DIFFUSIVE_CFL
+                             / (2.0 * _inv2d * _Urep * _nu_over_u + 1e-12))
 
             new = interpolate_vec_data(stacked, current.t + dt)
             U, X_new = advance_wake_field(current, dt, NuT, adapter, WV)

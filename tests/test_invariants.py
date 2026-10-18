@@ -369,7 +369,7 @@ def test_grouping_tolerance_does_not_change_the_answer():
     # (see golden_row). +0.173%, and the grouped-vs-split agreement is 0.353%, unchanged
     # from the 0.357% this closure was recorded at -- the locality property this anchor
     # exists to protect is untouched by the operator change.
-    assert abs(grouped - 0.75872862070139635) / 0.75872862070139635 < 1e-9, (
+    assert abs(grouped - 0.75872868698909457) / 0.75872868698909457 < 1e-9, (
         f'the grouped branch itself moved: {grouped:.17g}; re-record only if this was '
         f'deliberate, since it is the reference the split branch is held to')
 
@@ -444,8 +444,13 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # would push one way down the row. Cross-check: on the LES cases the compact stencil
     # converges (CFL 0.45) to R2 0.92635 against the old scheme's 0.9262, so the previous
     # answer was correct and this only changes how it is reached.
-    golden_row = [0.9969398665219731, 0.6873108379201781, 0.677034463118567,
-                  0.6612112462007184, 0.6493442367814386]
+    #
+    # Amended later the same day when the diffusive step limit was corrected a second
+    # time, to bound max(nu_T/U) rather than max(nu_T) -- the pseudo-time the operator
+    # sees is dx/U, not dt. T1-T2 are bit-identical and T3-T5 move +0.016/+0.036/+0.020%,
+    # i.e. only the bays whose cores are deep enough for the U in that ratio to bind.
+    golden_row = [0.9969398665219731, 0.6873108379201782, 0.677139750946937,
+                  0.6614469953075315, 0.6494729064589908]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):
