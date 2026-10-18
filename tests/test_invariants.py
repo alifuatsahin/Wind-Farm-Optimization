@@ -365,7 +365,11 @@ def test_grouping_tolerance_does_not_change_the_answer():
     # This is the invariant that made the k_w-fed closure the default -- see also
     # test_distant_upstream_rotor_does_not_change_a_column, which catches an off-axis
     # non-locality this one is blind to.
-    assert abs(grouped - 0.75742091442718429) / 0.75742091442718429 < 1e-9, (
+    # Re-recorded 2026-10-18 with the compact diffusion stencil and the 2-D dt limit
+    # (see golden_row). +0.173%, and the grouped-vs-split agreement is 0.353%, unchanged
+    # from the 0.357% this closure was recorded at -- the locality property this anchor
+    # exists to protect is untouched by the operator change.
+    assert abs(grouped - 0.75872862070139635) / 0.75872862070139635 < 1e-9, (
         f'the grouped branch itself moved: {grouped:.17g}; re-record only if this was '
         f'deliberate, since it is the reference the split branch is held to')
 
@@ -429,8 +433,19 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # deficit already used ti_in, so bay 2's VELOCITY is untouched; only its k_w changes,
     # and that first reaches the velocity field one bay later, through ti_in at T3. For the
     # same reason the grouped 3-rotor anchor above did not move.
-    golden_row = [0.9969398665219731, 0.6856118824227987, 0.6775842018915434,
-                  0.6614627668787942, 0.6481093438976727]
+    #
+    # Re-recorded 2026-10-18 for the DIFFUSION OPERATOR: utils.div_nu_grad / laplacian_
+    # compact replaced two applications of jnp.gradient, and turbine_physics.DIFFUSIVE_CFL
+    # replaced the one-dimensional dt limit with the two-dimensional one. Exactly the case
+    # the docstring above says to re-record for, and the moves are the right size and
+    # shape: T1 bit-identical (an isolated rotor's Uhub cannot see downstream diffusion),
+    # T2-T5 at +0.25/-0.08/-0.04/+0.19%, i.e. a few tenths of a percent and NOT monotone --
+    # a discretisation change redistributing the wake fringe, not a physics change, which
+    # would push one way down the row. Cross-check: on the LES cases the compact stencil
+    # converges (CFL 0.45) to R2 0.92635 against the old scheme's 0.9262, so the previous
+    # answer was correct and this only changes how it is reached.
+    golden_row = [0.9969398665219731, 0.6873108379201781, 0.677034463118567,
+                  0.6612112462007184, 0.6493442367814386]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):

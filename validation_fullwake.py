@@ -581,6 +581,26 @@ def plot_ti_comparison(case, yaw, save_dir='runs/validation_fullwake', n_grids=2
                  bbox_inches='tight')
 
 
+#: I_u/TI for WAKE-ADDED turbulence. NOT the ambient 1.28 (utils.IU_TO_TI): that ratio is
+#: a property of the atmospheric surface layer, and wake-added turbulence is very nearly
+#: isotropic. MEASURED from the 1240 hub-height snapshots in data/ABL_flow_3turbine.h5, by
+#: taking sigma_u and sigma_v over the time axis and subtracting the ambient in quadrature:
+#:
+#:     x/D        9      12      15      18      21
+#:     sigma_v+/sigma_u+   0.823   0.880   1.052   0.945   0.999
+#:     I_u/TI            1.129   1.085   0.966   1.038   1.001
+#:
+#: using I_u/TI = 1/sqrt((1 + 2 r^2)/3) with sigma_w+ taken equal to sigma_v+, the wake
+#: shear layer being roughly axisymmetric. The mean is 1.04; 1.0 is used, the scatter
+#: being larger than the difference. The same calculation on the AMBIENT, with the
+#: Panofsky-Dutton sigma_w/sigma_u = 0.5 that van der Laan et al. (2015) Eq (8) adopts,
+#: returns 1.31 against the coded 1.28 -- which is what validates the method here.
+#:
+#: Only sigma_u and sigma_v are in that dataset, so sigma_w+ = sigma_v+ is an assumption,
+#: not a measurement. Re-derive it if a three-component wake dataset turns up.
+IU_TO_TI_WAKE = 1.0
+
+
 def solver_ti_field(wind_farm, x_D, y_D, i_amb=I_AMB):
     """The TI the SOLVER actually used, read back from the marched k_w field.
 
@@ -588,6 +608,12 @@ def solver_ti_field(wind_farm, x_D, y_D, i_amb=I_AMB):
     that k_w is carried in the march, the model has its own internal TI and that is what
     should be plotted against the measurement -- a reconstruction can agree with the data
     while the solver uses something else.
+
+    The ambient and the wake-added parts are converted to I_u with DIFFERENT anisotropy
+    ratios, 1.28 and IU_TO_TI_WAKE: see that constant. Using the ambient 1.28 for both
+    inflated the model's wake-added I_u by 28%, which flattered the shipped closure --
+    on these three cases it moved its TI bias from -0.008/-0.006/-0.007 (8% LOW) to
+    +0.000/+0.001/+0.000, i.e. the error was cancelled by the scaling rather than absent.
     """
     from simulation.field_ops import _source_turbine
     ts = wind_farm.turbines
@@ -608,6 +634,6 @@ def solver_ti_field(wind_farm, x_D, y_D, i_amb=I_AMB):
         kz = int(np.argmin(np.abs(zc - src.Zhub)))          # hub-height row
         y_abs = np.asarray(src.yloc)[:, kz] + src.pos[1]
         kw_line = np.interp(y_D * D, y_abs, kw[:, kz])
-        iu_add = 1.28 * np.sqrt(np.maximum(2.0 / 3.0 * kw_line, 0.0)) / U0
+        iu_add = IU_TO_TI_WAKE * np.sqrt(np.maximum(2.0 / 3.0 * kw_line, 0.0)) / U0
         out[:, i] = np.sqrt(i_amb ** 2 + iu_add ** 2)
     return out

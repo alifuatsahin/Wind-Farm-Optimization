@@ -1,5 +1,7 @@
 import jax.numpy as jnp
 
+from .utils import div_nu_grad
+
 
 def _lateral_bc(U, Uin):
     """Zero-gradient on the DEFICIT at the two lateral edges.
@@ -71,12 +73,13 @@ def advance_wake_field(data, dt, NuT, config, WV):
         The non-conservative form was carried as an option for one round of measurements and
         then removed: it changed the RANKING of the nu_T closures, not just their scores, so
         keeping it available only invited benchmarking on the wrong equation.
+
+        The STENCIL is utils.div_nu_grad, three-point and flux-form. It used to be
+        jnp.gradient applied twice, which is a 2h-lattice operator that damps the
+        grid-scale checkerboard mode exactly zero -- see the note on div_nu_grad.
         """
         dev = Ufield - Uin
-        qy = NuT * jnp.gradient(dev, yloc[:, 0], axis=0)
-        qz = NuT * jnp.gradient(dev, zloc[0, :], axis=1)
-        return (jnp.gradient(qy, yloc[:, 0], axis=0)
-                + jnp.gradient(qz, zloc[0, :], axis=1))
+        return div_nu_grad(NuT, dev, yloc[1, 0] - yloc[0, 0], zloc[0, 1] - zloc[0, 0])
 
     # assemble numerator
     numer = -V * dUdY - W * dUdZ + _diffusion(U)

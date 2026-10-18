@@ -44,6 +44,47 @@ def ambient_tke(I_amb, U0):
     return 1.5 * ((I_amb / IU_TO_TI) * U0) ** 2
 
 
+# ---------------------------------------------------------------------------------------
+# COMPACT cross-plane diffusion operators.
+#
+# jnp.gradient applied twice is NOT a usable second derivative here. Central-differencing
+# twice gives (f[i+2] - 2 f[i] + f[i-2]) / (4h^2) -- a stencil on the 2h lattice, which
+# decouples the odd and even sublattices. The grid-scale checkerboard mode is then damped
+# EXACTLY zero, so any checkerboard noise is free to grow. Measured on an alternating
+# field: the double-gradient operator returns 0 where the three-point operator below
+# returns -4/h^2, while the two agree to ~1% on smooth fields.
+#
+# With Du's nu_T, which is small and smooth, the mode never gets excited and the error is
+# invisible -- which is why this stood for so long. It is not invisible for a larger or
+# shear-peaked eddy viscosity. model_solver._lateral_bc already exists because the same
+# growing mode appeared at the lateral edges, where jnp.gradient falls back to one-sided
+# differences; this is the interior form of the same defect.
+#
+# Edge rows carry no diffusion. Of the four boundaries, three are already overwritten
+# after every step (the ground by a Dirichlet condition, the two lateral edges by
+# _lateral_bc), so only the top is affected.
+# ---------------------------------------------------------------------------------------
+
+def laplacian_compact(f, dy, dz):
+    """grad^2 f on the three-point stencil, non-conservative form."""
+    out = jnp.zeros_like(f)
+    out = out.at[1:-1, :].add((f[2:, :] - 2.0 * f[1:-1, :] + f[:-2, :]) / dy ** 2)
+    return out.at[:, 1:-1].add((f[:, 2:] - 2.0 * f[:, 1:-1] + f[:, :-2]) / dz ** 2)
+
+
+def div_nu_grad(nu, f, dy, dz):
+    """div(nu grad f) on the three-point stencil, in conservative flux form.
+
+    nu is evaluated at the cell faces as the arithmetic mean of its neighbours, so the
+    integrated flux telescopes and the scheme conserves exactly -- the property the
+    divergence form was adopted for (see model_solver.advance_wake_field._diffusion).
+    """
+    qy = 0.5 * (nu[:-1, :] + nu[1:, :]) * (f[1:, :] - f[:-1, :]) / dy
+    out = jnp.zeros_like(f).at[1:-1, :].add((qy[1:, :] - qy[:-1, :]) / dy)
+    qz = 0.5 * (nu[:, :-1] + nu[:, 1:]) * (f[:, 1:] - f[:, :-1]) / dz
+    return out.at[:, 1:-1].add((qz[:, 1:] - qz[:, :-1]) / dz)
+
+
 def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
     """One march step of Du et al. (2025) Eq (13), the wake-added TKE budget:
 
@@ -70,9 +111,8 @@ def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
     Uw = Uin - U
     dWdY, dWdZ = jnp.gradient(Uw, yloc[:, 0], zloc[0, :])
     prod = nu_t * (dWdY ** 2 + dWdZ ** 2)
-    d2y = jnp.gradient(jnp.gradient(kw, yloc[:, 0], axis=0), yloc[:, 0], axis=0)
-    d2z = jnp.gradient(jnp.gradient(kw, zloc[0, :], axis=1), zloc[0, :], axis=1)
-    rhs = nu_t * (d2y + d2z) - (nu_t / psi) * kw + prod
+    lap = laplacian_compact(kw, yloc[1, 0] - yloc[0, 0], zloc[0, 1] - zloc[0, 0])
+    rhs = nu_t * lap - (nu_t / psi) * kw + prod
     return jnp.maximum(kw + (dx / U0) * rhs, 0.0)
 
 

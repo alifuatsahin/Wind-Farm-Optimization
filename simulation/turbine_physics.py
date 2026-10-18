@@ -271,6 +271,12 @@ def simulate_vortex_field(params, local, seed=None, total_steps=1000):
 #: 1.7e-13. Irrelevant physically, but do not claim bit-identity from this constant.
 RAMP_REACH_D = 6.0
 
+#: Safety margin on the explicit cross-plane diffusion limit. The bound itself is exact
+#: for a pure diffusion step; the march also advects laterally by (V, W) and runs a
+#: predictor-corrector, neither of which the bound accounts for, so it is not a margin
+#: that can be set to 1.
+DIFFUSIVE_CFL = 0.9
+
 
 def axial_induction_ramped(Ct_eff, x_D):
     """Axial induction with the near-wake pressure-gradient development of Shapiro,
@@ -474,7 +480,21 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
             # NuT is a FIELD now, but the step must stay scalar, so the diffusive limit
             # is taken at its largest value on the plane. For a uniform NuT this is the
             # same number it always was.
-            dt = jnp.minimum(dt_cap, (dl ** 2) / (2 * (jnp.max(NuT) + 1e-6)))
+            #
+            # The limit is the TWO-dimensional one, 1/(2 nu (1/dy^2 + 1/dz^2)), with a
+            # safety factor. It used to be the one-dimensional dl^2/(2 nu), which on these
+            # grids (dz/dy = 1.02 for the wind tunnel) sits a factor 1.96 ABOVE the real
+            # bound.
+            #
+            # That was survivable only because the diffusion stencil was ALSO wrong: two
+            # applications of jnp.gradient is a 2h-lattice operator, whose own limit is
+            # ~4x looser, so the two errors covered for each other. They have to be fixed
+            # together -- the compact stencil of utils.div_nu_grad at the old dt diverges
+            # outright (LES R2 -77), and at exactly this bound with no margin it is only
+            # marginally stable (LES R2 0.78 against 0.93).
+            _dz = current.zloc[0, 1] - current.zloc[0, 0]
+            _inv2d = 1.0 / dl ** 2 + 1.0 / _dz ** 2
+            dt = jnp.minimum(dt_cap, DIFFUSIVE_CFL / (2.0 * (jnp.max(NuT) + 1e-6) * _inv2d))
 
             new = interpolate_vec_data(stacked, current.t + dt)
             U, X_new = advance_wake_field(current, dt, NuT, adapter, WV)
