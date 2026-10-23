@@ -271,6 +271,17 @@ def simulate_vortex_field(params, local, seed=None, total_steps=1000):
 #: 1.7e-13. Irrelevant physically, but do not claim bit-identity from this constant.
 RAMP_REACH_D = 6.0
 
+#: Rings used to take the azimuthal mean of the deficit that weights the ramp increment
+#: (see the ramp application in calculate_deficit_field). Quadrature resolution, NOT a
+#: model constant: over 12 / 24 / 48 the wind-tunnel R2 reads .9304 / .9304 / .9305,
+#: full-wake C .9523 / .9523 / .9525 and the deflection RMSE is identical to 3 decimals.
+RAMP_RINGS = 24
+
+#: Outer edge of the binned radius, in rotor radii. The mask is blurred over 3 cells so it
+#: reaches a little past R; everything beyond is clamped into the last ring, where the mask
+#: weight is already zero.
+RAMP_RING_RMAX = 1.25
+
 #: Safety margin on the explicit cross-plane diffusion limit. The bound itself is exact
 #: for a pure diffusion step; the march also advects laterally by (V, W) and runs a
 #: predictor-corrector, neither of which the bound accounts for, so it is not a margin
@@ -376,6 +387,7 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
     # test_completed_and_padded_rotors_are_inert_in_the_ramp_stack.
     n_slots = max(len(rotors) if n_slots is None else n_slots, len(rotors))
     rotor_mask = np.zeros((n_slots,) + yloc.shape)
+    rbin = np.zeros((n_slots,) + yloc.shape, dtype=np.int32)
     Ct_eff = np.zeros(n_slots)
     x_off = np.zeros(n_slots)
     for i, (p, dy, off) in enumerate(rotors):
@@ -386,6 +398,13 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
             continue
         rotor_mask[i] = np.asarray(smooth_2d(_disc_mask(yloc, zloc, p, dy).astype(float),
                                              kernel_size=3))
+        # Ring index on the SAME yaw-projected radius _disc_mask uses, so the rings follow
+        # the yawed disc. Used to take the azimuthal mean of the deficit about this rotor's
+        # own axis when the ramp increment is distributed.
+        _r_R = np.sqrt(((yloc + dy + p.Yoffset) ** 2) / (np.cos(p.beta) ** 2)
+                       + (zloc - p.Zhub) ** 2) / p.R
+        rbin[i] = np.clip((_r_R / RAMP_RING_RMAX * RAMP_RINGS).astype(np.int32),
+                          0, RAMP_RINGS - 1)
         Ct_eff[i] = _ct_eff(p)
         x_off[i] = off
 
@@ -413,7 +432,8 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
     adapter = DeficitFieldConfig(
         pos=jnp.asarray(params.pos), D=params.D, Uhub=local.Uhub, Uin=jnp.asarray(local.Uin), Zhub=params.Zhub,
         U0=float(nominal_hub_velocity(params)),
-        rotor_mask=jnp.asarray(rotor_mask), Ct_eff=jnp.asarray(Ct_eff),
+        rotor_mask=jnp.asarray(rotor_mask), rbin=jnp.asarray(rbin),
+        Ct_eff=jnp.asarray(Ct_eff),
         x_off=jnp.asarray(x_off),
         ti_in=jnp.asarray(ti_in),
     )
@@ -546,7 +566,54 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
             a_old = axial_induction_ramped(adapter.Ct_eff, age_old)
             a_new = axial_induction_ramped(adapter.Ct_eff, age_new)
             ramp = (1.0 - 2.0 * a_new) / jnp.maximum(1.0 - 2.0 * a_old, 1e-6)
-            U = U * (1.0 + jnp.tensordot(ramp - 1.0, adapter.rotor_mask, axes=1))
+            # WHERE the increment goes, radially. Shapiro's ramp is 1-D momentum theory,
+            # which fixes the DISC AVERAGE and leaves the radial distribution open; the
+            # streamtube expansion that theory also carries is already supplied here by
+            # continuity and (V, W), so the footprint stays the rotor disc at radius R.
+            # Widening it to R*sqrt((1-a)/(1-2a(x))) was tested and degrades all five
+            # datasets -- worst on the LES actuator disc, the rotor for which 1-D theory
+            # is most nearly exact -- because it decelerates ambient fluid in place that
+            # should merely have been displaced. T1's P/Pref falls 1.01 -> 0.85.
+            #
+            # Applied as a plain multiplier over the mask, the deficit maps as
+            # d <- (1 - f) + f*d with f = ramp: a UNIFORM pedestal, which re-flattens the
+            # profile as fast as diffusion rounds it and holds a super-Gaussian order of
+            # ~7 at 1D where both datasets measure ~2.3-2.5. That pedestal is the uniform
+            # -loading idealisation; real rotors are centre-peaked and actuator discs
+            # annular (measured at 0.5D, bay 1: WIRE-01 falls 0.818 -> 0.363 from axis to
+            # 0.43D, the LES disc RISES 0.332 -> 0.449).
+            #
+            # So weight the same increment by the wake's own deficit, azimuthally averaged
+            # about this rotor's axis. This is the radially varying a(r) that QBlade's DWM
+            # and FAST.Farm's curled-wake module both carry, with one departure: they read
+            # a(r) off blade-element data, which no spec sheet gives, so it is inferred
+            # from the wake instead. The azimuthal mean matters -- weighting by the local
+            # deficit instead biases the increment toward the side the wake has already
+            # deflected to and costs 0.030 D of deflection RMSE on full-wake A.
+            #
+            # Renormalised so sum(w) == sum(mask) per rotor, i.e. the increment is
+            # REDISTRIBUTED, not grown: that keeps the telescoping which makes a full
+            # segment compose to the correctly developed deficit (see age_old/age_new
+            # above). Note this conserves a footprint measure, not momentum flux.
+            #
+            # It is a trade, not a repair: the core deepens at the edge's expense, and the
+            # profile order is essentially unchanged. At 2D, r = 0.58D goes 0.102 against a
+            # measured 0.106 to 0.072, while the core gap at 3D falls 0.114 -> 0.084. Net
+            # +0.017/+0.019/+0.013 on full-wake C/A/B and +0.007 on the 8-turbine row,
+            # against -0.0025 on the LES -- the real rotors gain and the bare disc loses,
+            # which is the signature a blade-loading term should have.
+            _d = jnp.maximum(adapter.U0 - U, 0.0)
+            _m = adapter.rotor_mask
+
+            def _ring_mean(b, m):
+                num = jnp.zeros(RAMP_RINGS).at[b].add(m * _d)
+                den = jnp.zeros(RAMP_RINGS).at[b].add(m)
+                return (num / jnp.maximum(den, 1e-12))[b]
+
+            w = _m * jax.vmap(_ring_mean)(adapter.rbin, _m)
+            w = w * (_m.sum(axis=(1, 2), keepdims=True)
+                     / jnp.maximum(w.sum(axis=(1, 2), keepdims=True), 1e-12))
+            U = U * (1.0 + jnp.tensordot(ramp - 1.0, w, axes=1))
 
             new = dataclasses.replace(new, U=U, kw=kw_new, X=X_new, t=current.t + dt)
 

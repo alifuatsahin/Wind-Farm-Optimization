@@ -369,7 +369,12 @@ def test_grouping_tolerance_does_not_change_the_answer():
     # (see golden_row). +0.173%, and the grouped-vs-split agreement is 0.353%, unchanged
     # from the 0.357% this closure was recorded at -- the locality property this anchor
     # exists to protect is untouched by the operator change.
-    assert abs(grouped - 0.75872868698909457) / 0.75872868698909457 < 1e-9, (
+    # Re-recorded 2026-10-23 when the ramp increment went from a uniform pedestal over the
+    # rigid disc to the same increment weighted by the azimuthal mean of the wake deficit.
+    # +1.368%. The locality this anchor exists to protect is untouched: the closure still
+    # reads only local fields, and the weight is renormalised PER ROTOR over that rotor's
+    # own mask, so it cannot couple a rotor to the station grouping either.
+    assert abs(grouped - 0.76910753494860562) / 0.76910753494860562 < 1e-9, (
         f'the grouped branch itself moved: {grouped:.17g}; re-record only if this was '
         f'deliberate, since it is the reference the split branch is held to')
 
@@ -459,8 +464,26 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # that k_w reaches a velocity through ti_in at T3, hence a Uhub at T4. Both moves are
     # UPWARD, i.e. toward the measurement, and the grouped anchor above did not move at all
     # -- it is a 3-rotor case, and T1-T3 are exactly the rotors this cannot reach.
-    golden_row = [0.99693986652197308, 0.68731083792017822, 0.67713975094693701,
-                  0.66497546793678164, 0.65252419991295707]
+    # Re-recorded 2026-10-23 for a PHYSICS change, the first of these re-records that is:
+    # the ramp increment is no longer a uniform pedestal over the rigid disc but the same
+    # increment weighted by the azimuthal mean of the wake's own deficit, i.e. a radially
+    # varying a(r) inferred from the wake rather than from blade data. T2-T5 move
+    # +1.18/+3.22/+1.84/+1.32%, an order of magnitude larger than any discretisation
+    # re-record above, which is what a deliberate physics change should look like.
+    #
+    # T1 is BIT-IDENTICAL, and not only because an isolated rotor's Uhub cannot see its own
+    # wake: where the deficit is radially uniform inside the disc the weight reduces to the
+    # mask EXACTLY, since w = m*d*(sum m / sum m*d) = m when d is constant on the mask. The
+    # change is a strict generalisation that does nothing to a uniformly loaded wake and
+    # only acts once shear and diffusion have made the profile non-uniform -- which is also
+    # why it improves the three real-rotor datasets and costs the LES actuator disc 0.0025.
+    #
+    # All five moves are UPWARD, i.e. downstream rotors see faster flow. That is the
+    # narrower wake covering less of the disc Uhub averages over, and it is toward the
+    # measurement: the 8-turbine row's P/Pref goes 0.82 -> 0.89 at T2 and its R2
+    # 0.9235 -> 0.9304.
+    golden_row = [0.99693986652197308, 0.69543078734947095, 0.69891163461716455,
+                  0.67718093717192218, 0.66116241608926729]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):
