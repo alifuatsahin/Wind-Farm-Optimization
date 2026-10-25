@@ -482,8 +482,18 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # narrower wake covering less of the disc Uhub averages over, and it is toward the
     # measurement: the 8-turbine row's P/Pref goes 0.82 -> 0.89 at T2 and its R2
     # 0.9235 -> 0.9304.
-    golden_row = [0.99693986652197308, 0.69543078734947095, 0.69891163461716455,
-                  0.67718093717192218, 0.66116241608926729]
+    # Amended 2026-10-26 for the aerodynamic-yaw change: a waked rotor is now
+    # misaligned against the LOCAL flow, beta_aero = beta_geo - arctan(Vbar/Ubar),
+    # rather than against the tunnel axis. T1 and T2 are BIT-IDENTICAL -- T1 has no
+    # upstream wake and an aligned rotor's wake is laterally symmetric, so the
+    # disc-averaged V at T2 is exactly zero. T3-T5 move 5.9e-6 / 2.4e-5 / 2.6e-5,
+    # growing down the row: that is a small DISCRETISATION asymmetry in the lateral
+    # grid, which the correction now converts into a negligible aerodynamic one via
+    # cos^2(delta). It is 1e-5, far under any physical signal, but it does mean an
+    # aligned farm is no longer exactly laterally symmetric in its aerodynamics --
+    # worth watching if the lateral grid ever changes.
+    golden_row = [0.99693986652197308, 0.69543078734947095, 0.69891575982658105,
+                  0.67719689357280144, 0.6611792787328673]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):

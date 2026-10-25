@@ -17,6 +17,11 @@ class TurbineConfig:
     Cp: float
     yaw: float
     TSR: float
+    #: Rotor overhang (tower-to-rotor spacing) as a fraction of D. Per-turbine
+    #: geometry: Jonkman et al. (2009) Table 1-1 gives 5.0 m on the NREL 5 MW's
+    #: D = 126 m, i.e. 0.0397. The 0.2 default is the historical module constant and
+    #: is NOT sourced -- replace it per rotor from the spec sheet.
+    overhang_D: float = 0.2
 
 @dataclass
 class WindFarmConfig:
@@ -27,6 +32,7 @@ class WindFarmConfig:
     Cp: np.ndarray = field(default_factory=lambda: np.array([0.47]))  # Power coefficient(s)
     yaw: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))  # Yaw angle(s)
     TSR: np.ndarray = field(default_factory=lambda: np.array([7.02]))  # Tip speed ratio(s)
+    overhang_D: np.ndarray = field(default_factory=lambda: np.array([0.2]))  # Rotor overhang / D
 
     elevation_func: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = field(default=None, repr=False)
     grid: InitVar[tuple] = (1,3,5,5)  # Optional grid definition: (n_rows, n_cols, spacing_x, spacing_y); ignored if 'pos' is given
@@ -63,6 +69,7 @@ class WindFarmConfig:
         self.Cp   = np.asarray(self.Cp, dtype=float)
         self.yaw  = np.asarray(self.yaw, dtype=float)
         self.TSR  = np.asarray(self.TSR, dtype=float)
+        self.overhang_D = np.asarray(self.overhang_D, dtype=float)
 
         self._check_consistency()
 
@@ -73,6 +80,7 @@ class WindFarmConfig:
         self.Cp   = self._broadcast(self.Cp)
         self.yaw  = self._broadcast(self.yaw)
         self.TSR  = self._broadcast(self.TSR)
+        self.overhang_D = self._broadcast(self.overhang_D)
 
     def __len__(self) -> int:
         return self.pos.shape[0]
@@ -103,6 +111,7 @@ class WindFarmConfig:
             Cp = float(self._pick(self.Cp, idx)),
             yaw = float(self._pick(self.yaw, idx)),
             TSR = float(self._pick(self.TSR, idx)),
+            overhang_D = float(self._pick(self.overhang_D, idx)),
         )
     
     def _broadcast(self, arr):

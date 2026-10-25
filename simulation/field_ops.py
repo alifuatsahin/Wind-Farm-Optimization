@@ -98,6 +98,30 @@ def interpolate_local_velocity_field(turbine, X, yloc, zloc, default):
 
     return Uinterp, Uin_interp
 
+def interpolate_local_lateral_field(turbine, X, yloc, zloc):
+    """Interpolate the marched LATERAL velocity V at X onto a target grid, exactly as
+    interpolate_local_velocity_field does for U. A downstream rotor's aerodynamic yaw is
+    measured against the local flow direction, which an upstream steered wake has turned.
+    """
+    vortex_data_list = turbine.wake_field
+    positions = np.array([v.X for v in vortex_data_list])
+    source_yloc = turbine.yloc + turbine.pos[1]
+    source_zloc = turbine.zloc + turbine.pos[2]
+    zero = np.zeros_like(np.asarray(yloc, dtype=float))
+    if X <= positions[0]:
+        V = vortex_data_list[0].V
+    elif X >= positions[-1]:
+        V = vortex_data_list[-1].V
+    else:
+        idx = np.searchsorted(positions, X)
+        i0, i1 = idx - 1, idx
+        X0, X1 = positions[i0], positions[i1]
+        alpha = 0.0 if X1 == X0 else (X - X0) / (X1 - X0)
+        V = ((1 - alpha) * np.asarray(vortex_data_list[i0].V)
+             + alpha * np.asarray(vortex_data_list[i1].V))
+    return _interp_field(np.asarray(V), source_yloc, source_zloc, yloc, zloc, default=zero)
+
+
 def interpolate_vortex_field(turbine, target_pos, yloc, zloc, default):
     """Interpolate vortex field at position X from a list of VortexField objects."""
     vortex_data_list = turbine.wake_field

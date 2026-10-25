@@ -31,16 +31,39 @@ CT_YAW_EXP = 2.0
 #
 # A least-squares fit to that experiment gives 2.82, not 3, and the fit is marginally
 # better (sweep RMSE 0.0192 vs 0.0254). It is NOT used: a per-turbine parameter comes from
-# the spec sheet even at a cost in R2. The fit is also biased low, since that rig holds
-# RPM roughly constant under yaw, so its rotor runs 5-14% above baseline tip-speed ratio
-# and part of the measured loss is off-optimal operation rather than misalignment.
+# the spec sheet even at a cost in R2. That rig also holds RPM roughly constant under yaw,
+# so its rotor runs 5-14% above baseline tip-speed ratio and part of the measured loss is
+# off-optimal operation rather than misalignment -- which biases the fitted exponent HIGH,
+# since the extra loss makes the measured power fall faster than misalignment alone would.
+# The true misalignment exponent is therefore even further below 3, not nearer to it.
+# (This note previously said "biased low" and used that to support q = 3. The direction
+# was wrong; the conclusion survives on the evidence below instead.)
+#
+# NO FIXED EXPONENT FITS. On T1 of the full-wake sweep, which is unwaked so its power is
+# the rotor's own yaw response with no wake physics in the way, ln(P/P0)/ln(cos beta)
+# reads 1.68 / 1.93 / 2.06 / 2.39 / 2.42 / 2.65 / 2.81 / 2.82 at 5 to 40 deg. The exponent
+# climbs monotonically with angle, so any constant q is a compromise; 3 sits close across
+# the useful range and is universal rather than per-turbine. Lowering it to 2.82 does NOT
+# move the yaw optimum (verified exactly: Cp never enters the flow solution, so the whole
+# sweep rescales analytically), and 2.70, which does move it, is further from the 2.85 the
+# isolated rotor itself wants -- i.e. it would be buying the optimum by error cancellation.
+#
+# A DERIVED ALTERNATIVE WAS TESTED AND IS WORSE. Heck, Johlas & Howland (2023) JFM 959 A9
+# (arXiv:2209.00111) extend momentum theory to a yawed disk and give P_r(beta) in closed
+# form, Eqs (17)/(19) and the |v4|<<u4 forms (20)/(22), with no fitted constant; C_T' comes
+# from the spec-sheet C_T by C_T' = C_T/(1-a)^2 = 1.617. Against the measured T1 curve it
+# is 3.3-3.8x WORSE than cos^3 (RMSE 0.086 for the full Eq (15) system and 0.101 for the
+# simplified form, against 0.026), over-predicting by 0.186 of baseline power at 40 deg.
+# The cause is the premise the paper itself flags: it holds C_T' FIXED with yaw, whereas
+# this rig holds RPM fixed, so TSR rises and both Cp and C_T' fall. Note this makes the
+# comparison rig-specific: for a VARIABLE-SPEED rotor holding optimal TSR, cos^3 is exact
+# by construction and Heck's induction correction puts the truth ABOVE it, so Heck may be
+# the better model there. Neither dataset can settle that -- both tunnel cases are the same
+# fixed-RPM rig and the LES measures no power. See memory: heck-yawed-disc-rejected.
 #
 # Strictly this is per-turbine and belongs in TurbineConfig, not here. It is a module
 # constant only to mirror CT_YAW_EXP; move both together if a farm ever mixes rotors.
 CP_YAW_EXP = 3.0
-
-# Tower-to-rotor spacing as a fraction of D.
-L_NACELLE_D = 0.2
 
 
 @dataclass
@@ -66,10 +89,20 @@ class TurbineParams:
     dphi: float
     yloc: np.ndarray
     zloc: np.ndarray
+    #: Local inflow angle arctan(Vbar/Ubar) over this rotor's disc, radians. Set by
+    #: wake_solver from the field the station is handed; 0 for the first station.
+    skew: float = 0.0
 
     @property
     def beta(self):
         return np.deg2rad(self.yaw)
+
+    @property
+    def beta_aero(self):
+        """Misalignment against the LOCAL flow, which an upstream steered wake has
+        already turned by `skew`. The aerodynamics use this; the geometry (Yoffset,
+        the projected disc, the vortex ring) keeps the commanded `beta`."""
+        return self.beta - self.skew
 
     @property
     def R(self):
@@ -81,8 +114,17 @@ class TurbineParams:
         the rotor sits l_n downstream of the tower, so yawing swings it sideways by
         l_n*sin(beta). Used as the centre of both the top-hat mask and the vortex ring,
         each of which is placed at -Yoffset.
+
+        l_n is PER-TURBINE geometry and comes from TurbineConfig.overhang_D. It was a
+        module constant 0.2 with no citation, which for the NREL 5 MW implies a 25.2 m
+        overhang on a 126 m rotor; Jonkman et al. (2009) Table 1-1 gives 5.0 m, i.e.
+        0.0397 D. At beta = 25 deg the two place the carve and the vortex ring 0.068 D
+        apart -- nearly twice the case-A deflection RMSE -- and the spec value moves the
+        yawed LES R2 0.89640 -> 0.90556. The aligned cases are bit-identical, as they
+        must be: Yoffset ~ sin(beta). WIRE-01 keeps 0.2, which is equally uncited; 30 mm
+        on a 150 mm rotor is plausible for that rig but nobody has sourced it.
         """
-        return -L_NACELLE_D * self.D * np.sin(self.beta)
+        return -float(self.config.overhang_D) * self.D * np.sin(self.beta)
 
     @property
     def Ct_yawed(self):
@@ -96,7 +138,7 @@ class TurbineParams:
         Ct_eff = Ct*cos(beta), the combination that appears throughout the yawed-wake
         literature. Note Heck, Johlas & Howland (2023) JFM 959 argue no fixed cos^n is
         exact, since the induction itself depends on both yaw and Ct."""
-        return self.Ct_at(self.beta)
+        return self.Ct_at(self.beta_aero)
 
     def Ct_at(self, beta):
         """Ct at an ARBITRARY yaw. Everything that needs a yawed thrust coefficient goes
@@ -107,7 +149,10 @@ class TurbineParams:
 
     @property
     def a(self):
-        return self.a_at(self.beta)
+        # Numerator at the AERODYNAMIC angle, denominator the GEOMETRIC projected
+        # area -- the combination that keeps 2a*piR^2cos(beta_geo) = T/(rho U).
+        cb = np.cos(self.beta)
+        return (1 - np.sqrt(np.maximum(1 - self.Ct_yawed / cb, 0.0))) / 2
 
     def a_at(self, beta):
         """Axial induction factor, Zong & Porte-Agel (2020) Eq (3.3):
@@ -130,7 +175,7 @@ class TurbineParams:
 jax.tree_util.register_dataclass(
     TurbineParams,
     data_fields=["pos", "D", "Zhub", "yaw", "TSR", "Ct", "Cp", "Uh", "Zh", "WV",
-                 "phi", "dphi", "yloc", "zloc"],
+                 "phi", "dphi", "yloc", "zloc", "skew"],
     meta_fields=["config", "field_params", "Nv"],
 )
 

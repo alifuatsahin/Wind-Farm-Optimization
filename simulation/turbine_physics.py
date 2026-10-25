@@ -142,7 +142,7 @@ def compute_dgamma(params, Uhub):
     """
     gamma_ref = -compute_gamma0(params, Uhub) * GAMMA_TRAILING_K
 
-    shape_b = _shed_shape(params, Uhub, params.beta)
+    shape_b = _shed_shape(params, Uhub, params.beta_aero)
     shape_0 = _shed_shape(params, Uhub, 0.0)
     dgamma_b = gamma_ref / np.sum(shape_b) * shape_b
     dgamma_0 = gamma_ref / np.sum(shape_0) * shape_0
@@ -152,7 +152,7 @@ def compute_dgamma(params, Uhub):
     z_rel = params.R * np.sin(params.phi)
     M_yaw = float(np.sum(asym_yaw * z_rel))
     M_target = (0.5 * Uhub * (np.pi * params.D ** 2 / 4.0) * params.Ct
-                * np.sin(params.beta) * np.cos(params.beta) ** 2)
+                * np.sin(params.beta_aero) * np.cos(params.beta_aero) ** 2)
     if abs(M_yaw) > 1e-12:
         asym_yaw = asym_yaw * (M_target / M_yaw)
     return dgamma_0 + asym_yaw

@@ -11,7 +11,9 @@ import numpy as np
 import jax.numpy as jnp
 
 from .data_structures import VortexField
-from .field_ops import interpolate_local_velocity_field
+from .field_ops import (interpolate_local_velocity_field,
+                        interpolate_local_lateral_field)
+from .turbine_state import CP_YAW_EXP
 from . import turbine_physics as tp
 
 VOR_FULL, DEF_FULL = 1000, 1500     # scan lengths; see _march_segment
@@ -142,12 +144,35 @@ def solve_single_field(wf, verbose=False):
                 prev, lead.pos[0] - prev.pos[0],
                 lead.yloc + lead.pos[1], lead.zloc + lead.pos[2], Uin_global)
             U0 = np.asarray(Ud)
+        V0 = (np.zeros_like(U0) if prev is None else
+              np.asarray(interpolate_local_lateral_field(
+                  prev, lead.pos[0] - prev.pos[0],
+                  lead.yloc + lead.pos[1], lead.zloc + lead.pos[2])))
         zeros = np.zeros_like(U0)
         # k_w is marched like U, so it must be handed over like U. It is read at the SAME
         # frame the next station starts from, so production already deposited upstream is
         # carried rather than restarted -- which is what removes the need for any
         # superposition rule.
         kw0 = np.zeros_like(U0) if carried_kw is None else np.asarray(carried_kw)
+        # A rotor is misaligned relative to the flow it sits in, not to the tunnel axis,
+        # and a steered upstream wake has already turned that flow. delta is read from the
+        # field this station was HANDED, before any of its rotors shed, so there is no
+        # circularity. Only the AERODYNAMICS follow beta_aero; Yoffset, the projected disc
+        # and the vortex ring keep the commanded angle. See patch_skew2.py.
+        if prev is not None:
+            for t in group:
+                dy_s = lead.pos[1] - t.pos[1]
+                rmask_s = np.sqrt(((lead.yloc + dy_s + t.Yoffset) / np.cos(t.beta)) ** 2
+                                  + (lead.zloc - t.Zhub) ** 2) <= t.D / 2.0
+                if not rmask_s.any():
+                    continue
+                Ubar = float(np.mean(U0[rmask_s]))
+                Vbar = float(np.mean(V0[rmask_s]))
+                sk = float(np.arctan2(Vbar, max(Ubar, 1e-6)))
+                t._params = dataclasses.replace(
+                    t._params, skew=sk,
+                    Cp=float(t._params.config.Cp) * np.cos(t._params.beta - sk) ** CP_YAW_EXP)
+
         # every rotor at this station reads its own disc out of the same incoming field
         for t in group:
             dy = lead.pos[1] - t.pos[1]
