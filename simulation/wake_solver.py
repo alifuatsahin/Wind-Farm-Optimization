@@ -160,6 +160,9 @@ def solve_single_field(wf, verbose=False):
             rmask = np.sqrt(((lead.yloc + dy + t.Yoffset) / np.cos(t.beta)) ** 2
                             + (lead.zloc - t.Zhub) ** 2) <= t.D / 2.0
             t.Uhub = float(np.mean(U0[rmask]))
+            # Power is read from the CUBIC rotor-equivalent speed over the same disc
+            # (Zong Eq 4.11 / IEC REWS); the aerodynamics keep the arithmetic mean.
+            t.Uhub3 = tp.rotor_equivalent_cubic(U0, rmask)
             t.V, t.W = zeros, zeros  # upstream influence is explicit in the vortex cloud
 
         # ... and sheds its ring into the shared cloud, shifted into the lead's frame

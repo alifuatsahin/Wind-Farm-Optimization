@@ -28,6 +28,9 @@ class Turbine:
         self.W = local.W
         self.Uin = local.Uin
         self.Uhub = local.Uhub
+        # Cubic rotor-equivalent speed on the same disc; POWER reads this, the
+        # aerodynamics read Uhub. Set alongside Uhub by wake_solver each station.
+        self.Uhub3 = local.Uhub
 
     # --- config-fixed, read-only: single source of truth is self._params ---
     pos = property(lambda self: self._params.pos)
@@ -91,7 +94,7 @@ class Turbine:
         return tp.compute_dgamma(self._params, self.Uhub)
 
     def calculate_efficiency(self):
-        return tp.calculate_efficiency(self._params, self.Uhub)
+        return tp.calculate_efficiency(self._params, self.Uhub3)
 
     def simulate_vortex_field(self, seed=None, total_steps=1000):
         self.vortex_field = tp.simulate_vortex_field(self._params, self._current_local(),

@@ -96,14 +96,18 @@ def measured_power(yaw):
 
 
 def model_power(wind_farm):
-    """Per-rotor power in the model's own terms: P ~ Cp(beta) * Uhub^3.
+    """Per-rotor power in the model's own terms: P ~ Cp(beta) * Uhub3^3.
 
     params.Cp already carries the cos^CP_YAW_EXP yaw factor, so this is the same quantity the
     objective maximises -- not the hub-height line proxy compute_power_metrics builds for
     datasets that do not measure power. Only ratios are compared, so the omitted
     0.5*rho*A cancels.
+
+    Uhub3 is the CUBIC rotor-equivalent speed, Zong Eq (4.11)'s disc integral of U^3,
+    NOT the arithmetic disc mean -- see turbine_physics.rotor_equivalent_cubic for why
+    the distinction matters most at the partial wake overlap a steering optimum sits in.
     """
-    return np.array([t.Cp * t.Uhub ** 3 for t in wind_farm.turbines])
+    return np.array([t.Cp * t.Uhub3 ** 3 for t in wind_farm.turbines])
 
 
 def run_fullwake_case(yaw, i_amb=I_AMB, n_grids=20, x_D_max=15.0, y_D_halfwidth=2.1,

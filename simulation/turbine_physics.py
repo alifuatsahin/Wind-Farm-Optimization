@@ -20,13 +20,46 @@ def init_Uin(params):
     return Uin
 
 
+def rotor_disc_mask(params):
+    """The yaw-projected rotor disc, shifted by Yoffset -- the one disc every rotor-average
+    in the model is taken over. Matches wake_solver's own rmask exactly."""
+    r2 = (((params.yloc + params.Yoffset) ** 2) / (np.cos(params.beta) ** 2)
+          + (params.zloc - params.Zhub) ** 2)
+    return np.sqrt(r2) <= params.R
+
+
+def rotor_equivalent_cubic(U, mask):
+    """Cubic rotor-equivalent wind speed, (<U^3>)^(1/3) over the disc.
+
+    This is the speed POWER must be read from. Zong & Porte-Agel (2020) Eq (4.11) defines
+    available power as the disc integral of U^3, and the IEC rotor-equivalent wind speed
+    for a sheared or partially waked inflow is the same cubic mean. The arithmetic mean
+    <U> is what the AERODYNAMICS use (induction, circulation, Omega, nu_T) and is left
+    alone -- only the power functional changes.
+
+    Why it matters: by Jensen <U^3> >= <U>^3, with the gap growing as the VARIANCE of U
+    across the disc, which is maximal at PARTIAL WAKE OVERLAP -- exactly the yaw range
+    where a steering optimum sits. Measured on full-wake case C along the gamma_2 = +15
+    ridge the gap is 4.0% at gamma_1 = 0 rising to 6.4% at +15/+20 for T2, and rises
+    monotonically for T3 (1.9% -> 4.2% over 0 -> +30), so the farm total is corrected
+    by 1.4% at zero yaw and 3.0% at +30 -- i.e. <U>^3 systematically UNDER-REWARDS yaw.
+    It is a real bias in the right direction but only ~10-15% of the sweep's slope error;
+    it flattens the ridge without moving the argmax. Fixed because it is correct and free,
+    not because it resolves the optimum."""
+    u = np.asarray(U)[mask]
+    return float(np.mean(u ** 3) ** (1.0 / 3.0))
+
+
 def nominal_hub_velocity(params):
     """Rotor-averaged undisturbed inflow -- depends only on config, never on the mutated Uin.
     """
     Uin = init_Uin(params)
-    r2 = (((params.yloc + params.Yoffset) ** 2) / (np.cos(params.beta) ** 2)
-          + (params.zloc - params.Zhub) ** 2)
-    return float(np.mean(Uin[np.sqrt(r2) <= params.R]))
+    return float(np.mean(Uin[rotor_disc_mask(params)]))
+
+
+def nominal_hub_velocity_cubic(params):
+    """nominal_hub_velocity's cubic counterpart, the reference for the power ratio."""
+    return rotor_equivalent_cubic(init_Uin(params), rotor_disc_mask(params))
 
 
 def init_local_conditions(params):
@@ -125,9 +158,16 @@ def compute_dgamma(params, Uhub):
     return dgamma_0 + asym_yaw
 
 
-def calculate_efficiency(params, Uhub):
-    P = (Uhub ** 3) * params.Cp
-    nominal_P = (nominal_hub_velocity(params) ** 3) * params.config.Cp
+def calculate_efficiency(params, Uhub3):
+    """Power ratio against the same rotor in undisturbed inflow.
+
+    `Uhub3` is the CUBIC rotor-equivalent speed, not the arithmetic Uhub -- see
+    rotor_equivalent_cubic. Both sides of the ratio use the same convention, so an
+    isolated rotor still returns exactly Cp(beta)/Cp(0): the yawed disc is the unyawed
+    one scaled by cos(beta) in y only, which leaves the z-weighting of the log profile
+    unchanged, and Yoffset is a pure y shift."""
+    P = (Uhub3 ** 3) * params.Cp
+    nominal_P = (nominal_hub_velocity_cubic(params) ** 3) * params.config.Cp
     return P / nominal_P
 
 
