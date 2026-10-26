@@ -112,9 +112,18 @@ def model_power(wind_farm):
 
 def run_fullwake_case(yaw, i_amb=I_AMB, n_grids=20, x_D_max=15.0, y_D_halfwidth=2.1,
                       **field_kw):
-    """Three-turbine row at the measured spacing. Deliberately does NOT pass
-    vortex_nu='abl': that form is built on u* and z0 and belongs to the atmospheric cases,
-    while this is a wind tunnel, so the default (Squire) applies as for the other rig.
+    """Three-turbine row at the measured spacing.
+
+    Runs the SHAPIRO ABL vortex viscosity, which is FieldConfig's default. This docstring
+    used to claim the opposite -- "deliberately does NOT pass vortex_nu='abl' ... so the
+    default (Squire) applies" -- but `vortex_nu` defaults to 'abl' (config.py) and
+    turbine_physics.vortex_adapter switches to Squire only on an explicit 'squire', so the
+    ABL form is what has always run here, on both wind-tunnel rigs. The CODE was right and
+    the comment was wrong: 'abl' is the adopted closure (it wins on deflection and field;
+    see memory shapiro-abl-vortex-viscosity), and its u*/z0 scaling is as valid in a
+    tunnel boundary layer as in an atmospheric one -- Zong & Porte-Agel (2020) Sec 2 fit
+    u* = 0.22 m/s and z0 = 0.7 mm for this very rig. Pass vortex_nu='squire' for the
+    ablation.
 
     `field_kw` goes straight to FieldConfig, for sweeping things like merge_threshold."""
     wf = WindFarmConfig(

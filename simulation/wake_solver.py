@@ -14,6 +14,7 @@ from .data_structures import VortexField
 from .field_ops import (interpolate_local_velocity_field,
                         interpolate_local_lateral_field)
 from .turbine_state import CP_YAW_EXP
+from .utils import DU_KV0, DU_KV1, IU_TO_TI
 from . import turbine_physics as tp
 
 VOR_FULL, DEF_FULL = 1000, 1500     # scan lengths; see _march_segment
@@ -76,6 +77,39 @@ def _march_segment(t, seed, need_m, U0, Uin_global, companions=(),
                            f"{float(t.wake_field[-1].X):.1f} m of {need_m:.1f} m")
 
 
+def _assert_turbulence_admissible(field_params):
+    """Refuse an ambient TI the closure cannot diffuse at, instead of marching to garbage.
+
+    Du Eq (26) carries the prefactor max(kv1*TI - kv0, 0), which is EXACTLY ZERO at and
+    below TI = kv0/kv1 = 0.02, i.e. I_amb <= 0.0256. The deficit then has no turbulent
+    diffusion at all, and nothing damps the central-differenced cross-plane advection:
+    measured on a 2-rotor farm at 25 deg of yaw, the field reaches U = -17.7 m/s while
+    the waked rotor still reports a perfectly plausible Uhub/Uh = 0.747. Silent, and the
+    sign of the error is invisible in any aggregate.
+
+    Unyawed it happens to stay bounded, because (V, W) is small -- so this cannot be left
+    to chance on the yaw angle. test_wide_farm_marches_without_diverging asserts the
+    bound but has never swept I_amb.
+
+    Raising rather than flooring nu_t is deliberate: a floor is a fitted constant, and it
+    would paper over a regime Eq (26) genuinely does not model. Du calibrated it over
+    TI = 0.041-0.071 and it is already an extrapolation at our 0.13; below 0.02 it does
+    not merely extrapolate, it returns zero. Note the approach to the cliff is steep --
+    nu_t at I_amb = 0.03 is an order of magnitude below its value at 0.077 -- so a run
+    just above the threshold is weakly damped rather than safe.
+    """
+    ti = float(field_params.I_amb) / IU_TO_TI
+    ti_min = DU_KV0 / DU_KV1
+    if ti <= ti_min:
+        raise ValueError(
+            f"I_amb = {field_params.I_amb:.4f} gives ambient TI = {ti:.4f}, at or below "
+            f"the TI = {ti_min:.3f} (I_amb = {ti_min * IU_TO_TI:.4f}) where Du Eq (26) "
+            f"returns exactly zero eddy viscosity. The deficit march has no diffusion to "
+            f"damp its cross-plane advection there and diverges silently. Raise I_amb "
+            f"above {ti_min * IU_TO_TI:.4f}, or use a closure valid at low ambient "
+            f"turbulence -- this one is calibrated over TI = 0.041-0.071.")
+
+
 def _assert_shared_grid(ts):
     """Every rotor must sit on one absolute cross-plane grid.
 
@@ -123,6 +157,7 @@ def _x_stations(ts, tol):
 def solve_single_field(wf, verbose=False):
     """March one field and one vortex cloud through the farm, station by station."""
     ts = wf.turbines
+    _assert_turbulence_admissible(wf.field_params)
     _assert_shared_grid(ts)
     stations = _x_stations(ts, X_STATION_TOL_D * ts[0].D) if ts else []
     prev, carried_vortex, carried_kw = None, None, None

@@ -526,6 +526,48 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
             f'5D row T{i+1} moved: {got:.17g} vs golden {ref:.17g}')
 
 
+def test_low_ambient_turbulence_is_refused_not_silently_diverged():
+    """Below Du Eq (26)'s zero-crossing the march must RAISE, not return a plausible number.
+
+    Eq (26) carries max(kv1*TI - kv0, 0), exactly zero at TI <= kv0/kv1 = 0.02, i.e.
+    I_amb <= 0.0256. With no eddy viscosity nothing damps the central-differenced
+    cross-plane advection and the field runs to U ~ -18 m/s while the waked rotor still
+    reports Uhub/Uh ~ 0.75.
+
+    The divergence needs CROSS-FLOW, so this yaws the rotor. Unyawed it stays bounded,
+    which is why test_wide_farm_marches_without_diverging never caught it -- that test
+    asserts the right bound but has never swept I_amb.
+    """
+    from simulation.utils import DU_KV0, DU_KV1, IU_TO_TI
+
+    i_amb_cliff = (DU_KV0 / DU_KV1) * IU_TO_TI
+
+    def _run(i_amb):
+        wf = WindFarmConfig(grid=(1, 2, 6.0, 6.0), D=np.array([80.0]),
+                            Zhub=np.array([70.0]), Ct=np.array([0.8]),
+                            Cp=np.array([0.47]), yaw=np.array([25.0]),
+                            TSR=np.array([7.0]), dist_type='D')
+        fc = FieldConfig(Uh=8.0, Zh=70.0, z0=70.0 * 3.3e-4, I_amb=i_amb, min_X=6.0,
+                         max_Y=2.0, max_Z=1.5, n_grids=12)
+        sim = Simulation(Config(WindFarm=wf, Field=fc, run_prefix='_test_ti'))
+        sim.run()
+        return sim
+
+    for i_amb in (0.0, 0.02, i_amb_cliff):
+        try:
+            _run(i_amb)
+            raise AssertionError(
+                f'I_amb = {i_amb:.4f} gives zero eddy viscosity and must be refused')
+        except ValueError:
+            pass
+
+    sim = _run(i_amb_cliff * 1.2)   # just above the cliff: must run, and stay bounded
+    lo = min(float(np.nanmin(np.asarray(fr.U)))
+             for t in sim.wind_farm.turbines for fr in t.wake_field
+             if np.asarray(fr.U).size)
+    assert lo > -1e-6, f'march went negative just above the cliff: min U = {lo}'
+
+
 def test_nacelle_is_absent_by_default_and_central_when_present():
     """The nacelle disc must be OFF unless a rotor is given one, and act on the centreline.
 

@@ -8,7 +8,8 @@ from jax import lax
 from jax.scipy.special import erf as jerf
 
 from .turbine_state import LocalConditions, VortexSimConfig, DeficitFieldConfig
-from .utils import smooth_2d, du_nu_t, advance_kw, velocity_floor, du_eps_coef
+from .utils import (smooth_2d, du_nu_t, advance_kw, velocity_floor, du_eps_coef,
+                    IU_TO_TI)
 from .vortex_model import _simulate_vortex_evolution_jit, _UNSTACKED
 from .model_solver import advance_wake_field, representative_velocity
 from .field_ops import interpolate_vec_data
@@ -515,7 +516,7 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
     #
     # Zero added TKE at the first rotor, so TI_in = ambient there -- Du's calibration condition.
     _U0 = float(nominal_hub_velocity(params))
-    _kB = 1.5 * ((params.field_params.I_amb / 1.28) * _U0) ** 2
+    _kB = 1.5 * ((params.field_params.I_amb / IU_TO_TI) * _U0) ** 2
     _kw_seed = np.asarray(stacked.kw)
     if _kw_seed.ndim == 3:
         _kw_seed = _kw_seed[0]
