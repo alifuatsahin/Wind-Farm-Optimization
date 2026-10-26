@@ -198,7 +198,7 @@ def squire_nu(params, Uhub):
     Squire (1965) scaling, in which the vortex is diffused by the turbulence it generates
     itself. Superseded by abl_nu_slope; retained only so the ablation in the paper can be
     reproduced without editing the model."""
-    return 0.005 * abs(compute_gamma0(params, Uhub) * 0.45)
+    return 0.005 * abs(compute_gamma0(params, Uhub) * GAMMA_TRAILING_K)
 
 
 def vortex_adapter(params, local):
@@ -342,6 +342,10 @@ RAMP_RING_RMAX = 1.25
 #: that can be set to 1.
 DIFFUSIVE_CFL = 0.9
 
+#: Bluff-body drag coefficient for the nacelle disc. 1.0 is the textbook value for a
+#: short cylinder/disc at these Reynolds numbers; it is not fitted.
+NACELLE_CD = 1.0
+
 
 def axial_induction_ramped(Ct_eff, x_D):
     """Axial induction with the near-wake pressure-gradient development of Shapiro,
@@ -384,15 +388,19 @@ def _frame(stacked, i, unstacked=_UNSTACKED_MEMBERS):
     return dataclasses.replace(stacked, **sliced)
 
 
-def _disc_mask(yloc, zloc, p, dy):
+def _disc_mask(yloc, zloc, p, dy, radius=None):
     """Rotor p's disc on a grid whose local y is offset from p's own by `dy`.
 
     Every turbine shares one absolute cross-plane grid, but `yloc` is stored local to
     each rotor, so a companion rotor at the same station sits at yloc + dy where
     dy = lead.pos[1] - p.pos[1].
+
+    `radius` defaults to the rotor radius; the nacelle disc passes its own, so that both
+    bodies are projected by the same cos(beta) foreshortening and centred on the same
+    overhang-corrected axis rather than repeating the geometry.
     """
     r2 = ((yloc + dy + p.Yoffset) ** 2) / (np.cos(p.beta) ** 2) + (zloc - p.Zhub) ** 2
-    return np.sqrt(r2) <= p.R
+    return np.sqrt(r2) <= (p.R if radius is None else radius)
 
 
 def initialize_wake_field(params, stacked, local, companions=(), kw0=None):
@@ -410,6 +418,38 @@ def initialize_wake_field(params, stacked, local, companions=(), kw0=None):
         mask = _disc_mask(yloc, zloc, p, dy)
         a0 = float(0.5 * (1.0 - np.sqrt(max(1.0 - _ct_eff(p) * 0.5, 0.0))))  # erf(0) = 0
         U[mask] -= 2.0 * U[mask] * a0
+
+    # THE NACELLE AS A SECOND, CO-LOCATED ACTUATOR DISC.
+    #
+    # Real rotors overshoot momentum theory's 2a by 33-36% at the wake centre; actuator
+    # discs overshoot by 3-13%. The excess is central, confined to x < ~2.2 D, and absent
+    # from the ADM cases, so it is a central body -- nacelle and hub -- and not pressure
+    # recovery, which is already the erf ramp. Measured on the 8-turbine rig at hub height,
+    # the bay-1 error is +0.138 in |y| < 0.10 D and +0.010 by |y| = 0.25-0.45 D: it lives
+    # almost entirely on the centreline.
+    #
+    # Sized as a DISC, not as a momentum-conserving blob. Setting the carve from the
+    # far-wake integral int Uw dA = 0.5 Cd A_n U spreads the body's momentum over the width
+    # it eventually reaches, so it closes only 1.6% of the depth gap at the rotor.
+    # Immediately behind a bluff body the flow is near stagnation over the body's own
+    # frontal area, so the body is a second actuator disc of thrust coefficient Cd:
+    #
+    #     a_n = (1 - sqrt(1 - Cd)) / 2,   Cd = 1  ->  a_n = 0.5, full stagnation
+    #
+    # and it takes NO erf ramp -- a bluff-body wake is established AT the body, unlike a
+    # rotor's, whose ramp IS the pressure recovery.
+    #
+    # NOTHING IS FITTED. nacelle_D is per-turbine hardware (Zong Sec 2: the WIRE-01 nacelle
+    # is a Maxon DCX10L, 10 mm on 150 mm, so 0.0667) and Cd ~ 1 is the textbook bluff-body
+    # value. It is ZERO for actuator-disc cases, which is the discrimination the term
+    # passes: all three real-rotor datasets improve and both ADM datasets degrade.
+    a_n = 0.5 * (1.0 - np.sqrt(max(1.0 - NACELLE_CD, 0.0)))
+    for p, dy in ((params, 0.0),) + tuple(companions):
+        d_n = float(getattr(p.config, 'nacelle_D', 0.0) or 0.0)
+        if d_n <= 0.0:
+            continue
+        mask_n = _disc_mask(yloc, zloc, p, dy, radius=0.5 * d_n * p.D)
+        U[mask_n] -= 2.0 * U[mask_n] * a_n
 
     U_smooth = Uin - smooth_2d(Uin - U, kernel_size=3)
 

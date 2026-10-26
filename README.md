@@ -185,6 +185,29 @@ wf_config = WindFarmConfig(
 )
 ```
 
+#### Per-turbine hardware
+
+Two optional per-rotor fields describe the machine rather than its operating point. Both
+come from a spec sheet, and both are arrays of length 1 (applied to every rotor) or length
+N (one value per rotor) — a mismatched length is rejected rather than silently tiled.
+
+```python
+wf_config = WindFarmConfig(
+    grid=(1, 3, 5, 5),
+    D=np.array([126.0]),
+    overhang_D=np.array([5.0 / 126.0]),   # rotor overhang / D; NREL 5MW Table 1-1
+    nacelle_D=np.array([0.0]),            # nacelle diameter / D
+)
+```
+
+- `overhang_D` — distance from the tower axis to the rotor plane, over D. It shifts the
+  yawed carve and the vortex ring, so a wrong value displaces a yawed wake.
+- `nacelle_D` — nacelle/hub diameter over D, modelled as a second actuator disc co-located
+  with the rotor centre. **Leave it at the 0.0 default for an actuator-disc simulation**,
+  which has no central body: the term is justified by improving every real-rotor dataset
+  while degrading both actuator-disc ones, and giving an ADM a nacelle invalidates that.
+  For the WIRE-01 miniature rotor it is 10 mm on 150 mm, i.e. `10.0 / 150.0`.
+
 ### Field Parameters
 
 ```python

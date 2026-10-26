@@ -526,6 +526,67 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
             f'5D row T{i+1} moved: {got:.17g} vs golden {ref:.17g}')
 
 
+def test_nacelle_is_absent_by_default_and_central_when_present():
+    """The nacelle disc must be OFF unless a rotor is given one, and act on the centreline.
+
+    The term earns its place by a discrimination test: all three real-rotor datasets
+    improve and both actuator-disc datasets degrade. That argument collapses if an
+    actuator disc ever silently acquires a nacelle, so the default must be zero and the
+    plumbing must carry a per-rotor value without tiling it onto rotors that have none.
+
+    Three things are checked: the default is 0.0 and inert, a mismatched array is
+    REJECTED rather than tiled (config._check_consistency), and a real nacelle deepens
+    the core while leaving the outer wake alone.
+    """
+    from config import TurbineConfig
+    import simulation.turbine_physics as tp
+
+    assert TurbineConfig.nacelle_D == 0.0, 'a rotor must not get a body by default'
+
+    pos = np.array([[0.0, 0.0, 0.0], [6.0, 0.0, 0.0], [12.0, 0.0, 0.0]])
+    try:
+        WindFarmConfig(pos=pos, D=np.array([126.0]), nacelle_D=np.array([0.0667, 0.0]),
+                       dist_type='D')
+        raise AssertionError('a length-2 nacelle_D on a 3-rotor farm must raise, not tile')
+    except ValueError:
+        pass
+
+    wf = WindFarmConfig(pos=pos, D=np.array([126.0]), nacelle_D=np.array([0.05, 0.0, 0.1]),
+                        dist_type='D')
+    got = [wf[i].nacelle_D for i in range(3)]
+    assert got == [0.05, 0.0, 0.1], f'nacelle_D did not reach TurbineConfig per rotor: {got}'
+
+    # a_n = (1 - sqrt(1 - Cd))/2 is full stagnation at the textbook Cd = 1
+    a_n = 0.5 * (1.0 - np.sqrt(max(1.0 - tp.NACELLE_CD, 0.0)))
+    assert abs(a_n - 0.5) < 1e-12, f'Cd = 1 must give full stagnation, got a_n = {a_n}'
+
+    def _core_and_edge(d_n):
+        wf = WindFarmConfig(grid=(1, 1, 6.0, 6.0), D=np.array([0.15]),
+                            Zhub=np.array([0.125]), Ct=np.array([0.8]), Cp=np.array([0.47]),
+                            yaw=np.array([0.0]), TSR=np.array([7.0]),
+                            nacelle_D=np.array([d_n]), dist_type='D')
+        fc = FieldConfig(Uh=5.0, Zh=0.125, z0=0.125 * 3.3e-4, I_amb=0.08, min_X=3.0,
+                         max_Y=2.0, max_Z=1.5, n_grids=28)
+        sim = Simulation(Config(WindFarm=wf, Field=fc, run_prefix='_test_nac'))
+        sim.run()
+        t = sim.wind_farm.turbines[0]
+        fr = t.wake_field[min(3, len(t.wake_field) - 1)]
+        y, z = np.asarray(t.yloc), np.asarray(t.zloc)
+        U = np.asarray(fr.U) / float(t.Uhub)
+        core = (np.abs(y) <= 0.10 * t.D) & (np.abs(z - t.Zhub) <= 0.10 * t.D)
+        edge = (np.abs(y) >= 0.30 * t.D) & (np.abs(y) <= 0.45 * t.D) \
+            & (np.abs(z - t.Zhub) <= 0.10 * t.D)
+        return float(U[core].mean()), float(U[edge].mean())
+
+    off_core, off_edge = _core_and_edge(0.0)
+    on_core, on_edge = _core_and_edge(10.0 / 150.0)
+    assert on_core < off_core - 1e-6, (
+        f'a nacelle must deepen the core: {on_core:.6f} vs {off_core:.6f}')
+    assert abs(on_edge - off_edge) < abs(off_core - on_core), (
+        f'the nacelle must act centrally: edge moved {abs(on_edge-off_edge):.6f}, '
+        f'core moved {abs(off_core-on_core):.6f}')
+
+
 if __name__ == '__main__':
     failures = 0
     for name, fn in sorted((k, v) for k, v in list(globals().items())

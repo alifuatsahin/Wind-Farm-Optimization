@@ -120,7 +120,9 @@ def run_fullwake_case(yaw, i_amb=I_AMB, n_grids=20, x_D_max=15.0, y_D_halfwidth=
     wf = WindFarmConfig(
         pos=np.array([[xd * D, 0.0, 0.0] for xd in POSITIONS_D], dtype=float),
         D=np.array([D]), Zhub=np.array([ZHUB]), Ct=np.array([CT]), Cp=np.array([CP]),
-        yaw=np.array(yaw, dtype=float), TSR=np.array([TSR]), dist_type='m',
+        yaw=np.array(yaw, dtype=float), TSR=np.array([TSR]),
+        nacelle_D=np.array([10.0 / 150.0]),  # WIRE-01 Maxon DCX10L, Zong Sec 2
+        dist_type='m',
     )
     field = FieldConfig(
         Uh=UH, Zh=ZHUB, I_amb=i_amb, z0=Z0,

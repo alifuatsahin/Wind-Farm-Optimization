@@ -18,7 +18,7 @@ from botorch.acquisition import qExpectedImprovement
 from botorch.optim import optimize_acqf
 
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 from copy import deepcopy
 
 from simulation import Simulation

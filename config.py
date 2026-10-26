@@ -22,6 +22,12 @@ class TurbineConfig:
     #: D = 126 m, i.e. 0.0397. The 0.2 default is the historical module constant and
     #: is NOT sourced -- replace it per rotor from the spec sheet.
     overhang_D: float = 0.2
+    #: Nacelle/hub diameter as a fraction of D, for the co-located bluff-body disc.
+    #: Per-turbine HARDWARE, and it must be ZERO for an actuator-disc simulation, which
+    #: has no central body at all -- that is the discrimination the term passes. Zong &
+    #: Porte-Agel (2020) Sec 2 gives the WIRE-01 nacelle as a Maxon DCX10L, 10 mm on a
+    #: 150 mm rotor, i.e. 0.0667. Default 0.0 so nothing gets a body it does not have.
+    nacelle_D: float = 0.0
 
 @dataclass
 class WindFarmConfig:
@@ -30,9 +36,14 @@ class WindFarmConfig:
     Zhub: np.ndarray = field(default_factory=lambda: np.array([90.0]))  # Hub height(s)
     Ct: np.ndarray = field(default_factory=lambda: np.array([0.8]))  # Thrust coefficient(s)
     Cp: np.ndarray = field(default_factory=lambda: np.array([0.47]))  # Power coefficient(s)
-    yaw: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))  # Yaw angle(s)
+    # Length 1 so it broadcasts to ANY farm size. It used to be np.array([0.0, 0.0, 0.0]),
+    # which made a 1- or 2-turbine farm built from `pos` raise outright ("Cannot broadcast
+    # array of size 3 to size 2") unless the caller passed yaw explicitly. For a 3-rotor
+    # farm, the default grid, this broadcasts to the same [0, 0, 0] as before.
+    yaw: np.ndarray = field(default_factory=lambda: np.array([0.0]))  # Yaw angle(s)
     TSR: np.ndarray = field(default_factory=lambda: np.array([7.02]))  # Tip speed ratio(s)
     overhang_D: np.ndarray = field(default_factory=lambda: np.array([0.2]))  # Rotor overhang / D
+    nacelle_D: np.ndarray = field(default_factory=lambda: np.array([0.0]))  # Nacelle diameter / D
 
     elevation_func: Optional[Callable[[np.ndarray, np.ndarray], np.ndarray]] = field(default=None, repr=False)
     grid: InitVar[tuple] = (1,3,5,5)  # Optional grid definition: (n_rows, n_cols, spacing_x, spacing_y); ignored if 'pos' is given
@@ -70,6 +81,7 @@ class WindFarmConfig:
         self.yaw  = np.asarray(self.yaw, dtype=float)
         self.TSR  = np.asarray(self.TSR, dtype=float)
         self.overhang_D = np.asarray(self.overhang_D, dtype=float)
+        self.nacelle_D = np.asarray(self.nacelle_D, dtype=float)
 
         self._check_consistency()
 
@@ -81,6 +93,7 @@ class WindFarmConfig:
         self.yaw  = self._broadcast(self.yaw)
         self.TSR  = self._broadcast(self.TSR)
         self.overhang_D = self._broadcast(self.overhang_D)
+        self.nacelle_D = self._broadcast(self.nacelle_D)
 
     def __len__(self) -> int:
         return self.pos.shape[0]
@@ -112,17 +125,23 @@ class WindFarmConfig:
             yaw = float(self._pick(self.yaw, idx)),
             TSR = float(self._pick(self.TSR, idx)),
             overhang_D = float(self._pick(self.overhang_D, idx)),
+            nacelle_D = float(self._pick(self.nacelle_D, idx)),
         )
     
     def _broadcast(self, arr):
+        """Expand a length-1 array to one value per turbine; pass length-n through.
+
+        Every per-turbine field is validated against len(pos) by _check_consistency
+        first, so only those two cases can reach here. There used to be a third branch
+        that TILED a short array (`[a, b]` -> `[a, b, a]`) behind a printed warning,
+        which silently gave the third rotor the first one's hardware; the check now
+        rejects that instead, so the branch is gone rather than merely unreachable.
+        """
         a = np.asarray(arr)
         n = len(self)
         if len(a) == 1:
             return np.full(n, a[0])
-        elif len(a) < n:
-            print(f"WARNING: Broadcasting array of size {a.size} to size {n}.")
-            return np.tile(a, (n // len(a) + 1))[:n]
-        elif len(a) == n:
+        if len(a) == n:
             return a
         raise ValueError(f"Cannot broadcast array of size {a.size} to size {n}.")
 
@@ -130,9 +149,25 @@ class WindFarmConfig:
         if self.pos.ndim != 2 or self.pos.shape[1] != 3:
             raise ValueError(f"Inconsistent shape for 'pos': {self.pos.shape}, expected (N, 3).")
         
-        lengths = [len(self.D), len(self.Zhub), len(self.Ct), len(self.Cp), len(self.yaw), len(self.TSR)]
-        max_len = max(lengths)
-        for name, length in zip(['D', 'Zhub', 'Ct', 'Cp', 'yaw', 'TSR'], lengths):
+        # overhang_D and nacelle_D are checked too: both are per-turbine HARDWARE, and
+        # _broadcast TILES a short array behind nothing but a printed warning. For
+        # nacelle_D that is a trap -- it must be exactly zero for an actuator-disc rotor
+        # (see the nacelle carve in turbine_physics), and a length-2 array on a 3-rotor
+        # farm would silently hand the third rotor a body it does not have.
+        # Checked against the NUMBER OF TURBINES, not against each other. Comparing the
+        # parameters only to max(lengths) let a lone odd-length array become the maximum
+        # and pass: with every other field length 1, a length-2 nacelle_D on a 3-rotor
+        # farm satisfied "1 or max_len" and was then TILED to [a, b, a] by _broadcast,
+        # behind nothing but a printed warning.
+        #
+        # overhang_D and nacelle_D are included because both are per-turbine HARDWARE.
+        # For nacelle_D the tiling is a trap: it must be exactly zero for an actuator-disc
+        # rotor (see the nacelle carve in turbine_physics), and silently handing a rotor a
+        # body it does not have is precisely what invalidates that term's justification.
+        names = ['D', 'Zhub', 'Ct', 'Cp', 'yaw', 'TSR', 'overhang_D', 'nacelle_D']
+        lengths = [len(getattr(self, n)) for n in names]
+        max_len = len(self.pos)
+        for name, length in zip(names, lengths):
             if length != 1 and length != max_len:
                 raise ValueError(f"Inconsistent lengths in WindFarmConfig: '{name}' has length {length}, expected 1 or {max_len}.")
     
