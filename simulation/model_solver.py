@@ -1,6 +1,6 @@
 import jax.numpy as jnp
 
-from .utils import div_nu_grad
+from .utils import div_nu_grad, velocity_floor
 
 
 def _lateral_bc(U, Uin):
@@ -50,10 +50,6 @@ def representative_velocity(U, Uin):
     n_mask = jnp.maximum(jnp.sum(mask), 1)
     return jnp.sum(jnp.where(mask, U, 0.0)) / n_mask
 
-
-def velocity_floor(Uin):
-    """Lower bound on U wherever it appears in a denominator."""
-    return jnp.maximum(0.1 * Uin, 1e-6)
 
 
 def advance_wake_field(data, dt, NuT, config, WV):
@@ -116,4 +112,6 @@ def advance_wake_field(data, dt, NuT, config, WV):
     U = U.at[:, 0].set(Uin[:, 0])  # ground
     U = _lateral_bc(U, Uin)        # lateral far field, non-reflecting
 
-    return U, data.X + dx
+    # V and W go back out so the k_w budget can be advected by the SAME cross-flow,
+    # veer included, rather than reconstructing it and risking the two drifting apart.
+    return U, data.X + dx, V, W

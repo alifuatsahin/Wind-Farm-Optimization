@@ -492,8 +492,33 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # cos^2(delta). It is 1e-5, far under any physical signal, but it does mean an
     # aligned farm is no longer exactly laterally symmetric in its aerodynamics --
     # worth watching if the lateral grid ever changes.
-    golden_row = [0.99693986652197308, 0.69543078734947095, 0.69891575982658105,
-                  0.67719689357280144, 0.6611792787328673]
+    # Re-recorded 2026-10-26 for utils.advance_kw: the budget now advects k_w at the
+    # LOCAL U, as the momentum march does, instead of the scalar U0, and gets the
+    # boundary condition it never had (zero flux through the ground, zero gradient on
+    # the sides). T1 AND T2 are bit-identical, which is the one-bay lag in its purest
+    # form -- bay 1's budget runs on the frozen ambient ti_in, so no change to k_w there
+    # can reach the bay-1 velocity field at all, and T3 is the first rotor whose inflow
+    # a k_w change can touch. T3-T5 move +0.97/+0.44/+0.35%, all UPWARD, i.e. toward the
+    # measurement, as the 8-turbine model/measured power ratios do at every rotor
+    # (T3 .891 -> .975, T5 .734 -> .741, T8 .601 -> .606).
+    #
+    # Amended the same day when k_w gained its cross-plane advection by (V, W), the term
+    # the momentum equation has always carried. T1 and T2 stay bit-identical for the
+    # reason above, and T3-T5 move only 2.7e-6 / 5.6e-6 / 6.1e-6 -- which is the point:
+    # an ALIGNED row has no CVP, so its only cross-flow is the wake's own swirl, which is
+    # antisymmetric over the disc and very nearly cancels in a rotor average. The term is
+    # yaw-specific by construction, and this case is the control that shows it. Where it
+    # does act, full-wake case A's deflection RMSE improves 0.0356 -> 0.0331 D.
+    # Re-recorded 2026-10-26 for the UNLINEARISED dissipation: the budget now uses Du's
+    # own physical form C_eps k_w^(3/2)/l_m instead of the linearised nu_t k_w / Psi he
+    # substitutes only to make his Eq (13) analytically solvable by Green's function. We
+    # march, so we do not need the linearity. T1 and T2 bit-identical (the one-bay lag
+    # again), T3 -0.03%, then T4 +1.14% and T5 +1.65% -- GROWING down the row, which is
+    # the signature of TI that now accumulates instead of declining. That is the point:
+    # the equilibrium exponent changes from k ~ S^2 to k ~ S^(4/3), so the 6x deficit-
+    # gradient collapse down a row costs 11x of TKE instead of 36x.
+    golden_row = [0.9969398665219731, 0.695430787349471, 0.7054886077569845,
+                  0.6879367642270817, 0.6744866243794914]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):

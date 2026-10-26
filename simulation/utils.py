@@ -21,24 +21,6 @@ def du_nu_t(TI, age_D, U0, D):
             * jnp.minimum(age_D, DU_XV1 / TI) * U0 * D)
 
 
-def du_psi(TI, age_D, D):
-    """Du Eq (28): Psi/D^2 = 0.67 (0.2 TI + 0.015)^2 / (0.4 TI + 0.010) * age/D.
-
-    Psi = c l_m^2 / C_eps sets the dissipation timescale Psi/nu_t, and because l_m is the
-    mixing length it grows with the age of the SHEAR LAYER -- which restarts at every
-    rotor. Referencing it to the farm inlet instead makes the amplitude (~sqrt(Psi)) grow
-    without bound down a row: measured on the three-turbine experiment, the peak I_u error
-    went -1% in bay 1 to +20% and +28% in bays 2 and 3.
-    """
-    return (0.67 * (0.2 * TI + 0.015) ** 2 / (0.4 * TI + 0.010)
-            * jnp.maximum(age_D, 1e-6) * D ** 2)
-
-
-#: Du et al. (2025) Sec 3.2: nu_T = c <k_w>^(1/2) l_m, with c = 0.67 the mean across his
-#: calibration cases.
-DU_C_NU = 0.67
-
-
 def ambient_tke(I_amb, U0):
     """k_B from TI = sqrt(2k/3)/U0, with TI the ambient value Iu/1.28."""
     return 1.5 * ((I_amb / IU_TO_TI) * U0) ** 2
@@ -93,10 +75,38 @@ def div_nu_grad(nu, f, dy, dz):
     return out.at[:, 1:-1].add((qz[:, 1:] - qz[:, :-1]) / dz)
 
 
-def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
+def velocity_floor(Uin):
+    """Lower bound on U wherever it appears in a denominator.
+
+    Lives here rather than in model_solver because the momentum march and the k_w budget
+    both divide by the local velocity and must floor it identically; utils is the module
+    both can import.
+    """
+    return jnp.maximum(0.1 * Uin, 1e-6)
+
+
+def du_eps_coef(TI, D):
+    """Du's dissipation coefficient, from his C_eps and l_m: eps = C_eps k_w^(3/2) / l_m.
+
+    He gives C_eps = (0.4 TI + 0.010) x/D and l_m/D = (0.2 TI + 0.015) x/D (Eq 27 with the
+    Fig 11 slopes), so the streamwise factor CANCELS and the coefficient is
+    AGE-INDEPENDENT -- one fewer place where "age since which rotor" has to be decided.
+
+    This replaces Du's own Psi = c l_m^2 / C_eps, which exists only to linearise the
+    budget; see the dissipation note in advance_kw. Dropping it also drops c = 0.67, the
+    one constant of his whose provenance was awkward here: he defines it by dividing by
+    sqrt(K_w,max), the MAXIMUM azimuthally-averaged k_w, and states it is really c(x, r)
+    collapsed for tractability -- so using it cell-wise was an assumption we no longer
+    need to make. The two published slopes are unchanged.
+    """
+    return (0.4 * TI + 0.010) / ((0.2 * TI + 0.015) * D)
+
+
+def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, eps_coef, V, W):
     """One march step of Du et al. (2025) Eq (13), the wake-added TKE budget:
 
-        U0 dk_w/dx = div_perp(nu_t grad_perp k_w) - (nu_t/Psi) k_w + nu_t |grad_perp U|^2
+        u dk_w/dx = div_perp(nu_t grad_perp k_w) - C_eps k_w^(3/2)/l_m + nu_t |grad_perp U|^2
+                    - V dk_w/dy - W dk_w/dz
 
     i.e. cross-plane diffusion, dissipation, and shear production. Du's Eq (14) is the
     analytic solution of this same equation; marching it instead avoids that solution's
@@ -137,8 +147,91 @@ def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, psi, U0):
     dWdY, dWdZ = jnp.gradient(Uw, yloc[:, 0], zloc[0, :])
     prod = nu_t * (dWdY ** 2 + dWdZ ** 2)
     dif = div_nu_grad(nu_t, kw, yloc[1, 0] - yloc[0, 0], zloc[0, 1] - zloc[0, 0])
-    rhs = dif - (nu_t / psi) * kw + prod
-    return jnp.maximum(kw + (dx / U0) * rhs, 0.0)
+    # CROSS-PLANE ADVECTION by (V, W), which the momentum equation has carried all along
+    # as -V dU/dy - W dU/dz and this budget did not. Without it a yawed wake steers its
+    # momentum deficit and leaves its turbulence behind. Du's Eq (13) is axisymmetric and
+    # unyawed, so there was no cross-flow in it to carry; the omission is ours, from
+    # extending his budget to yawed wakes, and it is the same consistency argument the
+    # advection speed below rests on -- k_w is a transported scalar in the same velocity
+    # field as U, so it must be transported by all of it. Same jnp.gradient stencil the
+    # momentum advection uses, and the same V, that march returns, veer included.
+    dkdY, dkdZ = jnp.gradient(kw, yloc[:, 0], zloc[0, :])
+    # DISSIPATION, in Du's UNLINEARISED form: C_eps k_w^(3/2) / l_m.
+    #
+    # He states that physical form, then substitutes (nu_t/Psi) k_w with Psi = c l_m^2/C_eps,
+    # noting the two are the same "since nu_t can be written in the form c <k_w>^(1/2) l_m".
+    # They are identical only under that Prandtl-Kolmogorov relation, which diverges ~40%
+    # from his own Eq (26) once the TI leaves his 0.041-0.071 calibration range -- so the
+    # linearised form carries an inconsistency at a waked rotor, where TI ~ 0.13.
+    #
+    # He linearises for ONE reason: "Eq. (13) is a second-order non-homogeneous LINEAR
+    # differential equation", which is what admits his Green's-function solution Eq (14).
+    # We march the field, so we do not need linearity and can keep the physical k^(3/2).
+    #
+    # The equilibrium exponent is what changes: P = eps gives k_eq = Psi S^2 under the
+    # linearised form (k ~ S^2) but k_eq ~ (nu_t l_m S^2 / C_eps)^(2/3) here (k ~ S^(4/3)).
+    # Down an 8-turbine row the deficit gradient collapses 6x, which costs 36x of
+    # equilibrium TKE under S^2 and 11x under S^(4/3) -- so the measured TI rise down the
+    # row stops being unreachable. Measured: the model's per-bay effective nu_T stops
+    # DECLINING (bays 3-7 were .0071 .0072 .0071 .0069 .0068) and instead rises then
+    # flattens (.0075 .0080 .0080 .0077 .0076) against a measurement that rises to ~.0141.
+    # The trend is corrected; the magnitude is still about half, which is Eq (26)'s
+    # out-of-range problem and not this term's.
+    #
+    # Full-wake TI R2 +.028/+.006/+.032 with the bias to within .002 of zero on all three;
+    # 8-turbine R2 +.008 and power RMSE -17%, with T4-T8 all +.04 to +.06 toward unity.
+    rhs = dif - eps_coef * jnp.maximum(kw, 0.0) ** 1.5 + prod - V * dkdY - W * dkdZ
+
+    # ADVECTION SPEED: the LOCAL U, floored exactly as the momentum march floors it.
+    #
+    # This used to read dx/U0, advancing k_w at the scalar nominal hub speed. The
+    # transport equation is u dk/dx, with the local u, and advance_wake_field does
+    # precisely that for momentum -- numer / max(U, velocity_floor(Uin)). Du writes
+    # U0 dk/dx in his Eq (13), but that is a far-wake simplification inside an ANALYTIC
+    # solution; in a marched PDE sitting beside a momentum equation that uses the local U
+    # it is simply inconsistent, and it under-evolves k_w by U0/U = 1.4-2.2x exactly
+    # where the production lives. Measured as the modelled TI peak over the measured one,
+    # at 2D/3D/7D/8D: full-wake case C 0.794/0.794/0.793/0.748 -> 0.941/0.933/0.857/0.772,
+    # case A 0.654/0.741/0.726/0.806 -> 0.759/0.838/0.772/0.835. All eight improve, and
+    # the second-moment widths move with them rather than against (case C 0.95-1.00 of
+    # the measured width, against 0.97-1.08 before), so this is a level correction and
+    # not a narrowing that fakes one.
+    kw = jnp.maximum(kw + (dx / jnp.maximum(U, velocity_floor(Uin))) * rhs, 0.0)
+
+    # ...and a BOUNDARY CONDITION, which this equation never had.
+    #
+    # div_nu_grad adds the y-flux on [1:-1, :] -- every z, the GROUND ROW INCLUDED -- and
+    # the z-flux on [:, 1:-1]; only the four corners are diffusion-free. The ground row
+    # therefore diffuses in y, and it is where the log profile sends U to zero, so once
+    # k_w divides by the local U that row's explicit diffusion number blows past the
+    # stability limit. Measured in bay 1 of full-wake case C: the limiter holds the
+    # interior at exactly DIFFUSIVE_CFL = 0.900 while the ground row runs at 1.155, with
+    # U = 0.0145 m/s there against 5.44 m/s at the top -- and the top row, at 0.125, is
+    # safe. Momentum never had the problem because advance_wake_field resets the ground
+    # to Uin every step, so whatever the over-limit diffusion does there is discarded.
+    # k_w had no condition at all, and that omission -- not the advection speed -- is
+    # what made the local-U form diverge to 1e17 and stall the LES array march.
+    #
+    # The condition is ZERO FLUX, not zero value. The ground is impermeable, so the
+    # turbulent flux of k through it vanishes; that is Neumann. Momentum can afford
+    # Dirichlet there only because Zong's formulation PRESCRIBES U_in(z), so U has a
+    # known boundary value; k_w has none. The distinction is not cosmetic -- Dirichlet
+    # k_w = 0 drains wake-added TKE into the ground, and it was built and measured:
+    # 8-turbine R2 .9306 -> .9239, against .9320 for Neumann, with the per-rotor
+    # model/measured power ratio falling .734 -> .701, .657 -> .615 and .601 -> .553 at
+    # T5-T8 where Neumann raises every one of them. The lateral edges take _lateral_bc's
+    # non-reflecting zero gradient, which is the same statement sideways; the top stays
+    # free, as it does for momentum. With the evolved sets of the two equations now
+    # identical, the interior-only max in turbine_physics' step limiter is the right
+    # domain for both.
+    #
+    # Bounding that limiter over the full field instead would be the honest alternative,
+    # but it is priced: max(nu_T/U) over the whole plane is 0.792 against 0.0047 over the
+    # interior, so dt would fall 170x and the first station would not march at all --
+    # exactly the failure the limiter's own comment already records.
+    kw = kw.at[:, 0].set(kw[:, 1])
+    kw = kw.at[0, :].set(kw[1, :])
+    return kw.at[-1, :].set(kw[-2, :])
 
 
 def smooth_2d(U, kernel_size=3, method='gaussian'):

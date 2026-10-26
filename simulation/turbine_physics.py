@@ -8,9 +8,9 @@ from jax import lax
 from jax.scipy.special import erf as jerf
 
 from .turbine_state import LocalConditions, VortexSimConfig, DeficitFieldConfig
-from .utils import smooth_2d, du_nu_t, du_psi, advance_kw
+from .utils import smooth_2d, du_nu_t, advance_kw, velocity_floor, du_eps_coef
 from .vortex_model import _simulate_vortex_evolution_jit, _UNSTACKED
-from .model_solver import advance_wake_field, representative_velocity, velocity_floor
+from .model_solver import advance_wake_field, representative_velocity
 from .field_ops import interpolate_vec_data
 
 
@@ -247,10 +247,11 @@ def simulate_vortex_field(params, local, seed=None, total_steps=1000):
 
 # ---------------------------------------------------------------------------------------
 # Eddy-viscosity closure. ONE closure, every part of it traceable to a source: Du et al.
-# (2025) arXiv:2511.19881 for the wake-added TKE budget Eq (13), for Eq (26) nu_t(TI, x) and
-# for Eq (28) Psi. The budget's length scale is Du's own station-local age, l_m = k_lm x with
-# x measured from the marching rotor. There are no alternatives left to select between and no
-# fitted constant anywhere in the chain.
+# (2025) arXiv:2511.19881 for the wake-added TKE budget Eq (13) and for Eq (26) nu_t(TI, x).
+# The dissipation is his UNLINEARISED C_eps k_w^(3/2)/l_m rather than the Psi form he
+# substitutes to make Eq (13) analytically solvable -- see utils.advance_kw -- so Eq (28) and
+# its constant c = 0.67 are no longer used, and the dissipation is age-independent. There are
+# no alternatives left to select between and no fitted constant anywhere in the chain.
 #
 # WHAT WAS REMOVED, and what it cost. Four closures that scored BETTER on velocity were taken
 # out for being outside the literature, non-local, or both, after being measured in full:
@@ -290,16 +291,20 @@ def simulate_vortex_field(params, local, seed=None, total_steps=1000):
 #   TI R2             +.874 / +.781 / +.787      off-axis at 2 D       -0.04%
 #   mean |power err|  6.82%
 #
-# KNOWN COST, diagnosed and bounded: the 8-turbine array reaches .9087 against .9535 for the
-# Crespo closure this replaced. Du's Psi = c l_m^2/C_eps is linear in x measured from the
-# MARCHING rotor, so it restarts at every one; since k_w,eq = Psi |grad Uw|^2 with comparable
-# gradients per bay, every bay equilibrates to the same k_w and the incident TI stays flat at
-# ~0.104 from T2 to T8 where Crespo's climbs to 0.176. It is a missing BUILD-UP, not a missing
-# saturation. Giving Psi a transported turbulence age fixes the array (.9507) but over-predicts
-# the measured bay-2/3 TI by +38/+56%, and no saturation escapes that trade -- caps of
-# 4/8/kappa z_h/inf D were all measured and slide along the frontier. The TI data we have
-# (three rotors) says this Psi is right to within 2-7%; the array evidence against it is
-# velocity-only. See [[psi-frontier-mixing-vs-tke]].
+# KNOWN COST, diagnosed and bounded -- and PARTLY RESOLVED 2026-10-26. The deep-array
+# shortfall was long attributed to Psi: being linear in x from the MARCHING rotor it restarts
+# at every one, so with k_w,eq = Psi |grad Uw|^2 every bay equilibrated to the same k_w and the
+# incident TI stayed flat down the row. That diagnosis was right about the symptom and wrong
+# about the cause. The linearised dissipation makes k_eq ~ S^2; Du's own unlinearised form
+# makes it ~ S^(4/3), and since the deficit gradient collapses 6x down an 8-turbine row that
+# is the difference between 36x and 11x of equilibrium TKE. With the physical form the model's
+# per-bay effective nu_T stops declining (bays 3-7 .0071 .0072 .0071 .0069 .0068) and rises
+# then flattens (.0075 .0080 .0080 .0077 .0076).
+#
+# WHAT REMAINS: the measurement rises to ~.0141 over the same bays, so the model still mixes
+# about HALF as much deep in the array, and T8 reaches 0.67 of its measured power rather than
+# 1.0. That residual is Eq (26)'s MAGNITUDE at TI ~ 0.13 -- 1.84x the top of its 0.041-0.071
+# calibration range, on a fit with no saturation -- and not the dissipation's.
 #
 # NOTE this resolves nu_T per cell, where Du calibrates nu_t(x) as one value per cross-plane
 # from rotor-level quantities (his Sec 3.2 reduces c and C_eps from 2-D to 1-D explicitly).
@@ -503,15 +508,15 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
         current, active = carry
 
         def when_active(_):
-            # Wake-added TKE replaces the Crespo correlation. The budget's own nu_t and
-            # Psi take the AMBIENT turbulence intensity, as Du intends -- that keeps the
-            # march non-circular, since the deficit's nu_T below then uses the local TI
-            # that k_w produces. age = current.X/D is the distance from THIS station's
-            # rotor, i.e. the shear-layer age, which is the reference that works: taking
-            # it from the farm inlet lets Psi grow without bound down a row.
+            # Wake-added TKE replaces the Crespo correlation. The budget's own nu_t
+            # takes the TI INCIDENT on this rotor, frozen at the station plane, which
+            # keeps the march non-circular. age = current.X/D is the distance from THIS
+            # station's rotor, i.e. the shear-layer age; the dissipation no longer needs
+            # it at all, since C_eps/l_m is age-independent.
             age_D = jnp.maximum(current.X / adapter.D, 1e-6)
             # ONE eddy viscosity, Du's Eq (26), evaluated on the TI INCIDENT on this rotor
-            # (adapter.ti_in) -- for the deficit AND for the budget's own nu_t and Psi.
+            # (adapter.ti_in) -- for the deficit AND for the budget's diffusion and
+            # production.
             #
             # Du's nu_t(x) and Psi(x) are functions of the inflow TI OF THE ROTOR WHOSE WAKE
             # IS MODELLED (his Tables 1 and 3, and Sec 3.3's fits against "the ambient
@@ -536,7 +541,7 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
             # +.0003/+.0013/+.0001) while its R2 slips (+.874/+.781/+.787 ->
             # +.868/+.751/+.773). Adopted for the semantics, not the score.
             NuT = du_nu_t(adapter.ti_in, age_D, adapter.U0, adapter.D)
-            nut_bud, psi_bud = NuT, du_psi(adapter.ti_in, age_D, adapter.D)
+            nut_bud = NuT
             # NuT is a FIELD now, but the step must stay scalar, so the diffusive limit
             # is taken at its largest value on the plane. For a uniform NuT this is the
             # same number it always was.
@@ -565,11 +570,18 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
             # figures as a crescent notch in every bay from the third on. Bounding
             # max(nu_T/U) is the condition the scheme actually has to satisfy.
             #
-            # Taken over the INTERIOR only. The boundary ring carries no diffusion
-            # (div_nu_grad leaves it at zero, and the ground row is overwritten with Uin
-            # every step anyway), while the log profile sends U -> 0 there, so including
-            # it lets a cell that cannot go unstable set the step for the whole plane --
-            # measured as the first station failing to march at all.
+            # Taken over the INTERIOR only, which is the set the marched equations
+            # actually evolve. Note that div_nu_grad does NOT leave the whole boundary
+            # alone: it adds the y-flux on every z, the ground row included, and the
+            # z-flux on every y, so only the four CORNERS are diffusion-free. What makes
+            # the interior the right domain is instead that each equation overwrites its
+            # own boundary afterwards -- advance_wake_field resets the ground to Uin and
+            # _lateral_bc the sides, and utils.advance_kw does the matching thing with a
+            # zero-flux ground and zero-gradient sides. The log profile sends U -> 0 on
+            # the ground row, so including it would let a cell whose value is discarded
+            # set the step for the whole plane: max(nu_T/U) measures 0.792 over the full
+            # plane against 0.0047 over the interior, a 170x cut in dt -- measured as the
+            # first station failing to march at all.
             _dz = current.zloc[0, 1] - current.zloc[0, 0]
             _inv2d = 1.0 / dl ** 2 + 1.0 / _dz ** 2
             _Urep = representative_velocity(current.U, adapter.Uin)
@@ -579,10 +591,10 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
                              / (2.0 * _inv2d * _Urep * _nu_over_u + 1e-12))
 
             new = interpolate_vec_data(stacked, current.t + dt)
-            U, X_new = advance_wake_field(current, dt, NuT, adapter, WV)
+            U, X_new, V_tot, W_tot = advance_wake_field(current, dt, NuT, adapter, WV)
             kw_new = advance_kw(current.kw, current.U, adapter.Uin, current.yloc,
-                                current.zloc, X_new - current.X, nut_bud, psi_bud,
-                                adapter.U0)
+                                current.zloc, X_new - current.X, nut_bud,
+                                du_eps_coef(adapter.ti_in, adapter.D), V_tot, W_tot)
 
             # EACH ROTOR AGES ON ITS OWN STREAMWISE ORIGIN.
             #
