@@ -301,10 +301,19 @@ def simulate_vortex_field(params, local, seed=None, total_steps=1000):
 # per-bay effective nu_T stops declining (bays 3-7 .0071 .0072 .0071 .0069 .0068) and rises
 # then flattens (.0075 .0080 .0080 .0077 .0076).
 #
-# WHAT REMAINS: the measurement rises to ~.0141 over the same bays, so the model still mixes
-# about HALF as much deep in the array, and T8 reaches 0.67 of its measured power rather than
-# 1.0. That residual is Eq (26)'s MAGNITUDE at TI ~ 0.13 -- 1.84x the top of its 0.041-0.071
-# calibration range, on a fit with no saturation -- and not the dissipation's.
+# WHAT REMAINS, and where it is NOT. The measurement spreads at ~.0141 over the same bays
+# while the model realises ~.0078, and T8 reaches 0.67 of its measured power. That residual
+# is NOT Eq (26) under-supplying: measured per bay, the incident TI is 0.121 so the ramp
+# length x_nu_t = 0.5/TI = 4.14 D COMPLETES inside the 5 D bay (reach 0.83), the plateau it
+# reaches is .0209 -- 27% ABOVE Du's own Table-2 asymptote of .0164 and 48% above the
+# measured spreading -- and the bay-average supplied is .0122, only 13% short of .0141.
+#
+# So the loss is between the nu_t SUPPLIED (.0122) and the spreading REALISED (.0078), a
+# factor 1.6 inside the march rather than in the closure. Unattributed; candidates are the
+# conservative diffusion form against the ground boundary, the reflecting lid the divergence
+# form creates at the domain top, and the second-moment estimator itself once the deficit is
+# broad and shallow. Do not blame Eq (26)'s calibration range for this one without
+# re-measuring: that attribution was made and retracted on 2026-10-26.
 #
 # NOTE this resolves nu_T per cell, where Du calibrates nu_t(x) as one value per cross-plane
 # from rotor-level quantities (his Sec 3.2 reduces c and C_eps from 2-D to 1-D explicitly).
