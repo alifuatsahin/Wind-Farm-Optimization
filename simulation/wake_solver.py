@@ -110,6 +110,41 @@ def _assert_turbulence_admissible(field_params):
             f"turbulence -- this one is calibrated over TI = 0.041-0.071.")
 
 
+def _assert_ring_survives_merging(ts):
+    """Nv and merge_threshold are coupled, and at the defaults the ring self-destructs.
+
+    The shed ring is Nv elements evenly spaced in phi on the rotor edge, foreshortened to
+    an ellipse of semi-minor axis R*cos(beta). Its CLOSEST neighbour spacing is therefore
+    ~ pi*D*cos(beta)/Nv, and _merge_close_vortices (MERGE_CORE_RATIO is None, so the
+    legacy absolute criterion is live) merges any pair closer than merge_threshold*D. The
+    ring survives only while
+
+        pi * cos(beta) / Nv  >  merge_threshold
+
+    At the defaults Nv = 49 and merge_threshold = 0.05 that fails at beta = 40 deg:
+    measured 8 pairs collapse on step one at 40 and 16 at 45, against none at 35. The
+    yaw sweep runs to +-40, so the model's yaw response has a discretisation kink inside
+    the swept range whose LOCATION depends on Nv -- a knob nobody would think to hold
+    fixed while comparing yaw curves. Nv = 36 is clean to 45 deg.
+
+    Raising rather than auto-adjusting: changing Nv or the threshold silently would move
+    every result, and which one to trade is a modelling decision. See the note on
+    MERGE_CORE_RATIO in vortex_model for the relative criterion that would retire this.
+    """
+    for t in ts:
+        beta = abs(float(t._params.beta))
+        nv = int(t._params.Nv)
+        thr = float(t._params.field_params.merge_threshold)
+        spacing = np.pi * np.cos(beta) / nv
+        if spacing <= thr:
+            raise ValueError(
+                f"rotor at x={t.pos[0]:.1f} yawed {np.degrees(beta):.0f} deg has ring "
+                f"spacing {spacing:.4f} D at Nv={nv}, at or below merge_threshold="
+                f"{thr:.4f} D, so adjacent ring elements merge on the first step and the "
+                f"ring collapses. Lower Nv (36 is clean to 45 deg), or lower "
+                f"merge_threshold below {spacing:.4f}.")
+
+
 def _assert_shared_grid(ts):
     """Every rotor must sit on one absolute cross-plane grid.
 
@@ -158,6 +193,7 @@ def solve_single_field(wf, verbose=False):
     """March one field and one vortex cloud through the farm, station by station."""
     ts = wf.turbines
     _assert_turbulence_admissible(wf.field_params)
+    _assert_ring_survives_merging(ts)
     _assert_shared_grid(ts)
     stations = _x_stations(ts, X_STATION_TOL_D * ts[0].D) if ts else []
     prev, carried_vortex, carried_kw = None, None, None
