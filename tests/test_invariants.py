@@ -428,7 +428,8 @@ def test_grouping_tolerance_does_not_change_the_answer():
     # geometry, so it cannot couple a rotor to the station grouping.
     # Re-recorded for the (1-a)*Uhub core ageing; was 0.75679968436946754, i.e. -2.8e-8
     # -- the same aligned-row insensitivity as the golden row above.
-    assert abs(grouped - 0.75679966295046597) / 0.75679966295046597 < 1e-9, (
+    # Re-recorded for the cell-centred ground grid; was 0.75679966295046597, +0.082%.
+    assert abs(grouped - 0.75741989645145347) / 0.75741989645145347 < 1e-9, (
         f'the grouped branch itself moved: {grouped:.17g}; re-record only if this was '
         f'deliberate, since it is the reference the split branch is held to')
 
@@ -476,7 +477,12 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # -0.0102%, i.e. 6x and 11x closer, and the SPURIOUS YAW DEPENDENCE of an isolated
     # rotor's own inflow -- which fed every yaw comparison in the model -- falls from
     # 0.0671% to 0.0177%. See tp.disc_weights_on.
-    golden_isolated = {0.0: 0.99657373444710984, 25.0: 0.99639703619012632}
+    # Re-recorded for the CELL-CENTRED ground grid. These two should be EQUAL and the
+    # exact value is 0.99649857303760725 (see above); the new grid is 55x closer at 0 deg,
+    # +0.00754% -> +0.00014%, and cuts the spurious yaw dependence a further 2.7x,
+    # 0.01767% -> 0.00657%. That is the midpoint rule beating endpoint-inclusive
+    # quadrature in z: moving the nodes off the boundaries removes the edge effect.
+    golden_isolated = {0.0: 0.99649994412742249, 25.0: 0.99643426281798975}
     for beta, ref in golden_isolated.items():
         got = _sim([[0.0, 0.0, 0.0]], [beta]).wind_farm.turbines[0].Uhub / 8.0
         assert abs(got - ref) / ref < 1e-9, (
@@ -632,8 +638,11 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # its only cross-flow is the wake's own swirl, which is antisymmetric over the disc
     # and nearly cancels in a rotor average, leaving core size almost irrelevant. Where
     # the term acts, the yawed full-wake cases move 30-1000x as far.
-    golden_row = [0.99657373444710984, 0.68688393559824956, 0.71732411587808409,
-                  0.71552237604462154, 0.70785655693222915]
+    # Amended with golden_isolated for the cell-centred ground grid: T1 follows the
+    # isolated case, T2 is flat at -0.003%, and T3-T5 rise +0.27/+0.56/+0.81% as the
+    # ground stops discarding the deficit diffused into it.
+    golden_row = [0.99649994412742249, 0.68686537210499177, 0.71923685253416125,
+                  0.71950799638754670, 0.71359052339559148]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):

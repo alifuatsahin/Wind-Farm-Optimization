@@ -289,7 +289,30 @@ def make_turbine_params(config, field_params, y_bounds=None) -> TurbineParams:
     Ny = max(2, int(round(Ly / config.D * n_grids)))
     Nz = max(2, int(round(field_params.max_Z * n_grids)))
     if config.Zhub - Lz / 2 < 0:
-        zlims = (0, Lz)
+        # CELL-CENTRED at the ground: the first node sits at dz/2, not ON the wall.
+        #
+        # A node on a no-slip wall is where U vanishes by construction -- measured at
+        # 0.0145 m/s against U0 = 4.87 -- and that costs twice. It is a SINK, because the
+        # row is reset to Uin every step so whatever diffusion deposits there is thrown
+        # away: the integrated momentum deficit lost 14.7% over 6-14 D, of which ~17
+        # points is the boundary condition rather than physics. And it is a dt trap,
+        # because anything that evolves the row divides by U ~ 0: max(nu_T/U) is 0.792
+        # over the full plane against 0.0047 over the interior.
+        #
+        # dz/2 is inside the log layer, where Uin(z) is meaningful and the wall's effect
+        # is carried by the profile as it should be. This is what finite-volume wall-
+        # function codes do. Nz is unchanged, so the resolution is identical; only the
+        # node positions shift by dz/2 and the top moves from Lz to Lz - dz/2.
+        #
+        # IT COULD NOT BE LANDED BEFORE. Measured earlier it took the 8-turbine row's T8
+        # from .668 to .476 -- the sink was COMPENSATING the deep-array under-mixing, so
+        # removing it exposed the real error. Re-measured after the incident-TI label was
+        # allowed to spread with the wake (693e815), which raised nu_t over the outer
+        # annulus: the deep array now IMPROVES, 8-turbine bias -.0032 -> -.0024 with
+        # every rotor from T4 on moving toward unity, and nothing else moves by more than
+        # 0.0003. The compensation is gone.
+        _dz = Lz / Nz
+        zlims = (_dz / 2.0, Lz - _dz / 2.0)
     else:
         zlims = (config.Zhub - Lz / 2, config.Zhub + Lz / 2)
     # yloc stays LOCAL to this rotor (the rotor disc sits at yloc = 0), but the
