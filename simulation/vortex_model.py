@@ -237,6 +237,31 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
         denom = jnp.where(combine, total_circ, 1.0)
         merged_Y = (Y[i] * Circ_i + Y[j] * Circ_j) / denom
         merged_Z = (Z[i] * Circ_i + Z[j] * Circ_j) / denom
+        # CLAMPED BETWEEN THE PARENTS. The circulation centroid divides by Gi + Gj, so a
+        # NEARLY cancelling pair -- which passes the 1e-12 test above -- places the
+        # survivor at a distance amplified by |Gi| / |Gi + Gj|, still flagged active.
+        #
+        # This is not hypothetical once the cloud holds rings from rotors at OPPOSITE yaw,
+        # which _concat_vortices splices together and a layout optimiser is free to
+        # propose. Measured as the smallest |Gi+Gj| / (|Gi|+|Gj|) over pairs that actually
+        # qualify for merging:
+        #
+        #     (0,0,0)       1.000     no cancellation; the ring is single-signed
+        #     (+25,+15,0)   0.0984
+        #     (+30,-30,0)   0.0400
+        #     (+40,-40,0)   0.0169    -> ~59x amplification
+        #
+        # and +-40 deg rows are IN the 117-point yaw sweep. At 0.0169 with a separation of
+        # merge_threshold = 0.05 D the survivor lands ~1.5 D from either parent.
+        #
+        # A relative annihilation tolerance does not bound this: at 1e-3 it would still
+        # admit ~500x, i.e. 25 D. Clamping does, with no tolerance to choose -- a merged
+        # vortex outside the segment joining its parents is unphysical whatever the
+        # circulations, and for a cancelling pair the centroid is meaningless anyway.
+        # Same-signed pairs are a convex combination already, so the clamp is inert there
+        # and this cannot change a single-signed cloud.
+        merged_Y = jnp.clip(merged_Y, jnp.minimum(Y[i], Y[j]), jnp.maximum(Y[i], Y[j]))
+        merged_Z = jnp.clip(merged_Z, jnp.minimum(Z[i], Z[j]), jnp.maximum(Z[i], Z[j]))
 
         w_i, w_j = jnp.abs(Circ_i), jnp.abs(Circ_j)
         w_sum = jnp.where(w_i + w_j > 1e-12, w_i + w_j, 1.0)
