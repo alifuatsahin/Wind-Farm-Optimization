@@ -426,7 +426,9 @@ def test_grouping_tolerance_does_not_change_the_answer():
     # -0.261%. Locality is untouched -- grouping +0.044%, lateral -0.006%,
     # distant-upstream -0.014% -- and a coverage weight is read per rotor from its own
     # geometry, so it cannot couple a rotor to the station grouping.
-    assert abs(grouped - 0.75679968436946754) / 0.75679968436946754 < 1e-9, (
+    # Re-recorded for the (1-a)*Uhub core ageing; was 0.75679968436946754, i.e. -2.8e-8
+    # -- the same aligned-row insensitivity as the golden row above.
+    assert abs(grouped - 0.75679966295046597) / 0.75679966295046597 < 1e-9, (
         f'the grouped branch itself moved: {grouped:.17g}; re-record only if this was '
         f'deliberate, since it is the reference the split branch is held to')
 
@@ -623,8 +625,15 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # changes nothing, so the first effect cannot reach a Uhub before T3. Then T3 -0.32%,
     # T4 +0.21%, T5 +0.60% -- a sign flip and then growth, which is the outer annulus
     # entraining more as the wake widens past the disc. See utils.advect_incident_ti.
-    golden_row = [0.99657373444710984, 0.68688360999404552, 0.71732624029772285,
-                  0.71553220606077261, 0.70793050481562658]
+    # Amended for the vortex cores ageing on (1-a)*Uhub, the derived form of the march's
+    # own U_m, instead of on Uhub. Both isolated cases and T1 are BIT-IDENTICAL -- an
+    # isolated rotor's Uhub reads its inflow, not its own wake -- and T2-T5 move only
+    # +5e-7 / -3e-6 / -1e-5 / -1e-4. That is the CONTROL: an aligned row has no CVP, so
+    # its only cross-flow is the wake's own swirl, which is antisymmetric over the disc
+    # and nearly cancels in a rotor average, leaving core size almost irrelevant. Where
+    # the term acts, the yawed full-wake cases move 30-1000x as far.
+    golden_row = [0.99657373444710984, 0.68688393559824956, 0.71732411587808409,
+                  0.71552237604462154, 0.70785655693222915]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):

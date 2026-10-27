@@ -213,6 +213,8 @@ class VortexSimConfig:
     Zhub: float
     nu_slope: float
     nu_const: float
+    #: Speed the cores age on. NOT Uhub -- see vortex_model's new_age.
+    U_conv: float
     Nv: int
     V: np.ndarray
     W: np.ndarray
@@ -223,7 +225,7 @@ class VortexSimConfig:
 jax.tree_util.register_dataclass(
     VortexSimConfig,
     data_fields=["D", "Uhub", "dgamma", "calculation_domain", "phi", "beta", "Yoffset",
-                 "Zhub", "nu_slope", "nu_const", "V", "W", "yloc", "zloc"],
+                 "Zhub", "nu_slope", "nu_const", "U_conv", "V", "W", "yloc", "zloc"],
     meta_fields=["Nv"],
 )
 

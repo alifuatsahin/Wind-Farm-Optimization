@@ -20,8 +20,12 @@ def _simulate_vortex_evolution_jit(config, merge_threshold, cfl_factor, total_st
     D = config.D
     Uhub = config.Uhub
     # Dimensionless domain-exit threshold, in Uhub*t/D. It must cover the DEFICIT march,
-    # and the two do not share a coordinate: the cloud ages on Uhub while the deficit
-    # advances on the local wake speed, so age/X runs 1.41-1.49 on the full-wake row.
+    # and the two did not share a coordinate: the cloud USED TO age on Uhub while the
+    # deficit advances on the local wake speed, which put age/X at 1.41-1.49 on the
+    # full-wake row. That is fixed -- the cores now age on config.U_conv -- but this
+    # threshold is unchanged and still stated in Uhub*t, because it is a TIME budget for
+    # covering the deficit march, not a statement about ageing. The two are independent:
+    # the stop is on t, and so is the coverage assertion in _march_segment.
     #
     # At the old 1.5 that margin was spent exactly, and the ALIGNED case -- whose wake is
     # deeper, hence slower, hence ages fastest per unit X -- came out at 0.91-0.92, i.e.
@@ -30,10 +34,11 @@ def _simulate_vortex_evolution_jit(config, merge_threshold, cfl_factor, total_st
     # yawed cases sat at 1.04-1.05 and were fine, so the artefact hit the baseline of
     # every steering comparison and not the yawed numerator.
     #
-    # 2.5 clears the worst measured age/X with room for a slower wake still (deeper array,
-    # higher Ct). Overshoot is cheap: the march stops on this threshold, and steps past a
-    # frozen cloud re-emit a frozen state. wake_solver._march_segment asserts the coverage
-    # rather than trusting this constant.
+    # 2.5 cleared the worst measured ratio with room for a slower wake still (deeper
+    # array, higher Ct). Overshoot is cheap: the march stops on this threshold, and steps
+    # past a frozen cloud re-emit a frozen state. wake_solver._march_segment asserts the
+    # coverage rather than trusting this constant, which is what makes it safe to leave
+    # the constant alone through a change to the ageing.
     t_limit = 2.5 * config.calculation_domain / D
 
     if seed is None:
@@ -56,7 +61,13 @@ def _simulate_vortex_evolution_jit(config, merge_threshold, cfl_factor, total_st
                 new_Y, new_Z = RK4_step(current2.Y, current2.Z, V_induced, W_induced, Circ, Rv, dt, current2.active)
                 # age advances with the convected distance; Rv^2 += 4*nu*dt then integrates
                 # to Rv^2 = Ri^2 + 4*eta^2(x), matching Shapiro Eq (4.3).
-                new_age = current2.age + Uhub * dt
+                # On the WAKE's convection speed, not the hub speed: age is a length
+                # and the vortex travels with the wake. config.U_conv = (1-a)*Uhub, which
+                # is the closed form of Zong's U_m under the model's own 20% deficit
+                # threshold -- see vortex_adapter. Measured age/X on the full-wake row was
+                # 1.401/1.101/1.029 before, worst at the FIRST rotor where Uhub is the
+                # free stream while the wake convects at ~0.6 of it.
+                new_age = current2.age + config.U_conv * dt
                 nu = config.nu_const + config.nu_slope * 0.5 * (current2.age + new_age)
                 new_Rv = jnp.sqrt(Rv**2 + 4 * nu * dt)
                 new_vf = VortexField(
