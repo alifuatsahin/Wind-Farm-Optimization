@@ -234,8 +234,10 @@ def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, eps_coef, V, W):
     return kw.at[-1, :].set(kw[-2, :])
 
 
-def advect_incident_ti(ti, U, Uin, yloc, zloc, dx, V, W):
-    """Carry the incident-TI field with the cross-flow: u dTI/dx = -V dTI/dy - W dTI/dz.
+def advect_incident_ti(ti, U, Uin, yloc, zloc, dx, V, W, nu_t=None):
+    """Carry the incident-TI field with the flow:
+
+        u dTI/dx = -V dTI/dy - W dTI/dz + div(nu_t grad TI)
 
     TI_in is the turbulence the shear layer at a cell was BORN into, read from the k_w the
     station was handed and then held fixed in value for the whole segment. Holding the
@@ -248,14 +250,41 @@ def advect_incident_ti(ti, U, Uin, yloc, zloc, dx, V, W):
     is exactly 0.0%, since its TI_in is uniform ambient and a shift of a constant is a
     constant.
 
-    Advected and NOT diffused, which is the same discipline the age field keeps: diffusing
-    the label would mix TI between parcels of different birth, and that is a second
-    mechanism with its own sign, not part of this correction. Same stencil, same local
-    advection speed and the same (V, W) as advance_kw above, for the same reason -- it
-    rides in the velocity field the momentum march itself returns.
+    AND DIFFUSED, which reverses the reasoning this function shipped with. The original
+    argument -- that diffusing the label would mix TI between parcels of different birth
+    -- ignores that A WAKE WIDENS BY TURBULENT DIFFUSION, NOT BY ADVECTION. Advection
+    alone therefore cannot let the label follow the wake it belongs to, and the measured
+    consequence was severe: the label is blended at each station by Uw_new, the deficit
+    THAT rotor carves, so outside the carved disc a cell keeps its previous value, which
+    recurses back to the first rotor and to ambient. The label fell to ambient at the
+    DISC edge while the wake had long outgrown it. On a 6-turbine row at 5 D, hub height,
+    at the last rotor (ambient TI 0.0602):
+
+        y/D           0.0     0.3     0.5     0.6     0.8     1.4
+        incident TI  .1083   .1144   .1041   .0650   .0616   .0615
+        deficit/U0    .482    .469    .371    .277    .201    .097
+
+    A factor 1.6 across ONE grid interval at y/D = 0.5, and beyond it a 0.20 U0 deficit
+    sitting in flow labelled ambient. Over that annulus -- which carries the entrainment
+    and most of the shear production -- Eq (26) was supplying 0.00208 against 0.00420,
+    half the eddy viscosity it should. The gap widens down the row as the wake outgrows
+    the disc that resets the label (the deficit at y/D = 0.8 goes .048 at T2 to .201 at
+    T6 while the TI there stays pinned). It was also a 1.6x coefficient jump across one
+    cell inside div_nu_grad, so the grad(nu).grad(k) term the divergence form exists to
+    capture was dominated by an artefact.
+
+    NO CIRCULARITY IS REINTRODUCED. The freeze exists to stop nu_t <-> k_w, and the label
+    is still never recomputed from the evolving k_w. Diffusing it makes its own spreading
+    rate depend on nu_t, which is a nonlinearity, not that loop.
+
+    Same stencil, same local advection speed and the same (V, W) and nu_t as advance_kw,
+    for the same reason -- the label rides in the field the momentum march returns, and
+    spreads with the same turbulence that spreads the deficit it labels.
     """
     dtiY, dtiZ = jnp.gradient(ti, yloc[:, 0], zloc[0, :])
     rhs = -V * dtiY - W * dtiZ
+    if nu_t is not None:
+        rhs = rhs + div_nu_grad(nu_t, ti, yloc[1, 0] - yloc[0, 0], zloc[0, 1] - zloc[0, 0])
     ti = ti + (dx / jnp.maximum(U, velocity_floor(Uin))) * rhs
     # Same zero-gradient edges as k_w: a label cannot be created at a boundary.
     ti = ti.at[:, 0].set(ti[:, 1])

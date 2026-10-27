@@ -617,8 +617,14 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # discs (carve d24cc24, rotor average 692468d, now the ramp). T1 and both isolated
     # cases are BIT-IDENTICAL -- the ramp acts only on a wake, and an isolated rotor's
     # Uhub reads its undisturbed inflow -- and T2-T5 fall a uniform 0.12-0.15%.
-    golden_row = [0.99657373444710984, 0.68688360999404552, 0.71959984371631136,
-                  0.71403713685016323, 0.70369606766230930]
+    # Amended for DIFFUSING the incident-TI label with nu_t, which lets it reach the wake
+    # edge instead of stopping at the disc edge. T1 AND T2 are bit-identical, and so is
+    # the grouped anchor above: bay 1's ti is uniform ambient and diffusing a constant
+    # changes nothing, so the first effect cannot reach a Uhub before T3. Then T3 -0.32%,
+    # T4 +0.21%, T5 +0.60% -- a sign flip and then growth, which is the outer annulus
+    # entraining more as the wake widens past the disc. See utils.advect_incident_ti.
+    golden_row = [0.99657373444710984, 0.68688360999404552, 0.71732624029772285,
+                  0.71553220606077261, 0.70793050481562658]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):

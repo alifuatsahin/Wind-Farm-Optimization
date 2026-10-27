@@ -907,7 +907,8 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
                                 current.zloc, X_new - current.X, nut_bud,
                                 du_eps_coef(current.ti, adapter.D), V_tot, W_tot)
             ti_new = advect_incident_ti(current.ti, current.U, adapter.Uin, current.yloc,
-                                        current.zloc, X_new - current.X, V_tot, W_tot)
+                                        current.zloc, X_new - current.X, V_tot, W_tot,
+                                        nu_t=nut_bud)
 
             # EACH ROTOR AGES ON ITS OWN STREAMWISE ORIGIN.
             #
