@@ -650,6 +650,44 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
             f'5D row T{i+1} moved: {got:.17g} vs golden {ref:.17g}')
 
 
+def test_vertical_domain_that_misses_the_ground_is_refused():
+    """A box whose bottom floats above the ground must raise, not pin the deficit in mid-air.
+
+    turbine_state cell-centres the grid only when the domain would otherwise cross z = 0,
+    i.e. Zhub - max_Z*D/2 < 0. Above that threshold it centres on the hub and the bottom
+    node floats -- but advance_wake_field still applies U[:, 0] = Uin[:, 0] there, and
+    advance_kw's zero-flux ground lands on the same row, so the wake is sliced off at an
+    arbitrary altitude. For D = 126, Zhub = 90 the bottom sits 14.4 m up at max_Z = 1.2 and
+    27.0 m up at max_Z = 1.0, and dz jumps 6.213 -> 6.574 across the branch so a max_Z
+    sweep has a kink too.
+
+    The shipped max_Z = 2.0 clears every rig here -- the binding ratio is 2*Zhub/D, 1.43
+    for this rotor and 1.67 for the wind tunnel -- so this guards a latent case, the way
+    the ring-survival and low-TI guards do.
+    """
+    import simulation.wake_solver as ws
+
+    def _run(max_Z):
+        wf = WindFarmConfig(pos=np.array([[0.0, 0.0, 0.0], [630.0, 0.0, 0.0]]),
+                            D=np.array([126.0]), Zhub=np.array([90.0]),
+                            Ct=np.array([0.8]), Cp=np.array([0.47]), yaw=np.zeros(2),
+                            TSR=np.array([7.55]), dist_type='m')
+        fc = FieldConfig(Uh=10.0, Zh=90.0, z0=0.0077, I_amb=0.085, max_Y=3.0, min_X=7.0,
+                         max_Z=max_Z, n_grids=12, Nv=20)
+        Simulation(Config(WindFarm=wf, Field=fc, run_prefix='_mz')).run()
+
+    need = 2.0 * 90.0 / 126.0
+    _run(2.0)                       # the shipped value, comfortably above 2*Zhub/D
+    try:
+        _run(round(need - 0.2, 3))  # bottom floats
+    except ValueError as e:
+        assert 'above the ground' in str(e), f'wrong error: {e}'
+    else:
+        raise AssertionError(
+            'a vertical domain whose bottom sits above the ground was accepted; the '
+            'deficit is pinned to zero in mid-air and the wake is sliced off there')
+
+
 def test_low_ambient_turbulence_is_refused_not_silently_diverged():
     """Below Du Eq (26)'s zero-crossing the march must RAISE, not return a plausible number.
 
@@ -671,8 +709,11 @@ def test_low_ambient_turbulence_is_refused_not_silently_diverged():
                             Zhub=np.array([70.0]), Ct=np.array([0.8]),
                             Cp=np.array([0.47]), yaw=np.array([25.0]),
                             TSR=np.array([7.0]), dist_type='D')
+        # max_Z = 2.0, not 1.5: Zhub/D = 0.875 here, so 1.5 put the bottom of the box
+        # 10 m ABOVE the ground with the deficit pinned to zero on that row -- caught by
+        # _assert_domain_reaches_ground. _sim and _row already use 2.0 for this geometry.
         fc = FieldConfig(Uh=8.0, Zh=70.0, z0=70.0 * 3.3e-4, I_amb=i_amb, min_X=6.0,
-                         max_Y=2.0, max_Z=1.5, n_grids=12)
+                         max_Y=2.0, max_Z=2.0, n_grids=12)
         sim = Simulation(Config(WindFarm=wf, Field=fc, run_prefix='_test_ti'))
         sim.run()
         return sim
@@ -756,8 +797,10 @@ def test_nacelle_is_absent_by_default_and_central_when_present():
                             Zhub=np.array([0.125]), Ct=np.array([0.8]), Cp=np.array([0.47]),
                             yaw=np.array([0.0]), TSR=np.array([7.0]),
                             nacelle_D=np.array([d_n]), dist_type='D')
+        # max_Z = 2.0, not 1.5: the tunnel's Zhub/D = 0.833 needs > 1.667, so 1.5 left
+        # the box floating 12.5 mm above the ground -- see _assert_domain_reaches_ground.
         fc = FieldConfig(Uh=5.0, Zh=0.125, z0=0.125 * 3.3e-4, I_amb=0.08, min_X=3.0,
-                         max_Y=2.0, max_Z=1.5, n_grids=28)
+                         max_Y=2.0, max_Z=2.0, n_grids=28)
         sim = Simulation(Config(WindFarm=wf, Field=fc, run_prefix='_test_nac'))
         sim.run()
         t = sim.wind_farm.turbines[0]

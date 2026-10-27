@@ -187,6 +187,45 @@ def _assert_ring_survives_merging(ts):
                 f"merge_threshold below {spacing:.4f}.")
 
 
+def _assert_domain_reaches_ground(ts):
+    """Refuse a vertical domain whose bottom is not the ground, instead of pinning the
+    deficit to zero in mid-air.
+
+    turbine_state cell-centres the grid only when the domain would otherwise cross z = 0,
+    i.e. when Zhub - max_Z*D/2 < 0. Above that threshold it centres the box on the hub
+    instead, and the bottom node floats. advance_wake_field still applies its ground
+    condition there -- U[:, 0] = Uin[:, 0], zero deficit -- and advance_kw's zero-flux
+    "ground" lands on the same row, so a wake is sliced off at an arbitrary altitude with
+    no error raised. Measured for the NREL rotor, D = 126, Zhub = 90:
+
+        max_Z = 2.00   z in [ 3.15, 248.85]   dz 6.300   cell-centred, 3.15 = dz/2
+        max_Z = 1.43   z in [ 3.11, 177.07]   dz 6.213   cell-centred
+        max_Z = 1.20   z in [14.40, 165.60]   dz 6.574   floats 14.4 m up
+        max_Z = 1.00   z in [27.00, 153.00]   dz 6.632   floats 27.0 m up
+
+    dz also jumps across the branch -- 6.213 to 6.574 -- because the cell-centred span is
+    Lz - dz over Nz points while the hub-centred one is Lz over Nz, so a max_Z sweep has a
+    kink in it as well.
+
+    The shipped max_Z = 2.0 is safe for every rig here (the binding ratio is
+    2*Zhub/D = 1.43 for the NREL rotor, 1.67 for the wind tunnel), but it is silent, and
+    the whole point of the momentum integral is that a boundary sink hides from every
+    pointwise metric. Raising rather than quietly cell-centring at any max_Z: where the
+    bottom of the box SHOULD be when it does not contain the ground is a modelling
+    question, not a default -- the same reason _assert_shared_grid refuses terrain.
+    """
+    for t in ts:
+        need = 2.0 * t.Zhub / t.D
+        if t._params.field_params.max_Z < need:
+            raise ValueError(
+                f"max_Z = {t._params.field_params.max_Z:.3f} puts the bottom of the "
+                f"vertical domain at z = {t.Zhub - t._params.field_params.max_Z * t.D / 2:.2f} m, "
+                f"above the ground, for a rotor at Zhub = {t.Zhub:.1f} m and D = {t.D:.1f} m. "
+                f"The deficit is pinned to zero on that row and the k_w budget treats it as "
+                f"the ground, so the wake would be sliced off in mid-air. Use "
+                f"max_Z > 2*Zhub/D = {need:.3f}.")
+
+
 def _assert_shared_grid(ts):
     """Every rotor must sit on one absolute cross-plane grid, in BOTH y and z.
 
@@ -252,6 +291,7 @@ def solve_single_field(wf, verbose=False):
     ts = wf.turbines
     _assert_turbulence_admissible(wf.field_params)
     _assert_ring_survives_merging(ts)
+    _assert_domain_reaches_ground(ts)
     _assert_shared_grid(ts)
     stations = _x_stations(ts, X_STATION_TOL_D * ts[0].D) if ts else []
     prev, carried_vortex, carried_kw = None, None, None
