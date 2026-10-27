@@ -417,7 +417,12 @@ def test_grouping_tolerance_does_not_change_the_answer():
     # not merely unchanged but much better than when this anchor was last set: grouping
     # -0.348% -> +0.047%, threshold -0.908% -> -0.129%. The carve cannot couple a rotor to
     # the station grouping at all -- it is cell geometry, evaluated per rotor.
-    assert abs(grouped - 0.75784234656775307) / 0.75784234656775307 < 1e-9, (
+    # Re-recorded for COVERAGE-WEIGHTED rotor averages; was 0.75784234656775307, +0.123%.
+    # The locality this anchor protects is untouched and the two LEAK probes improve
+    # sharply: lateral +0.061% -> -0.009%, distant-upstream +0.050% -> -0.014%. A weight
+    # is read per rotor from its own geometry, so it cannot couple a rotor to the station
+    # grouping at all.
+    assert abs(grouped - 0.75877803471657956) / 0.75877803471657956 < 1e-9, (
         f'the grouped branch itself moved: {grouped:.17g}; re-record only if this was '
         f'deliberate, since it is the reference the split branch is held to')
 
@@ -456,7 +461,16 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     values; when one lands, these goldens must be re-recorded deliberately, not relaxed. That
     has happened once, for the conservative operator -- see the note on golden_row.
     """
-    golden_isolated = {0.0: 0.99693986652197308, 25.0: 0.99761049965016602}
+    # Re-recorded 2026-10-27 for COVERAGE-WEIGHTED rotor averages. These two SHOULD BE
+    # EQUAL: the yawed disc is the unyawed one compressed in y by cos(beta), so every
+    # z-row's y-extent scales by the same factor, the relative weighting across z is
+    # untouched, and the disc mean of a z-only profile cannot change. Fine quadrature
+    # confirms it to 9e-16 at 0.99649857303760725. Measured against that exact value the
+    # boolean disc was +0.0443% at 0 deg and +0.1116% at 25; weighting gives +0.0075% and
+    # -0.0102%, i.e. 6x and 11x closer, and the SPURIOUS YAW DEPENDENCE of an isolated
+    # rotor's own inflow -- which fed every yaw comparison in the model -- falls from
+    # 0.0671% to 0.0177%. See tp.disc_weights_on.
+    golden_isolated = {0.0: 0.99657373444710984, 25.0: 0.99639703619012632}
     for beta, ref in golden_isolated.items():
         got = _sim([[0.0, 0.0, 0.0]], [beta]).wind_farm.turbines[0].Uhub / 8.0
         assert abs(got - ref) / ref < 1e-9, (
@@ -593,8 +607,10 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # its own wake -- and T2-T5 move -0.065/+0.053/+0.049/+0.051%. Small, and NOT an
     # accuracy change: the whole bench moves by <= 0.0007. It is landed for the SHAPE of
     # the error, not its size. See _disc_fraction.
-    golden_row = [0.99693986652197308, 0.68686716644086487, 0.72016551158857134,
-                  0.71452377638960107, 0.70413202685047727]
+    # Amended with golden_isolated above for the coverage-weighted averages: T1 -0.037%
+    # (it is the isolated case), then +0.149/+0.059/+0.103/+0.110%.
+    golden_row = [0.99657373444710984, 0.68788847504719874, 0.72059490969670359,
+                  0.71491134917071042, 0.70454290948865861]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):

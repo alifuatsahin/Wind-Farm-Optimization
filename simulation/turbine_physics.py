@@ -22,14 +22,58 @@ def init_Uin(params):
 
 
 def rotor_disc_mask(params):
-    """The yaw-projected rotor disc, shifted by Yoffset -- the one disc every rotor-average
-    in the model is taken over. Matches wake_solver's own rmask exactly."""
+    """The yaw-projected rotor disc as a BOOLEAN, for diagnostics that want cell counts.
+
+    Not what the model averages over -- see rotor_disc_weights.
+    """
     r2 = (((params.yloc + params.Yoffset) ** 2) / (np.cos(params.beta) ** 2)
           + (params.zloc - params.Zhub) ** 2)
     return np.sqrt(r2) <= params.R
 
 
-def rotor_equivalent_cubic(U, mask):
+def disc_weights_on(yloc, zloc, p, dy):
+    """Fractional cell coverage of rotor p's disc on a grid whose local y is offset by dy.
+
+    THE WEIGHT EVERY ROTOR-AVERAGE IN THE MODEL IS TAKEN WITH. A boolean disc counts a
+    cell fully or not at all, so as the ellipse narrows with cos(beta) the averaged SET
+    changes in jumps and the rotor average inherits a sawtooth in yaw. That matters more
+    here than for the carve: this is the OUTPUT side, with no downstream diffusion to
+    smooth it, and the power the yaw optimiser reads is built straight from it.
+
+    Measured on a partially-waked disc (wake centre 0.25 D off axis), sweeping beta over
+    0-40 deg in 1 deg steps and taking the mean |2nd difference| of (<U^3>)^(1/3):
+
+        n_grids          14         20         28         36
+        boolean     1.08e-03   8.31e-04   7.02e-04   6.42e-04
+        weighted    5.67e-05   5.00e-05   5.40e-05   3.99e-05
+
+    13-19x rougher, and the decisive part is that the boolean form barely CONVERGES: it
+    falls 1.7x for a 2.6x refinement, roughly h^0.55, where the weighted form is flat.
+    A slowly-converging error term is what keeps a grid dependence alive under refinement.
+
+    Both sides of the efficiency ratio use this same weight, so a pure area error cancels;
+    what does not cancel is the weighting of edge cells across a disc the wake only partly
+    covers -- which is maximal at partial overlap, the yaw range a steering optimum sits in.
+    """
+    y = np.asarray(yloc)
+    z = np.asarray(zloc)
+    dl_cell = np.sqrt((y[1, 0] - y[0, 0]) * (z[0, 1] - z[0, 0]))
+    return _disc_fraction(y, z, p, dy, dl_cell)
+
+
+def rotor_disc_weights(params):
+    """disc_weights_on for a rotor reading its own grid."""
+    return disc_weights_on(params.yloc, params.zloc, params, 0.0)
+
+
+def rotor_average(U, w):
+    """Coverage-weighted arithmetic disc mean -- the speed the AERODYNAMICS use."""
+    u = np.asarray(U)
+    w = np.asarray(w, dtype=float)
+    return float(np.sum(w * u) / np.sum(w))
+
+
+def rotor_equivalent_cubic(U, w):
     """Cubic rotor-equivalent wind speed, (<U^3>)^(1/3) over the disc.
 
     This is the speed POWER must be read from. Zong & Porte-Agel (2020) Eq (4.11) defines
@@ -47,20 +91,20 @@ def rotor_equivalent_cubic(U, mask):
     It is a real bias in the right direction but only ~10-15% of the sweep's slope error;
     it flattens the ridge without moving the argmax. Fixed because it is correct and free,
     not because it resolves the optimum."""
-    u = np.asarray(U)[mask]
-    return float(np.mean(u ** 3) ** (1.0 / 3.0))
+    u = np.asarray(U)
+    w = np.asarray(w, dtype=float)
+    return float((np.sum(w * u ** 3) / np.sum(w)) ** (1.0 / 3.0))
 
 
 def nominal_hub_velocity(params):
     """Rotor-averaged undisturbed inflow -- depends only on config, never on the mutated Uin.
     """
-    Uin = init_Uin(params)
-    return float(np.mean(Uin[rotor_disc_mask(params)]))
+    return rotor_average(init_Uin(params), rotor_disc_weights(params))
 
 
 def nominal_hub_velocity_cubic(params):
     """nominal_hub_velocity's cubic counterpart, the reference for the power ratio."""
-    return rotor_equivalent_cubic(init_Uin(params), rotor_disc_mask(params))
+    return rotor_equivalent_cubic(init_Uin(params), rotor_disc_weights(params))
 
 
 def init_local_conditions(params):

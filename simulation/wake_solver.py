@@ -297,12 +297,11 @@ def solve_single_field(wf, verbose=False):
         if prev is not None:
             for t in group:
                 dy_s = lead.pos[1] - t.pos[1]
-                rmask_s = np.sqrt(((lead.yloc + dy_s + t.Yoffset) / np.cos(t.beta)) ** 2
-                                  + (lead.zloc - t.Zhub) ** 2) <= t.D / 2.0
-                if not rmask_s.any():
+                w_s = tp.disc_weights_on(lead.yloc, lead.zloc, t._params, dy_s)
+                if w_s.sum() <= 0.0:
                     continue
-                Ubar = float(np.mean(U0[rmask_s]))
-                Vbar = float(np.mean(V0[rmask_s]))
+                Ubar = tp.rotor_average(U0, w_s)
+                Vbar = tp.rotor_average(V0, w_s)
                 sk = float(np.arctan2(Vbar, max(Ubar, 1e-6)))
                 t._params = dataclasses.replace(
                     t._params, skew=sk,
@@ -317,12 +316,12 @@ def solve_single_field(wf, verbose=False):
             # two sides of the efficiency ratio were averaged over discs 0.085D apart
             # at beta = 25 deg. Yoffset is zero at zero yaw, so aligned cases are
             # unaffected.
-            rmask = np.sqrt(((lead.yloc + dy + t.Yoffset) / np.cos(t.beta)) ** 2
-                            + (lead.zloc - t.Zhub) ** 2) <= t.D / 2.0
-            t.Uhub = float(np.mean(U0[rmask]))
+            # ...and by COVERAGE, not in/out by cell centre: see tp.disc_weights_on.
+            rw = tp.disc_weights_on(lead.yloc, lead.zloc, t._params, dy)
+            t.Uhub = tp.rotor_average(U0, rw)
             # Power is read from the CUBIC rotor-equivalent speed over the same disc
             # (Zong Eq 4.11 / IEC REWS); the aerodynamics keep the arithmetic mean.
-            t.Uhub3 = tp.rotor_equivalent_cubic(U0, rmask)
+            t.Uhub3 = tp.rotor_equivalent_cubic(U0, rw)
             t.V, t.W = zeros, zeros  # upstream influence is explicit in the vortex cloud
 
         # ... and sheds its ring into the shared cloud, shifted into the lead's frame
