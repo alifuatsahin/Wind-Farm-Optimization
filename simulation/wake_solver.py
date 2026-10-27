@@ -7,6 +7,7 @@ still-evolving cloud rather than starting a fresh, isolated system.
 """
 import dataclasses
 
+import os
 import numpy as np
 import jax.numpy as jnp
 
@@ -75,6 +76,24 @@ def _march_segment(t, seed, need_m, U0, Uin_global, companions=(),
     if float(t.wake_field[-1].X) < need_m * 0.999:
         raise RuntimeError(f"march at x={t.pos[0]:.0f} reached only "
                            f"{float(t.wake_field[-1].X):.1f} m of {need_m:.1f} m")
+
+    # The cloud and the deficit do NOT share a streamwise coordinate. vortex_model
+    # advances `age += Uhub*dt` while the deficit advances `dx = dt*U_rep(U, Uin)`, and
+    # U_rep is smaller inside a wake -- measured age/X = 1.41-1.49 on the full-wake row.
+    # The cloud's own stop is t_limit = 1.5*calculation_domain/D in Uhub*t, so that ratio
+    # eats directly into the margin, and interpolate_vec_data CLAMPS to the last frame
+    # rather than raising: if the cloud stopped first, the cross-flow would silently
+    # freeze for the tail of every segment and the wake would stop being steered.
+    # Measured margin on the full-wake row is 1.05 / 1.28 / 1.35 -- only 5% on the first
+    # rotor, so a slower wake (deeper array, higher Ct) could exhaust it.
+    _vt = np.asarray(t.vortex_field.t)
+    if _vt.size and float(t.wake_field[-1].t) > float(_vt.max()) * (1.0 + 1e-9):
+        raise RuntimeError(
+            f"vortex cloud at x={t.pos[0]:.0f} stopped at t={float(_vt.max()):.5f} but the "
+            f"deficit march reached t={float(t.wake_field[-1].t):.5f}, so the cross-flow is "
+            f"frozen (clamped to the last cloud frame) over the tail of this segment. The "
+            f"cloud ages on Uhub while the deficit advances on the local wake speed; raise "
+            f"the vortex t_limit in vortex_model.")
 
 
 def _assert_turbulence_admissible(field_params):

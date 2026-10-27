@@ -19,7 +19,22 @@ def _simulate_vortex_evolution_jit(config, merge_threshold, cfl_factor, total_st
                                    seed=None):
     D = config.D
     Uhub = config.Uhub
-    t_limit = 1.5 * config.calculation_domain / D  # dimensionless domain-exit threshold
+    # Dimensionless domain-exit threshold, in Uhub*t/D. It must cover the DEFICIT march,
+    # and the two do not share a coordinate: the cloud ages on Uhub while the deficit
+    # advances on the local wake speed, so age/X runs 1.41-1.49 on the full-wake row.
+    #
+    # At the old 1.5 that margin was spent exactly, and the ALIGNED case -- whose wake is
+    # deeper, hence slower, hence ages fastest per unit X -- came out at 0.91-0.92, i.e.
+    # the cloud stopped BEFORE the deficit did and interpolate_vec_data silently clamped
+    # the cross-flow to the last cloud frame over the final ~8% of rotor 1's segment. The
+    # yawed cases sat at 1.04-1.05 and were fine, so the artefact hit the baseline of
+    # every steering comparison and not the yawed numerator.
+    #
+    # 2.5 clears the worst measured age/X with room for a slower wake still (deeper array,
+    # higher Ct). Overshoot is cheap: the march stops on this threshold, and steps past a
+    # frozen cloud re-emit a frozen state. wake_solver._march_segment asserts the coverage
+    # rather than trusting this constant.
+    t_limit = 2.5 * config.calculation_domain / D
 
     if seed is None:
         seed = _define_location(config)[0]
