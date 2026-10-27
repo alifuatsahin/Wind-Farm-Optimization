@@ -452,6 +452,44 @@ def _disc_mask(yloc, zloc, p, dy, radius=None):
     return np.sqrt(r2) <= (p.R if radius is None else radius)
 
 
+def _disc_radius(yloc, zloc, p, dy):
+    """Distance from rotor p's yaw-projected axis, in the same metric as _disc_mask."""
+    return np.sqrt(((yloc + dy + p.Yoffset) ** 2) / (np.cos(p.beta) ** 2)
+                   + (zloc - p.Zhub) ** 2)
+
+
+def _disc_fraction(yloc, zloc, p, dy, dl_cell, radius=None):
+    """Fractional cell coverage of the yaw-projected disc, instead of in/out.
+
+    A BOOLEAN mask makes the carved area -- and therefore the momentum removed at the
+    rotor -- a SAWTOOTH in both yaw and resolution, because it counts whichever cell
+    centres happen to fall inside the ellipse. Measured against the exact pi R^2 cos(beta),
+    worst case over beta = 0-40 deg:
+
+        n_grids        14      20      28      36      44
+        boolean      3.21%   1.47%   1.62%   0.87%   0.51%
+        fractional   0.97%   0.22%   0.15%   0.05%   0.04%
+
+    The magnitudes matter less than the SHAPE: the boolean error is non-monotone in both
+    arguments -- 28 is worse than 20 at beta = 25 deg -- so refining the grid does not
+    reliably improve it and a yaw sweep inherits a sawtooth that looks like physics. The
+    fractional error falls smoothly as O(dl^2). This is the same argument that replaced the
+    nacelle's boolean mask in 51c71fd, where a 1.34-cell body made the term sawtooth 2.1x
+    over yaw; the rotor spans many more cells, so the error is smaller but has the same
+    non-smooth character.
+
+    NOT normalised to the exact area, unlike the nacelle carve below. Normalising rescales
+    every cell's weight to force the total, which is right for a sub-cell body whose
+    coverage estimate is otherwise unreliable, and wrong here -- it would trade a 0.15%
+    area error for a systematic distortion of the radial profile across a well-resolved
+    disc. The table above is the justification: unnormalised coverage is already accurate
+    to a few tenths of a percent at every resolution the model is run at.
+    """
+    rad = p.R if radius is None else radius
+    r = _disc_radius(yloc, zloc, p, dy)
+    return np.clip(0.5 - (r - rad) / dl_cell, 0.0, 1.0)
+
+
 def initialize_wake_field(params, stacked, local, companions=(), kw0=None, wage0=None,
                           ti0=None):
     yloc = np.asarray(stacked.yloc)
@@ -465,10 +503,11 @@ def initialize_wake_field(params, stacked, local, companions=(), kw0=None, wage0
     # Rotors sharing this station shed simultaneously, so all their discs are carved
     # into the same initial condition. `companions` is empty for one turbine per x,
     # which is the single-row case and reduces to the original single-disc carve.
+    _dl_cell = np.sqrt((yloc[1, 0] - yloc[0, 0]) * (zloc[0, 1] - zloc[0, 0]))
     for p, dy in ((params, 0.0),) + tuple(companions):
-        mask = _disc_mask(yloc, zloc, p, dy)
+        frac = _disc_fraction(yloc, zloc, p, dy, _dl_cell)
         a0 = float(0.5 * (1.0 - np.sqrt(max(1.0 - _ct_eff(p) * 0.5, 0.0))))  # erf(0) = 0
-        U[mask] -= 2.0 * U[mask] * a0
+        U -= 2.0 * U * a0 * frac
 
     # THE NACELLE AS A SECOND, CO-LOCATED ACTUATOR DISC.
     #

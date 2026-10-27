@@ -412,7 +412,12 @@ def test_grouping_tolerance_does_not_change_the_answer():
     # Re-recorded 2026-10-27 with the azimuthally weighted ramp removed in favour of
     # Zong's uniform multiplier; was 0.76910753494860562. The LOCALITY this anchor exists
     # to protect is unchanged -- grouping -0.348%, distant-upstream +0.048%.
-    assert abs(grouped - 0.75872868698909457) / 0.75872868698909457 < 1e-9, (
+    # Re-recorded the same day for the carried age/TI fields (63458af) and then for the
+    # FRACTIONAL ROTOR CARVE; was 0.75872868698909457, i.e. -0.117% in total. Locality is
+    # not merely unchanged but much better than when this anchor was last set: grouping
+    # -0.348% -> +0.047%, threshold -0.908% -> -0.129%. The carve cannot couple a rotor to
+    # the station grouping at all -- it is cell geometry, evaluated per rotor.
+    assert abs(grouped - 0.75784234656775307) / 0.75784234656775307 < 1e-9, (
         f'the grouped branch itself moved: {grouped:.17g}; re-record only if this was '
         f'deliberate, since it is the reference the split branch is held to')
 
@@ -582,8 +587,14 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # CONTROL for that change, exactly as it was for k_w's cross-plane advection; where
     # the term is meant to act, the yawed cases move 10-30x as far (LES yawed R2
     # .8804 -> .8823, full-wake B .9117 -> .9145, its TI R2 .751 -> .758).
-    golden_row = [0.99693986652197308, 0.68731083792017822, 0.71978320050453748,
-                  0.71417527683031601, 0.70377012629588398]
+    # Amended again for the FRACTIONAL ROTOR CARVE: the disc now removes momentum in
+    # proportion to each cell's coverage instead of in/out by cell centre. T1 and the two
+    # isolated cases above are BIT-IDENTICAL -- a rotor's own Uhub reads its inflow, not
+    # its own wake -- and T2-T5 move -0.065/+0.053/+0.049/+0.051%. Small, and NOT an
+    # accuracy change: the whole bench moves by <= 0.0007. It is landed for the SHAPE of
+    # the error, not its size. See _disc_fraction.
+    golden_row = [0.99693986652197308, 0.68686716644086487, 0.72016551158857134,
+                  0.71452377638960107, 0.70413202685047727]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):
