@@ -64,9 +64,23 @@ UH = 4.9
 #: Measured in-dataset; see the module docstring.
 I_AMB = 0.070
 
-#: z0 is not measured for this tunnel. Hold log(Zh/z0) at the model's full-scale default,
-#: exactly as _base_case does, so the inflow profile SHAPE is unchanged and z0 does not
-#: become a second free parameter.
+#: Hold log(Zh/z0) at the model's full-scale default, exactly as _base_case does, so the
+#: inflow profile SHAPE is unchanged and z0 does not become a second free parameter.
+#:
+#: THIS USED TO SAY "z0 is not measured for this tunnel". That is FALSE: Zong &
+#: Porte-Agel (2020) Sec 2 fit the same facility's boundary layer and report u* = 0.22
+#: m/s, a viscous length of 0.068 mm and z0 = 0.7 mm. The caveat that IS true is narrower
+#: -- their boundary layer runs at I_amb = 0.055 and this dataset at 0.070, so 0.7 mm is
+#: better sourced than the back-scaled 4.17e-5 without being exact for this inflow.
+#:
+#: AND IT MATTERS MORE THAN AN INFLOW CONSTANT SHOULD, because z0 does DOUBLE DUTY: it
+#: sets the log profile AND, through turbine_physics.abl_nu_slope (k = 0.4/ln(Zh/z0),
+#: nu ~ k^2), the vortex core diffusivity that decides how long the CVP survives and
+#: therefore how far the wake steers. Those are different measurements. Between the two
+#: values the lever on nu_c is 2.38x, and measured on this row at yaw (25, 15, 0) the
+#: STEERING GAIN CHANGES SIGN -- +1.63% at 4.17e-5 against -0.93% at 7.0e-4, off a
+#: deflection that moves only 4.7%. Do not read a yaw benefit from this model without
+#: quoting z0 alongside it; see memory z0-double-duty-flips-the-gain.
 Z0 = 0.03 * (ZHUB / 90.0)
 
 POSITIONS_D = (0.0, 5.0, 10.0)
