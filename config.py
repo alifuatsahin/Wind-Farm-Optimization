@@ -197,6 +197,24 @@ class FieldConfig:
     cfl_factor: float = 0.125 # CFL factor for adaptive time stepping
     merge_threshold: float = 0.05 # Vortex merging distance, IN ROTOR DIAMETERS.
     vortex_nu: str = 'abl'
+    #: Friction velocity in m/s for the ABL vortex-core diffusivity. None derives it from
+    #: the log law, u* = kappa*Uh/ln(Zh/z0), which is the historical behaviour and leaves
+    #: every result unchanged.
+    #:
+    #: It is separable because z0 does DOUBLE DUTY and the two jobs want different numbers.
+    #: z0 sets the inflow profile shape, and through turbine_physics.abl_nu_slope it also
+    #: sets how fast the CVP decays and therefore how far a yawed wake steers. For the
+    #: WIRE-01 tunnel those pull opposite ways: the back-scaled z0 = 0.03*(0.125/90) gives
+    #: u* = 0.245 against Zong & Porte-Agel (2020) Sec 2's MEASURED 0.22 m/s, i.e. 11% high,
+    #: while their measured z0 = 0.7 mm would give u* = 0.378, i.e. 72% high. So the
+    #: back-scaled roughness is wrong for the profile and nearly right for the friction
+    #: velocity, and substituting the measured roughness FLIPS THE SIGN of the steering gain
+    #: (+1.63% -> -0.93%) by inflating u*, not by being more correct.
+    #:
+    #: Setting u_star directly is therefore the honest route: it is a measurable Zong
+    #: reports, and it decouples the CVP decay from a roughness length that was never
+    #: measured for this inflow. See memory z0-double-duty-flips-the-gain.
+    u_star: Optional[float] = None
 
 @dataclass
 class Config:

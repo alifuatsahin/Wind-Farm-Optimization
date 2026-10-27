@@ -190,7 +190,18 @@ def abl_nu_slope(params):
     over x/D = 2-10 (NREL-5MW, 25 deg, LES inflow; paper_metrics.py mNuRatioLo/Hi), which is why the model conserved circulation where the LES does not.
     """
     k = 0.4 / np.log(params.Zh / params.field_params.z0)
-    u_star = k * params.Uh
+    # u* may be given directly. z0 does double duty -- the inflow profile AND, through this
+    # function, the CVP decay that sets how far a yawed wake steers -- and for the WIRE-01
+    # tunnel the two want different numbers: the back-scaled z0 gives u* = 0.245 against
+    # Zong Sec 2's measured 0.22 (11% high), while his measured z0 = 0.7 mm would give
+    # 0.378 (72% high) and FLIPS THE SIGN of the steering gain. So the roughness is wrong
+    # for the profile and nearly right for the friction velocity. None keeps the log-law
+    # identity and every historical result; see FieldConfig.u_star.
+    #
+    # k is left on z0 deliberately: in Shapiro Eq (4.7) it is the Jensen wake growth rate,
+    # not a friction quantity, so it is not what an u* measurement replaces.
+    u_star = getattr(params.field_params, "u_star", None)
+    u_star = k * params.Uh if u_star is None else float(u_star)
     return u_star * 2.0 * k / np.sqrt(24.0)
 
 
