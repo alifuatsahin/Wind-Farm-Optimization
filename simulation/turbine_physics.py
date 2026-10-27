@@ -720,13 +720,34 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
     rotor_mask = np.zeros((n_slots,) + yloc.shape)
     Ct_eff = np.zeros(n_slots)
     x_off = np.zeros(n_slots)
+    dl_cell = np.sqrt((yloc[1, 0] - yloc[0, 0]) * (zloc[0, 1] - zloc[0, 0]))
     for i, (p, dy, off) in enumerate(rotors):
         # Beyond RAMP_REACH_D the erf has saturated and the factor is 1 to within 1e-12,
         # so the slot is left inert rather than paying for a mask that cannot change U.
         # This is an optimisation only; including it would give the same answer.
         if off >= RAMP_REACH_D * p.D:
             continue
-        rotor_mask[i] = np.asarray(smooth_2d(_disc_mask(yloc, zloc, p, dy).astype(float),
+        # BY COVERAGE, then smoothed. The Gaussian conserves the integral EXACTLY --
+        # measured, a boolean mask and its smoothed version agree to every digit -- so
+        # smoothing never hid the quantisation, it only spread it. Against the exact
+        # pi R^2 cos(beta) over beta = 0-40 deg the boolean footprint errs by up to 3.15%
+        # at n_grids 20 and 1.69% at 28, where coverage errs by 0.32% and 0.24%.
+        #
+        # It matters here more than for the carve, because the carve injects only a(0)
+        # and THIS is where the rest of the deficit develops. Measured as the roughness
+        # of farm power over a 0-40 deg yaw sweep in 2 deg steps, mean |2nd difference|:
+        #
+        #     n_grids            20         28
+        #     boolean      1.718e-03  1.975e-03
+        #     coverage     1.212e-03  1.183e-03
+        #
+        # -29% and -40%, but the shape is the real argument: the boolean form gets WORSE
+        # under refinement, which is the quantisation signature, while coverage is
+        # resolution-independent. The smoothing is KEPT -- coverage alone scores the same
+        # mean roughness (1.203e-03), so dropping the Gaussian buys nothing and would be
+        # an unjustified second change, sharpening the footprint by ~3 cells and moving
+        # where Ct develops.
+        rotor_mask[i] = np.asarray(smooth_2d(_disc_fraction(yloc, zloc, p, dy, dl_cell),
                                              kernel_size=3))
         Ct_eff[i] = _ct_eff(p)
         x_off[i] = off

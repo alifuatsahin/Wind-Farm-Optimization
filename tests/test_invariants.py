@@ -422,7 +422,11 @@ def test_grouping_tolerance_does_not_change_the_answer():
     # sharply: lateral +0.061% -> -0.009%, distant-upstream +0.050% -> -0.014%. A weight
     # is read per rotor from its own geometry, so it cannot couple a rotor to the station
     # grouping at all.
-    assert abs(grouped - 0.75877803471657956) / 0.75877803471657956 < 1e-9, (
+    # Re-recorded for the coverage-weighted RAMP FOOTPRINT; was 0.75877803471657956,
+    # -0.261%. Locality is untouched -- grouping +0.044%, lateral -0.006%,
+    # distant-upstream -0.014% -- and a coverage weight is read per rotor from its own
+    # geometry, so it cannot couple a rotor to the station grouping.
+    assert abs(grouped - 0.75679968436946754) / 0.75679968436946754 < 1e-9, (
         f'the grouped branch itself moved: {grouped:.17g}; re-record only if this was '
         f'deliberate, since it is the reference the split branch is held to')
 
@@ -609,8 +613,12 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # the error, not its size. See _disc_fraction.
     # Amended with golden_isolated above for the coverage-weighted averages: T1 -0.037%
     # (it is the isolated case), then +0.149/+0.059/+0.103/+0.110%.
-    golden_row = [0.99657373444710984, 0.68788847504719874, 0.72059490969670359,
-                  0.71491134917071042, 0.70454290948865861]
+    # Amended for the COVERAGE-WEIGHTED RAMP FOOTPRINT, the last of the three boolean
+    # discs (carve d24cc24, rotor average 692468d, now the ramp). T1 and both isolated
+    # cases are BIT-IDENTICAL -- the ramp acts only on a wake, and an isolated rotor's
+    # Uhub reads its undisturbed inflow -- and T2-T5 fall a uniform 0.12-0.15%.
+    golden_row = [0.99657373444710984, 0.68688360999404552, 0.71959984371631136,
+                  0.71403713685016323, 0.70369606766230930]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):
