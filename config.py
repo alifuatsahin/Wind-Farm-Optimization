@@ -188,7 +188,19 @@ class FieldConfig:
     Zh: float = 80.0 # Height of the wind speed measurement
     WV: float = 0.0 # Vertical wind veer
     I_amb: float = 0.072 # Ambient turbulence intensity
-    Nv: int = 49
+    #: Ring elements shed per rotor. Bounded ABOVE by merging, not by cost: the yawed ring
+    #: is foreshortened to semi-minor axis R*cos(beta), so its closest neighbour spacing is
+    #: pi*D*cos(beta)/Nv and the ring survives only while that exceeds merge_threshold*D
+    #: (see wake_solver._assert_ring_survives_merging). The old 49 satisfied that at 0 deg
+    #: and FAILED from 40 deg, which is inside the +-40 deg yaw sweep -- 32 of its 117 rows
+    #: were silently computed with a ring that collapsed on step one.
+    #:
+    #: 40 holds to 49 deg. Lowering it is free rather than a trade: measured at Nv =
+    #: 36 / 44 / 49 the bench agrees to 0.0003 in every R2 (8-turbine, both LES, all three
+    #: full-wake) and deflection RMSE moves at most 0.001 D, so the answer is converged
+    #: well below the old value. merge_threshold is the wrong side of the inequality to
+    #: move: it is a physics lever (raising it INCREASES deflection), Nv is discretisation.
+    Nv: int = 40
     z0: float = 0.03 # Surface roughness length (Open sea 0.0002, Flat land 0.03)
     min_X: float = 7.0 # Minimum downstream distance to simulate (in rotor diameters)
     max_Y: float = 3.0 # Maximum lateral distance to simulate (in rotor diameters)

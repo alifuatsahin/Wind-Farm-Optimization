@@ -625,6 +625,31 @@ def test_low_ambient_turbulence_is_refused_not_silently_diverged():
     assert lo > -1e-6, f'march went negative just above the cliff: min U = {lo}'
 
 
+def test_default_ring_survives_the_largest_yaw_we_sweep():
+    """Nv and merge_threshold are coupled, and the DEFAULTS have to satisfy that coupling.
+
+    The yawed ring is foreshortened to semi-minor axis R*cos(beta), so its closest
+    neighbour spacing is pi*D*cos(beta)/Nv and _merge_close_vortices destroys the ring
+    once that falls to merge_threshold*D. wake_solver raises when a RUN violates it, which
+    is the right behaviour for a user's config but says nothing about ours: Nv = 49 passed
+    every test in this file for months and was invalid from 40 deg up, so 32 of the yaw
+    sweep's 117 rows were computed with a ring that collapsed on step one. Nothing noticed,
+    because no test and no figure looks at the ring.
+
+    This is pure arithmetic on the defaults -- no simulation -- and it is pinned to the
+    sweep's range rather than to the current Nv, so widening the sweep fails here first.
+    """
+    import simulation.wake_solver  # noqa: F401  (imported for the module-level constants)
+    fc = FieldConfig()
+    sweep_max_deg = 40.0        # validation_fullwake.run_yaw_sweep tabulates +-40
+    spacing = np.pi * np.cos(np.radians(sweep_max_deg)) / fc.Nv
+    assert spacing > fc.merge_threshold, (
+        f'at the default Nv={fc.Nv} the ring spacing at {sweep_max_deg:.0f} deg is '
+        f'{spacing:.4f} D, at or below merge_threshold={fc.merge_threshold:.4f} D: the '
+        f'shed ring collapses on the first step over part of the swept yaw range. Lower '
+        f'Nv below {np.pi * np.cos(np.radians(sweep_max_deg)) / fc.merge_threshold:.1f}')
+
+
 def test_nacelle_is_absent_by_default_and_central_when_present():
     """The nacelle disc must be OFF unless a rotor is given one, and act on the centreline.
 
