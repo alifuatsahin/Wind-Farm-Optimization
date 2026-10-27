@@ -32,6 +32,8 @@ resolve_ab() runs both and reports which assignment reproduces the measured defl
 import os
 
 import numpy as np
+
+from simulation.utils import report_conservation
 import h5py
 import matplotlib.pyplot as plt
 
@@ -304,6 +306,14 @@ def validate_baseline(save_dir='runs/validation_fullwake', **kw):
           % kw.get('i_amb', I_AMB))
     m, sim = validate_fullwake_case('C', BASELINE_YAW, save_dir=save_dir, **kw)
     _report(m)
+    # Standing conservation check. Closure-independent, and the only diagnostic that tells
+    # a boundary sink from physics -- see utils.conservation_integrals, which found ~9% of
+    # the momentum deficit per bay leaving through the LID on the 8-turbine row. Only bay 3
+    # on is a conservation statement: bays 1-2 are the erf ramp still developing, measured
+    # here at M +13.4% and K +49.1% in bay 2. So this 3-rotor rig reports one bay, which
+    # conserves to -0.9% -- the leak scales with how far the wake has spread vertically,
+    # so it is a DEEP-ARRAY problem and a short row barely shows it.
+    report_conservation(sim.wind_farm)
     return m, sim
 
 

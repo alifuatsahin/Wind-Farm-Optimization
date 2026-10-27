@@ -62,6 +62,81 @@ def ambient_tke(I_amb, U0):
 # maximum over the interior only.
 # ---------------------------------------------------------------------------------------
 
+def conservation_integrals(turbine):
+    """Per-bay conservation of the two transported integrals, as ratios to their 1 D value.
+
+        M(x) = Integral (Uin - U) U dA     -- equals sum(T_i/rho) for a sealed volume
+        K(x) = Integral k_w U dA           -- changes only by Integral (P - eps) dA
+
+    WHY THIS IS THE RIGHT FIRST QUESTION. Both are CLOSURE-INDEPENDENT as conservation
+    statements: div_nu_grad in flux form redistributes without changing either integral, so
+    a drift is a boundary sink, a carve error or a genuine source term -- never the eddy
+    viscosity. No pointwise field metric can distinguish "retained" from "relocated", and
+    that distinction is what decides most changes to this model.
+
+    REFERENCED TO 1 D, not to T/rho. Bays 1-2 are dominated by the erf ramp still
+    developing -- M rises 22-27% there, which is the ramp and not a sink -- so only bay 3
+    on is a conservation statement. An absolute T/rho ratio also folds in how much of the
+    wake the finite box still contains, which is a separate question.
+
+    WHAT IT FOUND IMMEDIATELY, on the 8-turbine row at the shipped max_Z = 2.0:
+
+        T3 M+4.5%  T4 -2.0%  T5 -4.5%  T6 -5.9%  T7 -6.8%  T8 -9.2%
+
+    A 2x2 domain test localised it: doubling the LATERAL extent changes nothing to three
+    decimals, doubling the VERTICAL extent removes the loss entirely (T8 -9.2% -> +0.8%).
+    The deficit leaves through the LID -- div_nu_grad makes the top reflecting for
+    diffusion, since the z-flux is not added on the last row, but it is free for advection.
+    With Zhub/D = 0.833 the shipped box leaves only 0.67 D above the rotor tip. That
+    refutes the note on bench's MAXZ override claiming the 8T row was immune to the lid,
+    which had been inferred from realised nu_T rather than measured as conservation.
+
+    And the leak is LOAD-BEARING: sealing it (max_Z = 4) takes the 8-turbine bias from
+    -.0024 to -.0050, T8's power ratio from .89 to .84, and both LES cases down ~0.01-0.014.
+    So the deep-array agreement partly rests on momentum escaping the top, and the per-bay
+    nu_T figures the deep-array work quotes were measured through a leaking volume.
+
+    A small POSITIVE residual is expected even with a good box: Zong Eq (3.7) carries
+    W dUin/dz, which he calls a production/destruction term for the deficit momentum.
+    """
+    live = [f for f in turbine.wake_field if np.size(f.U)]
+    if len(live) < 3:
+        return None
+    y = np.asarray(turbine.yloc)[:, 0]
+    z = np.asarray(turbine.zloc)[0, :]
+    dA = (y[1] - y[0]) * (z[1] - z[0])
+    Uin = np.asarray(turbine.Uin)
+    xs, Ms, Ks = [], [], []
+    for f in live:
+        U = np.asarray(f.U)
+        xs.append(float(f.X) / turbine.D)
+        Ms.append(float(np.sum(np.maximum(Uin - U, 0.0) * U) * dA))
+        kw = np.asarray(f.kw) if np.size(getattr(f, "kw", [])) else None
+        Ks.append(float(np.sum(kw * U) * dA) if kw is not None else np.nan)
+    j = next((k for k, x in enumerate(xs) if x > 1.0), 0)
+    return {"x_end": xs[-1],
+            "M_ratio": Ms[-1] / Ms[j] if Ms[j] else float("nan"),
+            "K_ratio": Ks[-1] / Ks[j] if Ks[j] else float("nan")}
+
+
+def report_conservation(wind_farm, first_bay=3):
+    """One line per farm: conservation_integrals for every bay from `first_bay` on."""
+    parts = []
+    for i, t in enumerate(wind_farm.turbines):
+        if i + 1 < first_bay:
+            continue
+        c = conservation_integrals(t)
+        if c is None:
+            continue
+        parts.append("T%d M%+.1f%% K%+.1f%%"
+                     % (i + 1, 100 * (c["M_ratio"] - 1), 100 * (c["K_ratio"] - 1)))
+    if parts:
+        print("  conservation, bays %d+ (M = Int Uw U dA, K = Int k_w U dA, ratio to 1 D)"
+              % first_bay)
+        print("    " + "  ".join(parts))
+    return parts
+
+
 def div_nu_grad(nu, f, dy, dz):
     """div(nu grad f) on the three-point stencil, in conservative flux form.
 
