@@ -374,7 +374,10 @@ def test_grouping_tolerance_does_not_change_the_answer():
     # +1.368%. The locality this anchor exists to protect is untouched: the closure still
     # reads only local fields, and the weight is renormalised PER ROTOR over that rotor's
     # own mask, so it cannot couple a rotor to the station grouping either.
-    assert abs(grouped - 0.76910753494860562) / 0.76910753494860562 < 1e-9, (
+    # Re-recorded 2026-10-27 with the azimuthally weighted ramp removed in favour of
+    # Zong's uniform multiplier; was 0.76910753494860562. The LOCALITY this anchor exists
+    # to protect is unchanged -- grouping -0.348%, distant-upstream +0.048%.
+    assert abs(grouped - 0.75872868698909457) / 0.75872868698909457 < 1e-9, (
         f'the grouped branch itself moved: {grouped:.17g}; re-record only if this was '
         f'deliberate, since it is the reference the split branch is held to')
 
@@ -517,16 +520,16 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # the signature of TI that now accumulates instead of declining. That is the point:
     # the equilibrium exponent changes from k ~ S^2 to k ~ S^(4/3), so the 6x deficit-
     # gradient collapse down a row costs 11x of TKE instead of 36x.
-    # Re-recorded 2026-10-27 when the vortex t_limit went 1.5 -> 2.5 so the cloud covers
-    # the deficit march (the cloud ages on Uhub, the deficit advances on the local wake
-    # speed, so age/X runs ~1.45 and the ALIGNED baseline was stopping the cloud at 0.91
-    # of the segment, silently clamping the cross-flow). T1 is BIT-IDENTICAL -- it has no
-    # upstream rotor -- and T2-T5 move 4e-8 to 1.3e-7, which is a longer vortex march
-    # perturbing the dt sequence, not a physical change: every bench metric is unchanged
-    # to 4 decimals, including the grouped anchor. Re-recorded rather than relaxed,
-    # exactly as this docstring requires.
-    golden_row = [0.9969398665219731, 0.6954307590740705, 0.7054885546198503,
-                  0.6879366782611915, 0.6744865483174958]
+    # Re-recorded 2026-10-27, TWICE, both deliberate:
+    #   * the vortex t_limit 1.5 -> 2.5, so the cloud covers the deficit march it steers.
+    #     T1 bit-identical, T2-T5 moved 4e-8 to 1.3e-7 -- a longer vortex march perturbing
+    #     the dt sequence, with every bench metric unchanged to 4 decimals.
+    #   * the azimuthally weighted ramp REMOVED for Zong's uniform multiplier. This one is
+    #     physical and large: T2 0.69543 -> 0.68731, T5 0.67449 -> 0.66613, i.e. a deeper
+    #     row, since the weighting had been deepening the core at the edge's expense.
+    # T1 is untouched by both -- an isolated rotor's own Uhub does not read its own wake.
+    golden_row = [0.99693986652197308, 0.68731083792017822, 0.68598409426523121,
+                  0.67703134608536109, 0.66612788959637725]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):

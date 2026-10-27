@@ -240,7 +240,6 @@ class DeficitFieldConfig:
     Zhub: float
     U0: float = 0.0  # rotor-averaged UNDISTURBED inflow (freestream), i.e. Du et al.'s U0
     rotor_mask: np.ndarray = None  # rotor disc, for the near-wake deficit ramp
-    rbin: np.ndarray = None        # radius ring index per rotor; azimuthal mean of the ramp weight
     Ct_eff: float = 0.0            # Ct_yawed / cos(beta), i.e. the Ct entering Zong Eq 3.3
     x_off: np.ndarray = None       # per-rotor streamwise age offset; see calculate_deficit_field
     ti_in: np.ndarray = None       # total TI INCIDENT on the station plane, per cell; feeds Du Eq (26)
@@ -248,7 +247,7 @@ class DeficitFieldConfig:
 
 jax.tree_util.register_dataclass(
     DeficitFieldConfig,
-    data_fields=["pos", "D", "Uhub", "Uin", "Zhub", "U0", "rotor_mask", "rbin", "Ct_eff",
+    data_fields=["pos", "D", "Uhub", "Uin", "Zhub", "U0", "rotor_mask", "Ct_eff",
                  "x_off", "ti_in"],
     meta_fields=[],
 )

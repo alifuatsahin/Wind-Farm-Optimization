@@ -326,17 +326,6 @@ def simulate_vortex_field(params, local, seed=None, total_steps=1000):
 #: 1.7e-13. Irrelevant physically, but do not claim bit-identity from this constant.
 RAMP_REACH_D = 6.0
 
-#: Rings used to take the azimuthal mean of the deficit that weights the ramp increment
-#: (see the ramp application in calculate_deficit_field). Quadrature resolution, NOT a
-#: model constant: over 12 / 24 / 48 the wind-tunnel R2 reads .9304 / .9304 / .9305,
-#: full-wake C .9523 / .9523 / .9525 and the deflection RMSE is identical to 3 decimals.
-RAMP_RINGS = 24
-
-#: Outer edge of the binned radius, in rotor radii. The mask is blurred over 3 cells so it
-#: reaches a little past R; everything beyond is clamped into the last ring, where the mask
-#: weight is already zero.
-RAMP_RING_RMAX = 1.25
-
 #: Safety margin on the explicit cross-plane diffusion limit. The bound itself is exact
 #: for a pure diffusion step; the march also advects laterally by (V, W) and runs a
 #: predictor-corrector, neither of which the bound accounts for, so it is not a margin
@@ -505,7 +494,6 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
     # test_completed_and_padded_rotors_are_inert_in_the_ramp_stack.
     n_slots = max(len(rotors) if n_slots is None else n_slots, len(rotors))
     rotor_mask = np.zeros((n_slots,) + yloc.shape)
-    rbin = np.zeros((n_slots,) + yloc.shape, dtype=np.int32)
     Ct_eff = np.zeros(n_slots)
     x_off = np.zeros(n_slots)
     for i, (p, dy, off) in enumerate(rotors):
@@ -516,13 +504,6 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
             continue
         rotor_mask[i] = np.asarray(smooth_2d(_disc_mask(yloc, zloc, p, dy).astype(float),
                                              kernel_size=3))
-        # Ring index on the SAME yaw-projected radius _disc_mask uses, so the rings follow
-        # the yawed disc. Used to take the azimuthal mean of the deficit about this rotor's
-        # own axis when the ramp increment is distributed.
-        _r_R = np.sqrt(((yloc + dy + p.Yoffset) ** 2) / (np.cos(p.beta) ** 2)
-                       + (zloc - p.Zhub) ** 2) / p.R
-        rbin[i] = np.clip((_r_R / RAMP_RING_RMAX * RAMP_RINGS).astype(np.int32),
-                          0, RAMP_RINGS - 1)
         Ct_eff[i] = _ct_eff(p)
         x_off[i] = off
 
@@ -550,7 +531,7 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
     adapter = DeficitFieldConfig(
         pos=jnp.asarray(params.pos), D=params.D, Uhub=local.Uhub, Uin=jnp.asarray(local.Uin), Zhub=params.Zhub,
         U0=float(nominal_hub_velocity(params)),
-        rotor_mask=jnp.asarray(rotor_mask), rbin=jnp.asarray(rbin),
+        rotor_mask=jnp.asarray(rotor_mask),
         Ct_eff=jnp.asarray(Ct_eff),
         x_off=jnp.asarray(x_off),
         ti_in=jnp.asarray(ti_in),
@@ -708,37 +689,40 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
             # annular (measured at 0.5D, bay 1: WIRE-01 falls 0.818 -> 0.363 from axis to
             # 0.43D, the LES disc RISES 0.332 -> 0.449).
             #
-            # So weight the same increment by the wake's own deficit, azimuthally averaged
-            # about this rotor's axis. This is the radially varying a(r) that QBlade's DWM
-            # and FAST.Farm's curled-wake module both carry, with one departure: they read
-            # a(r) off blade-element data, which no spec sheet gives, so it is inferred
-            # from the wake instead. The azimuthal mean matters -- weighting by the local
-            # deficit instead biases the increment toward the side the wake has already
-            # deflected to and costs 0.030 D of deflection RMSE on full-wake A.
+            # A RADIALLY WEIGHTED INCREMENT WAS SHIPPED HERE AND IS NOW REMOVED.
             #
-            # Renormalised so sum(w) == sum(mask) per rotor, i.e. the increment is
-            # REDISTRIBUTED, not grown: that keeps the telescoping which makes a full
-            # segment compose to the correctly developed deficit (see age_old/age_new
-            # above). Note this conserves a footprint measure, not momentum flux.
+            # It weighted the same increment by the wake's own deficit, azimuthally
+            # averaged about the rotor axis -- the radially varying a(r) that QBlade's DWM
+            # and FAST.Farm's curled-wake module both carry. It was worth, against this
+            # uniform form, +0.0168/+0.0200/+0.0146 of field R2 on full-wake C/A/B and
+            # +0.0068 on the 8-turbine row, with -0.0026 on the LES disc.
             #
-            # It is a trade, not a repair: the core deepens at the edge's expense, and the
-            # profile order is essentially unchanged. At 2D, r = 0.58D goes 0.102 against a
-            # measured 0.106 to 0.072, while the core gap at 3D falls 0.114 -> 0.084. Net
-            # +0.017/+0.019/+0.013 on full-wake C/A/B and +0.007 on the 8-turbine row,
-            # against -0.0025 on the LES -- the real rotors gain and the bare disc loses,
-            # which is the signature a blade-loading term should have.
-            _d = jnp.maximum(adapter.U0 - U, 0.0)
-            _m = adapter.rotor_mask
-
-            def _ring_mean(b, m):
-                num = jnp.zeros(RAMP_RINGS).at[b].add(m * _d)
-                den = jnp.zeros(RAMP_RINGS).at[b].add(m)
-                return (num / jnp.maximum(den, 1e-12))[b]
-
-            w = _m * jax.vmap(_ring_mean)(adapter.rbin, _m)
-            w = w * (_m.sum(axis=(1, 2), keepdims=True)
-                     / jnp.maximum(w.sum(axis=(1, 2), keepdims=True), 1e-12))
-            U = U * (1.0 + jnp.tensordot(ramp - 1.0, w, axes=1))
+            # Removed on PROVENANCE, with the cost measured and accepted. Two reasons:
+            #
+            #   1. It was the only closure in this model that READ THE SOLUTION IT WAS
+            #      MODIFYING. Eq (26) takes a frozen incident TI, the circulation comes
+            #      from Kutta-Joukowski, Ct(beta) from cos^2, the nacelle from a spec
+            #      sheet -- all functions of fixed inputs. Inferring a(r) from the wake is
+            #      self-referential, and DWM and FAST.Farm both read a(r) from
+            #      blade-element data instead, so the literature supports the SHAPE and
+            #      not our way of obtaining it. The renormalisation also conserved a
+            #      footprint measure, sum(w) == sum(mask), and not momentum flux.
+            #
+            #   2. It was buying the wrong thing. The near-wake defect is the profile
+            #      order n, and n's error is a RELAXATION RATE -- ours decays over ~6 D
+            #      against 1.14-1.52 D in the literature -- while the weighting left n
+            #      "essentially unchanged" by its own measurement. It bought DEPTH, and
+            #      the price shows up where depth is converted to power: removing it
+            #      IMPROVES the worst measured-power error on all three full-wake cases,
+            #      +2.9/+10.0/+14.0% -> +2.2/+7.3/+11.4%, and improves deflection on B
+            #      (0.078 -> 0.074) and the LES disc. Those are the only MEASURED powers
+            #      we have ([[fullwake-dataset]]).
+            #
+            # So this is Zong Eq (4.10)/A8 as written: the ramp is a plain multiplier over
+            # the disc, the uniform-loading idealisation, with no a(r). If a radial
+            # loading is wanted again it must come from blade-element data as a per-rotor
+            # input, not from the wake.
+            U = U * (1.0 + jnp.tensordot(ramp - 1.0, adapter.rotor_mask, axes=1))
 
             new = dataclasses.replace(new, U=U, kw=kw_new, X=X_new, t=current.t + dt)
 
