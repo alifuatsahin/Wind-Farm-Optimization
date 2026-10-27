@@ -188,25 +188,41 @@ def _assert_ring_survives_merging(ts):
 
 
 def _assert_shared_grid(ts):
-    """Every rotor must sit on one absolute cross-plane grid.
+    """Every rotor must sit on one absolute cross-plane grid, in BOTH y and z.
 
     Turbine i's inflow is read by interpolating turbine i-1's field onto i's grid. If
     the two do not coincide, points outside the source grid fall back to the undisturbed
     profile, and a wake can vanish with no error raised -- a 2x2 farm with its columns 7D
     apart once reported every rotor at free-stream. WindFarm builds the shared grid; this
     catches a farm assembled some other way, loudly rather than silently.
+
+    The z half exists because TERRAIN IS NOT SUPPORTED and used to fail silently. The two
+    halves of the model disagree about what z means when pos[2] varies: init_Uin builds
+    the inflow log profile on the rotor's LOCAL zloc, i.e. terrain-following, while
+    field_ops interpolates in ABSOLUTE z (zloc + pos[2]). Config.elevation_func is a
+    public input that sets pos[:, 2], so a user could reach this, and the symptom was the
+    silent free-stream fallback above rather than an error. Supporting terrain means
+    deciding which z the profile belongs in -- a modelling question, not a bug fix -- so
+    this refuses the case instead of guessing.
     """
     if len(ts) < 2:
         return
-    ref = np.asarray(ts[0].yloc) + ts[0].pos[1]
-    for t in ts[1:]:
-        cur = np.asarray(t.yloc) + t.pos[1]
-        if cur.shape != ref.shape or not np.allclose(cur, ref, rtol=0, atol=1e-9):
-            raise ValueError(
-                "turbines do not share one absolute lateral grid, so the marched field "
-                "cannot carry a wake between them. Build the farm through WindFarm, "
-                "which spans the layout's lateral extent; constructing Turbine objects "
-                "directly without y_bounds gives each its own grid.")
+    for axis, loc, off, name in (("lateral", "yloc", 1, "y_bounds"),
+                                 ("vertical", "zloc", 2, "elevation")):
+        ref = np.asarray(getattr(ts[0], loc)) + ts[0].pos[off]
+        for t in ts[1:]:
+            cur = np.asarray(getattr(t, loc)) + t.pos[off]
+            if cur.shape != ref.shape or not np.allclose(cur, ref, rtol=0, atol=1e-9):
+                raise ValueError(
+                    f"turbines do not share one absolute {axis} grid, so the marched "
+                    f"field cannot carry a wake between them. "
+                    + ("Build the farm through WindFarm, which spans the layout's lateral "
+                       "extent; constructing Turbine objects directly without y_bounds "
+                       "gives each its own grid." if off == 1 else
+                       "This is almost always a non-constant pos[:, 2] from "
+                       "Config.elevation_func: TERRAIN IS NOT SUPPORTED, because the "
+                       "inflow profile is built on terrain-following z while the field is "
+                       "interpolated in absolute z. Set a constant elevation."))
 
 
 def _x_stations(ts, tol):

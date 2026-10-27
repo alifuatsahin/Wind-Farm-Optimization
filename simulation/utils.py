@@ -234,6 +234,35 @@ def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, eps_coef, V, W):
     return kw.at[-1, :].set(kw[-2, :])
 
 
+def advect_incident_ti(ti, U, Uin, yloc, zloc, dx, V, W):
+    """Carry the incident-TI field with the cross-flow: u dTI/dx = -V dTI/dy - W dTI/dz.
+
+    TI_in is the turbulence the shear layer at a cell was BORN into, read from the k_w the
+    station was handed and then held fixed in value for the whole segment. Holding the
+    VALUE fixed is what breaks the nu_t <-> k_w loop: nothing inside the march may feed
+    back on it. Holding its POSITION fixed was never intended and is not implied -- it is
+    a label on fluid, and a yawed wake carries its fluid sideways while the label stayed
+    behind. Measured on full-wake case A: the wake centre steers 0.10-0.20 D out of the
+    frozen TI peak within one 5 D segment, which costs 2.9-5.8% of Du Eq (26)'s prefactor
+    at T2 and T3, always NEGATIVE -- a steered wake is systematically under-mixed. Bay 1
+    is exactly 0.0%, since its TI_in is uniform ambient and a shift of a constant is a
+    constant.
+
+    Advected and NOT diffused, which is the same discipline the age field keeps: diffusing
+    the label would mix TI between parcels of different birth, and that is a second
+    mechanism with its own sign, not part of this correction. Same stencil, same local
+    advection speed and the same (V, W) as advance_kw above, for the same reason -- it
+    rides in the velocity field the momentum march itself returns.
+    """
+    dtiY, dtiZ = jnp.gradient(ti, yloc[:, 0], zloc[0, :])
+    rhs = -V * dtiY - W * dtiZ
+    ti = ti + (dx / jnp.maximum(U, velocity_floor(Uin))) * rhs
+    # Same zero-gradient edges as k_w: a label cannot be created at a boundary.
+    ti = ti.at[:, 0].set(ti[:, 1])
+    ti = ti.at[0, :].set(ti[1, :])
+    return jnp.maximum(ti.at[-1, :].set(ti[-2, :]), 0.0)
+
+
 def smooth_2d(U, kernel_size=3, method='gaussian'):
     """
     2D smoothing with options:

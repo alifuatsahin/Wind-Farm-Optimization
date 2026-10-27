@@ -9,7 +9,7 @@ from jax.scipy.special import erf as jerf
 
 from .turbine_state import LocalConditions, VortexSimConfig, DeficitFieldConfig
 from .utils import (smooth_2d, du_nu_t, advance_kw, velocity_floor, du_eps_coef,
-                    IU_TO_TI)
+                    advect_incident_ti, IU_TO_TI)
 from .vortex_model import _simulate_vortex_evolution_jit, _UNSTACKED
 from .model_solver import advance_wake_field, representative_velocity
 from .field_ops import interpolate_vec_data
@@ -159,6 +159,24 @@ def compute_dgamma(params, Uhub):
     return dgamma_0 + asym_yaw
 
 
+def power_and_reference(params, Uhub3):
+    """One rotor's power and its undisturbed reference, up to the common pi/4 * rho.
+
+    Returned as a PAIR because a farm objective has to sum the two sides separately. The
+    mean of per-rotor ratios is proportional to total farm power only when every rotor has
+    the same D, Cp and undisturbed inflow -- otherwise it weights a 2 MW machine the same
+    as a 15 MW one, which is the wrong objective for a mixed layout. Every validation case
+    in this repo is uniform, so the two agree exactly on all of them.
+
+    The D^2 is why: it cancels from a single rotor's ratio and does not cancel from a sum
+    over rotors of different diameters.
+    """
+    A = params.D ** 2
+    P = A * params.Cp * (Uhub3 ** 3)
+    P0 = A * params.config.Cp * (nominal_hub_velocity_cubic(params) ** 3)
+    return P, P0
+
+
 def calculate_efficiency(params, Uhub3):
     """Power ratio against the same rotor in undisturbed inflow.
 
@@ -167,8 +185,7 @@ def calculate_efficiency(params, Uhub3):
     isolated rotor still returns exactly Cp(beta)/Cp(0): the yawed disc is the unyawed
     one scaled by cos(beta) in y only, which leaves the z-weighting of the log profile
     unchanged, and Yoffset is a pure y shift."""
-    P = (Uhub3 ** 3) * params.Cp
-    nominal_P = (nominal_hub_velocity_cubic(params) ** 3) * params.config.Cp
+    P, nominal_P = power_and_reference(params, Uhub3)
     return P / nominal_P
 
 
@@ -646,13 +663,18 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
     # Read from the seed, where initialize_wake_field BLENDED it by the deficit each rotor
     # contributes rather than re-reading the whole plane. Re-reading here is what let a
     # rotor at a new streamwise station change nu_T in a column it never carves.
-    ti_in = np.asarray(stacked.ti)
-    if ti_in.ndim == 3:
-        ti_in = ti_in[0]
-    if ti_in.size == 0:
+    #
+    # It enters through the FRAME, not the adapter, because the march now carries it --
+    # see utils.advect_incident_ti. An adapter field would be constant for the segment,
+    # which is the position freeze this removes.
+    ti_seed = np.asarray(stacked.ti)
+    if ti_seed.ndim == 3:
+        ti_seed = ti_seed[0]
+    if ti_seed.size == 0:
         _U0 = float(nominal_hub_velocity(params))
         _kB = 1.5 * ((params.field_params.I_amb / IU_TO_TI) * _U0) ** 2
-        ti_in = np.full_like(yloc, np.sqrt(2.0 / 3.0 * _kB) / _U0)
+        ti_seed = np.full_like(yloc, np.sqrt(2.0 / 3.0 * _kB) / _U0)
+    stacked = dataclasses.replace(stacked, ti=jnp.asarray(ti_seed))
 
     adapter = DeficitFieldConfig(
         pos=jnp.asarray(params.pos), D=params.D, Uhub=local.Uhub, Uin=jnp.asarray(local.Uin), Zhub=params.Zhub,
@@ -660,7 +682,6 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
         rotor_mask=jnp.asarray(rotor_mask),
         Ct_eff=jnp.asarray(Ct_eff),
         x_off=jnp.asarray(x_off),
-        ti_in=jnp.asarray(ti_in),
     )
     dt_cap = min(dl / local.Uhub, 0.25 * params.D / local.Uhub)  # constant for the whole run -- plain floats
 
@@ -698,7 +719,7 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
             # march and is reset only where a rotor carves new deficit into it.
             age_D = jnp.maximum(current.wage / adapter.D, 1e-6)
             # ONE eddy viscosity, Du's Eq (26), evaluated on the TI INCIDENT on this rotor
-            # (adapter.ti_in) -- for the deficit AND for the budget's diffusion and
+            # (current.ti, carried by the march) -- for the deficit AND for the budget's diffusion and
             # production.
             #
             # Du's nu_t(x) and Psi(x) are functions of the inflow TI OF THE ROTOR WHOSE WAKE
@@ -716,14 +737,17 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
             # TI ~ sqrt(k_B + k_w), i.e. k_w ~ sqrt(k_w): a fixed point. The measured
             # accumulation saturates the same way (k_w/k_B = 4.98 at rotor 2, 5.51 at rotor 3).
             #
-            # No circularity: ti_in is frozen at the station plane, read from the k_w the
-            # station was HANDED, so nothing inside the march feeds back on it.
+            # No circularity: ti_in is frozen IN VALUE, read from the k_w the station was
+            # HANDED, so nothing inside the march feeds back on it. It is NOT frozen in
+            # POSITION -- utils.advect_incident_ti carries it with (V, W), because the
+            # label belongs to the fluid and a yawed wake takes its fluid sideways. See
+            # that function for what the position freeze was costing.
             #
             # Measured on the 8-turbine row: R2 .9087 -> .9177, bias -.0218 -> -.0197, and
             # the measured three-rotor TI BIAS improves to ~0 (-.0016/-.0004/-.0014 ->
             # +.0003/+.0013/+.0001) while its R2 slips (+.874/+.781/+.787 ->
             # +.868/+.751/+.773). Adopted for the semantics, not the score.
-            NuT = du_nu_t(adapter.ti_in, age_D, adapter.U0, adapter.D)
+            NuT = du_nu_t(current.ti, age_D, adapter.U0, adapter.D)
             nut_bud = NuT
             # NuT is a FIELD now, but the step must stay scalar, so the diffusive limit
             # is taken at its largest value on the plane. For a uniform NuT this is the
@@ -777,7 +801,9 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
             U, X_new, V_tot, W_tot = advance_wake_field(current, dt, NuT, adapter, WV)
             kw_new = advance_kw(current.kw, current.U, adapter.Uin, current.yloc,
                                 current.zloc, X_new - current.X, nut_bud,
-                                du_eps_coef(adapter.ti_in, adapter.D), V_tot, W_tot)
+                                du_eps_coef(current.ti, adapter.D), V_tot, W_tot)
+            ti_new = advect_incident_ti(current.ti, current.U, adapter.Uin, current.yloc,
+                                        current.zloc, X_new - current.X, V_tot, W_tot)
 
             # EACH ROTOR AGES ON ITS OWN STREAMWISE ORIGIN.
             #
@@ -856,9 +882,9 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
             # Accumulate the age by the distance actually marched. Not advected and
             # not diffused -- that is what keeps it local.
             wage_new = current.wage + (X_new - current.X)
-            # ti is FROZEN along the segment, so it is propagated explicitly: like U, kw
-            # and wage it must survive interpolate_vec_data, which has no time axis for it.
-            new = dataclasses.replace(new, U=U, kw=kw_new, wage=wage_new, ti=current.ti,
+            # ti is carried explicitly: like U, kw and wage it must survive
+            # interpolate_vec_data, which has no time axis for it.
+            new = dataclasses.replace(new, U=U, kw=kw_new, wage=wage_new, ti=ti_new,
                                       X=X_new, t=current.t + dt)
 
             still_active = new.X <= calculation_domain  # this crossing entry stays the final real one

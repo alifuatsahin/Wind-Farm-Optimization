@@ -574,8 +574,16 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     # defect it fixes was an inert Ct=0.001 rotor on the axis moving the rotor behind it by
     # 2.6%, i.e. a station's existence changing the answer. See AGE_BLEND_EPS for the
     # cut-off that regularises the blend and the window it was measured in.
-    golden_row = [0.99693986652197308, 0.68731083792017822, 0.72043351340170281,
-                  0.71568505264881788, 0.70582886747632745]
+    # Amended the same day when the incident TI stopped being frozen in POSITION as well
+    # as in value -- utils.advect_incident_ti carries it with (V, W). T1 and T2 stay
+    # bit-identical for the reason above, and T3-T5 move only -0.09/-0.21/-0.29%: an
+    # ALIGNED row has no CVP, so its only cross-flow is the wake's own swirl, which is
+    # antisymmetric over the disc and nearly cancels in a rotor average. This case is the
+    # CONTROL for that change, exactly as it was for k_w's cross-plane advection; where
+    # the term is meant to act, the yawed cases move 10-30x as far (LES yawed R2
+    # .8804 -> .8823, full-wake B .9117 -> .9145, its TI R2 .751 -> .758).
+    golden_row = [0.99693986652197308, 0.68731083792017822, 0.71978320050453748,
+                  0.71417527683031601, 0.70377012629588398]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):

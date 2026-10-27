@@ -231,15 +231,26 @@ class WindFarm:
         self._get_calculation_domain()
 
     def calculate_efficiency(self, verbose=False):
-        total_eff = 0.0
+        """Farm power as a fraction of the same farm with every rotor unwaked.
+
+        Sums POWER on both sides rather than averaging per-rotor ratios. The mean of
+        ratios weights every rotor equally regardless of size, so for a mixed-D layout it
+        would value a 2 MW machine the same as a 15 MW one -- the wrong objective for the
+        layout optimisation this model exists to serve. For a uniform farm, which is every
+        validation case here, the two are identical: with D, Cp and U0 common to all
+        rotors both reduce to sum(Uhub3^3)/(n*U0^3).
+        """
+        num = den = 0.0
         for t in self.turbines:
-            eta = t.calculate_efficiency()
+            P, P0 = tp.power_and_reference(t._params, t.Uhub3)
             if verbose:
-                print(f"Turbine at pos={t.pos} m, yaw={t.yaw}°: Efficiency = {eta * 100:.2f} %")
-            total_eff += eta
-        total_eff /= len(self.turbines)
+                print(f"Turbine at pos={t.pos} m, yaw={t.yaw}°: "
+                      f"Efficiency = {P / P0 * 100:.2f} %")
+            num += P
+            den += P0
+        total_eff = num / den
         if verbose:
-            print(f"Wind Farm Average Efficiency: {total_eff * 100:.2f} %")
+            print(f"Wind Farm Power Ratio: {total_eff * 100:.2f} %")
         return total_eff
 
     def solve(self, verbose=False):
