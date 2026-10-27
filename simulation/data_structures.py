@@ -23,11 +23,16 @@ class VortexField:
     #: a new streamwise station cannot restart the eddy viscosity for cells that rotor
     #: never carves -- see wage_blend in turbine_physics.
     wage: np.ndarray = field(default_factory=lambda: np.array([]))
+    #: Total TI incident on the shear layer, per cell, frozen along a segment. Was
+    #: recomputed from the carried k_w at EVERY station, which re-read the whole
+    #: plane and so let a rotor anywhere change nu_T in a column it never touches.
+    #: Now blended by the deficit each rotor contributes, like `wage`.
+    ti: np.ndarray = field(default_factory=lambda: np.array([]))
     t: float = 0.0
     X: float = 0.0  # streamwise position
 
 jax.tree_util.register_dataclass(
     VortexField,
-    data_fields=["Y", "Z", "Rv", "Circ", "age", "active", "yloc", "zloc", "V", "W", "U", "OmegaX", "kw", "wage", "t", "X"],
+    data_fields=["Y", "Z", "Rv", "Circ", "age", "active", "yloc", "zloc", "V", "W", "U", "OmegaX", "kw", "wage", "ti", "t", "X"],
     meta_fields=[],
 )

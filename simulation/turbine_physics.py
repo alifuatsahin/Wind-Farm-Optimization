@@ -347,6 +347,37 @@ DIFFUSIVE_CFL = 0.9
 #: short cylinder/disc at these Reynolds numbers; it is not fitted.
 NACELLE_CD = 1.0
 
+#: Cut-off deficit for the shear-layer age blend, as a multiple of the ambient streamwise
+#: fluctuation sigma_u = I_amb*U0. See the REGULARISED paragraph in initialize_wake_field
+#: for what it does; this is the measurement that sets it.
+#:
+#: It is justified by an INSENSITIVITY WINDOW, not by a physical velocity scale. Swept on
+#: the four locality probes and on the answer (T5 of a 5 D row of five), f = eps/sigma_u:
+#:
+#:      f        grouping   distant   threshold        T5
+#:   0.0002       +0.071%   +0.591%     -0.088%   0.705509
+#:   0.001        +0.066%   +0.156%     -0.096%   0.705415
+#:   0.005        +0.055%   +0.063%     -0.116%   0.705455
+#:   0.02         +0.035%   +0.046%     -0.151%   0.706436
+#:   0.05         +0.012%   +0.043%     -0.192%   0.708308
+#:   1.0          -0.154%   +0.045%     -0.497%   0.718340
+#:
+#: Below f ~ 0.005 the eps -> 0 pathology sets in and distant-upstream climbs away
+#: (+7.7% by f ~ 1e-11). Above f ~ 0.02 the answer starts drifting -- +1.8% in T5 by
+#: f = 1 -- because eps is then no longer small against the mean deficits it sits beside
+#: (Uw ~ 0.3*U0 in the core), so it stops being a cut-off and becomes a systematic
+#: rejuvenation of the whole wake. Between those, T5 is flat to 0.013% over a 25x range
+#: and the full bench moves by 0.0002 in 8T R2 and 0.0005 in full-wake R2.
+#:
+#: 0.01 is the middle of that window. sigma_u ITSELF (f = 1) was tried first as the
+#: derived candidate -- "a deficit below the ambient fluctuation is not a shear layer" --
+#: and is REFUTED: it is 1.8% off on T5, halves the locality gain and loses the bench.
+#: A sharper derivation is available if this ever needs to be more than a plateau: the
+#: pathology is driven by INTERPOLATION TAILS putting non-zero Uw_old where the upstream
+#: rotor cannot physically have reached, so sizing eps by the measured tail would replace
+#: the constant with a numerical property of the scheme.
+AGE_BLEND_EPS = 0.01
+
 
 def axial_induction_ramped(Ct_eff, x_D):
     """Axial induction with the near-wake pressure-gradient development of Shapiro,
@@ -404,7 +435,8 @@ def _disc_mask(yloc, zloc, p, dy, radius=None):
     return np.sqrt(r2) <= (p.R if radius is None else radius)
 
 
-def initialize_wake_field(params, stacked, local, companions=(), kw0=None):
+def initialize_wake_field(params, stacked, local, companions=(), kw0=None, wage0=None,
+                          ti0=None):
     yloc = np.asarray(stacked.yloc)
     zloc = np.asarray(stacked.zloc)
     beta = params.beta
@@ -412,6 +444,7 @@ def initialize_wake_field(params, stacked, local, companions=(), kw0=None):
     dl = params.dl  # equivalent to yloc[1,0]-yloc[0,0]; verified in Step 1 sub-step 5
     Uin = np.asarray(local.Uin)
     U = Uin.copy()
+    U_pre = Uin.copy()   # the field this station was HANDED, before any carve here
     # Rotors sharing this station shed simultaneously, so all their discs are carved
     # into the same initial condition. `companions` is empty for one turbine per x,
     # which is the single-row case and reduces to the original single-disc carve.
@@ -479,10 +512,90 @@ def initialize_wake_field(params, stacked, local, companions=(), kw0=None):
 
     kw_seed = (np.zeros_like(U_smooth) if kw0 is None
                else np.asarray(kw0).reshape(U_smooth.shape))
+
+    # SHEAR-LAYER AGE, blended by the DEFICIT each rotor contributes.
+    #
+    # Du Eq (26) ramps nu_t with the distance from the rotor, and that distance used to be
+    # the station-local scalar x. Creating a station therefore restarted the ramp for the
+    # WHOLE PLANE, so inserting any rotor anywhere -- even a Ct = 0.001 one seven diameters
+    # out of the column -- moved every column by a Ct-INDEPENDENT 2.6%. That is a
+    # grouping-invariance failure of the kind Crespo was deleted for, and both existing
+    # locality tests were blind to it because both place the bystander at the same x as an
+    # existing rotor or upstream of the whole column.
+    #
+    # The age is a field now, and the only thing that can reset it at a cell is a rotor
+    # putting NEW deficit into that cell:
+    #
+    #     A_new = A_old * Uw_old / (Uw_old + Uw_new)
+    #
+    # the deficit-weighted mean age of the deficit actually present. A first rotor has
+    # Uw_old = 0 so A starts at 0; a rotor that carves nothing here leaves A untouched, so
+    # a lateral or inert bystander cannot touch this column; a real rotor deep in a row
+    # carves Uw_new comparable to Uw_old and roughly halves A, which is physically right --
+    # the fluid carries the old wake's turbulence through the new shear layer. No fitted
+    # constant, and no normalisation to choose: the weights are the two deficits.
+    #
+    # It is NOT advected and NOT diffused, only accumulated (wage += dx in the march) and
+    # reset geometrically. That is the whole difference from the transported age M = k_w A,
+    # which was built in full and refuted at 3.4-4.1% lateral locality precisely BECAUSE it
+    # moved: "old turbulence really does arrive from 7 D away and age the local field". An
+    # accumulator cannot leak sideways.
+    #
+    # REGULARISED by a deficit SCALE, not by a numerical floor. With a bare 1e-12 the
+    # weight outside a new rotor's disc is Uw_old/(Uw_old + 0) = 1 for ANY non-zero
+    # Uw_old, so an interpolation tail from a rotor 7 D away preserved the whole fringe's
+    # stale age at full strength -- the column then started Eq (26) near its plateau
+    # instead of ramping, and the distant-upstream locality probe went from +0.048% to
+    # +7.746%, i.e. a worse failure than the one being fixed. Dividing by
+    # (Uw_old + Uw_new + eps) instead makes a cell whose deficit is negligible fall back
+    # to the fresh value, which is what "the age of the deficit present here" means when
+    # there is no deficit present.
+    #
+    # eps INTERPOLATES BETWEEN THE TWO FAILURE MODES, so it has to be kept small rather
+    # than merely non-zero: eps -> 0 keeps the stale fringe at full strength (+7.7%
+    # distant-upstream), while eps -> infinity rejuvenates the whole plane and recovers
+    # exactly the per-station restart this fix exists to remove (-2.6%). It is sized by a
+    # measured insensitivity window, not by a physical velocity scale -- see
+    # AGE_BLEND_EPS for the sweep and for the derived candidate that was refuted.
+    Uw_old = np.maximum(np.asarray(init_Uin(params)) - U_pre, 0.0)
+    Uw_new = np.maximum(U_pre - U, 0.0)
+    _eps_w = (AGE_BLEND_EPS * params.field_params.I_amb
+              * float(nominal_hub_velocity(params)))
+    wage_in = (np.zeros_like(U_smooth) if wage0 is None
+               else np.asarray(wage0).reshape(U_smooth.shape))
+    wage_seed = wage_in * Uw_old / (Uw_old + Uw_new + _eps_w)
+
+    # THE INCIDENT TI IS BLENDED THE SAME WAY, and for the same reason.
+    #
+    # Fixing the age alone made locality WORSE, -2.64% -> +2.93%, because the defect has a
+    # second half of opposite sign: ti_in was re-read from the carried k_w at EVERY station,
+    # for the WHOLE plane. In a column that jumps it from ambient 0.0625 to 0.1174, so nu_T
+    # rises, mixing rises and the wake shallows -- whoever happens to sit at that x, and
+    # whatever their Ct. The two halves had been partially cancelling.
+    #
+    # Blending by deficit contribution makes the bystander case IDENTICAL to the no-bystander
+    # case: where a rotor carves nothing the incident TI is whatever it already was, and where
+    # it carves fully it is the freshly read value, which is exactly today's behaviour for a
+    # real rotor in a row. So the deep array and the TI scores should be untouched while the
+    # spurious sensitivity goes.
+    #
+    # The physical statement is the same as for the age: the incident TI of the shear layer at
+    # a cell is the deficit-weighted mean of the incident TIs of the shear layers present
+    # there. Still frozen ALONG a segment -- nothing in the march feeds back on it, so the
+    # nu_T <-> k_w circularity the freeze exists to prevent stays prevented.
+    _U0n = float(nominal_hub_velocity(params))
+    _kBn = 1.5 * ((params.field_params.I_amb / IU_TO_TI) * _U0n) ** 2
+    _kws = np.asarray(kw_seed)
+    ti_fresh = np.sqrt(np.maximum(2.0 / 3.0 * (_kBn + _kws), 0.0)) / _U0n
+    ti_prev = ti_fresh if ti0 is None else np.asarray(ti0).reshape(ti_fresh.shape)
+    ti_seed = ((ti_prev * Uw_old + ti_fresh * (Uw_new + _eps_w))
+               / (Uw_old + Uw_new + _eps_w))
     new_stacked = dataclasses.replace(
         stacked,
         U=jnp.asarray(U_smooth),
         kw=jnp.asarray(kw_seed),
+        wage=jnp.asarray(wage_seed),
+        ti=jnp.asarray(ti_seed),
         X=stacked.X.at[0].set(0.0),
         t=stacked.t.at[0].set(0.0),
     )
@@ -530,14 +643,16 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
     # Crespo's |dy| < 3D criterion was for.
     #
     # Zero added TKE at the first rotor, so TI_in = ambient there -- Du's calibration condition.
-    _U0 = float(nominal_hub_velocity(params))
-    _kB = 1.5 * ((params.field_params.I_amb / IU_TO_TI) * _U0) ** 2
-    _kw_seed = np.asarray(stacked.kw)
-    if _kw_seed.ndim == 3:
-        _kw_seed = _kw_seed[0]
-    if _kw_seed.size == 0:
-        _kw_seed = np.zeros_like(yloc)
-    ti_in = np.sqrt(np.maximum(2.0 / 3.0 * (_kB + _kw_seed), 0.0)) / _U0
+    # Read from the seed, where initialize_wake_field BLENDED it by the deficit each rotor
+    # contributes rather than re-reading the whole plane. Re-reading here is what let a
+    # rotor at a new streamwise station change nu_T in a column it never carves.
+    ti_in = np.asarray(stacked.ti)
+    if ti_in.ndim == 3:
+        ti_in = ti_in[0]
+    if ti_in.size == 0:
+        _U0 = float(nominal_hub_velocity(params))
+        _kB = 1.5 * ((params.field_params.I_amb / IU_TO_TI) * _U0) ** 2
+        ti_in = np.full_like(yloc, np.sqrt(2.0 / 3.0 * _kB) / _U0)
 
     adapter = DeficitFieldConfig(
         pos=jnp.asarray(params.pos), D=params.D, Uhub=local.Uhub, Uin=jnp.asarray(local.Uin), Zhub=params.Zhub,
@@ -549,7 +664,7 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
     )
     dt_cap = min(dl / local.Uhub, 0.25 * params.D / local.Uhub)  # constant for the whole run -- plain floats
 
-    seed = _frame(stacked, 0, unstacked=_UNSTACKED_MEMBERS + ("U", "kw"))
+    seed = _frame(stacked, 0, unstacked=_UNSTACKED_MEMBERS + ("U", "kw", "wage", "ti"))
     stacked_out, was_active = _calculate_deficit_field_jit(
         stacked, seed, adapter, params.field_params.WV,
         dl, dt_cap,
@@ -578,7 +693,10 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
             # keeps the march non-circular. age = current.X/D is the distance from THIS
             # station's rotor, i.e. the shear-layer age; the dissipation no longer needs
             # it at all, since C_eps/l_m is age-independent.
-            age_D = jnp.maximum(current.X / adapter.D, 1e-6)
+            # The shear-layer age is a FIELD, not this station's scalar x: see the
+            # blend in initialize_wake_field for why. A cell's age advances with the
+            # march and is reset only where a rotor carves new deficit into it.
+            age_D = jnp.maximum(current.wage / adapter.D, 1e-6)
             # ONE eddy viscosity, Du's Eq (26), evaluated on the TI INCIDENT on this rotor
             # (adapter.ti_in) -- for the deficit AND for the budget's diffusion and
             # production.
@@ -735,7 +853,13 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
             # input, not from the wake.
             U = U * (1.0 + jnp.tensordot(ramp - 1.0, adapter.rotor_mask, axes=1))
 
-            new = dataclasses.replace(new, U=U, kw=kw_new, X=X_new, t=current.t + dt)
+            # Accumulate the age by the distance actually marched. Not advected and
+            # not diffused -- that is what keeps it local.
+            wage_new = current.wage + (X_new - current.X)
+            # ti is FROZEN along the segment, so it is propagated explicitly: like U, kw
+            # and wage it must survive interpolate_vec_data, which has no time axis for it.
+            new = dataclasses.replace(new, U=U, kw=kw_new, wage=wage_new, ti=current.ti,
+                                      X=X_new, t=current.t + dt)
 
             still_active = new.X <= calculation_domain  # this crossing entry stays the final real one
             return new, still_active

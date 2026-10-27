@@ -100,11 +100,16 @@ class Turbine:
         self.vortex_field = tp.simulate_vortex_field(self._params, self._current_local(),
                                                      seed=seed, total_steps=total_steps)
 
-    def initialize_wake_field(self, companions=(), kw0=None):
+    def initialize_wake_field(self, companions=(), kw0=None, wage0=None, ti0=None):
         """`companions` are the other rotors at this same streamwise station, as
-        (TurbineParams, dy) pairs with dy this turbine's local-y offset from theirs."""
+        (TurbineParams, dy) pairs with dy this turbine's local-y offset from theirs.
+
+        `wage0` is the incoming shear-layer age field, carried like kw0; it is blended by
+        deficit rather than restarted, so a rotor that carves nothing here cannot reset
+        the eddy viscosity for this column."""
         self.vortex_field, self.dl = tp.initialize_wake_field(
-            self._params, self.vortex_field, self._current_local(), companions, kw0=kw0)
+            self._params, self.vortex_field, self._current_local(), companions,
+            kw0=kw0, wage0=wage0, ti0=ti0)
 
     def calculate_deficit_field(self, max_steps=1500, companions=(), carried=(),
                                 n_slots=None):

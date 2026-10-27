@@ -52,7 +52,7 @@ def _concat_vortices(carried, fresh, V_bg, W_bg):
 
 
 def _march_segment(t, seed, need_m, U0, Uin_global, companions=(),
-                   carried=(), n_slots=None, kw0=None):
+                   carried=(), n_slots=None, kw0=None, wage0=None, ti0=None):
     """March one turbine only as far as its field is actually read.
 
     Measured on the 8-turbine wind tunnel, one process, identical results throughout:
@@ -69,7 +69,7 @@ def _march_segment(t, seed, need_m, U0, Uin_global, companions=(),
 
     t.Uin = U0                       # initialize_wake_field carves the top-hat out of this
     t.simulate_vortex_field(seed=seed, total_steps=VOR_FULL)
-    t.initialize_wake_field(companions, kw0=kw0)
+    t.initialize_wake_field(companions, kw0=kw0, wage0=wage0, ti0=ti0)
     t.Uin = Uin_global               # solver reference: the GLOBAL profile
     t.calculate_deficit_field(max_steps=_deficit_steps(t),
                               companions=companions, carried=carried, n_slots=n_slots)
@@ -239,6 +239,7 @@ def solve_single_field(wf, verbose=False):
     _assert_shared_grid(ts)
     stations = _x_stations(ts, X_STATION_TOL_D * ts[0].D) if ts else []
     prev, carried_vortex, carried_kw = None, None, None
+    carried_wage, carried_ti = None, None
     audit = []
     # Rotors already shed, in march order. The ramp stack is padded to the whole farm
     # rather than to this list's current length, so the scan traces once per farm size
@@ -267,6 +268,11 @@ def solve_single_field(wf, verbose=False):
         # carried rather than restarted -- which is what removes the need for any
         # superposition rule.
         kw0 = np.zeros_like(U0) if carried_kw is None else np.asarray(carried_kw)
+        # The shear-layer age crosses with k_w. It MUST, or Du Eq (26) restarts for
+        # the whole plane at every station and a rotor that carves nothing in this
+        # column still changes it -- measured at a Ct-independent 2.6%.
+        wage0 = None if carried_wage is None else np.asarray(carried_wage)
+        ti0 = None if carried_ti is None else np.asarray(carried_ti)
         # A rotor is misaligned relative to the flow it sits in, not to the tunnel axis,
         # and a steered upstream wake has already turned that flow. delta is read from the
         # field this station was HANDED, before any of its rotors shed, so there is no
@@ -320,7 +326,7 @@ def solve_single_field(wf, verbose=False):
         need_m = (stations[g + 1][0].pos[0] - lead.pos[0] + 0.5 * lead.D
                   if g + 1 < len(stations) else lead.calculation_domain)
         _march_segment(lead, seed, need_m, U0, Uin_global, companions,
-                       carried, n_slots, kw0)
+                       carried, n_slots, kw0, wage0, ti0)
         shed_before.extend(group)
 
         # companions share the station's marched field; nothing further is solved on them
@@ -342,6 +348,8 @@ def solve_single_field(wf, verbose=False):
                                          active=f.active, yloc=jnp.array([]), zloc=jnp.array([]),
                                          V=zeros, W=zeros, OmegaX=jnp.array([]), t=0.0)
             carried_kw = np.asarray(f.kw) if np.size(f.kw) else None
+            carried_wage = np.asarray(f.wage) if np.size(f.wage) else None
+            carried_ti = np.asarray(f.ti) if np.size(f.ti) else None
         prev = lead
 
     if verbose:

@@ -96,11 +96,14 @@ def test_yaw_trades_own_power_for_the_rotor_behind():
     assert eff25[1] > eff0[1], f'yaw did not help the rotor behind: {eff0} -> {eff25}'
 
 
-def _row(pos, max_Y=3.0):
-    """A farm at explicit absolute positions, in metres."""
+def _row(pos, max_Y=3.0, ct=0.8):
+    """A farm at explicit absolute positions, in metres.
+
+    `ct` may be a scalar or one value per rotor, so a test can make a rotor inert."""
     n = len(pos)
     wf = WindFarmConfig(pos=np.array(pos, float), D=np.array([80.0]),
-                        Zhub=np.array([70.0]), Ct=np.array([0.8]), Cp=np.array([0.47]),
+                        Zhub=np.array([70.0]), Ct=np.atleast_1d(np.asarray(ct, float)),
+                        Cp=np.array([0.47]),
                         yaw=np.zeros(n), TSR=np.array([7.0]), dist_type='m')
     fc = FieldConfig(Uh=8.0, Zh=70.0, z0=0.0002, I_amb=0.077, max_Y=max_Y, min_X=7.0,
                      max_Z=2.0, n_grids=14, Nv=20)
@@ -152,6 +155,38 @@ def test_distant_upstream_rotor_does_not_change_a_column():
         f'a rotor 7D to the side and 5D upstream moved the column by {100*err:.2f}% '
         f'({base:.6f} -> {with_a:.6f}): the budget length scale is reading rotor positions '
         f'rather than the local flow')
+
+
+def test_inert_rotor_on_the_axis_does_not_change_the_rotor_behind():
+    """A thrustless rotor ON the wake axis must change nothing. It is not a flow feature.
+
+    The two probes above both put the bystander to the SIDE, so neither can see a defect
+    that needs the bystander to sit inside the wake. This one does: a rotor at Ct = 0.001
+    extracts no momentum and sheds no circulation, so the column downstream of it must be
+    the column it would be without it. Anything else means a STATION'S EXISTENCE is
+    changing the answer, which disqualifies the model for layout optimisation -- the
+    optimiser is free to put a rotor anywhere, including directly in a wake it then
+    discovers is a bad place for one.
+
+    It failed at 2.6% (Ct-independent, so entirely the station and not the thrust) for as
+    long as Du Eq (26)'s age and the incident TI were read fresh at every station: the
+    bystander created a station, the station restarted the age for the WHOLE plane, and
+    the eddy viscosity downstream started from zero age instead of five diameters of it.
+    That is the same class as the 9.325% grouping discontinuity that disqualified Crespo,
+    and 25x the bound here. The fix is to carry both as blended fields -- see
+    initialize_wake_field and AGE_BLEND_EPS.
+
+    The bound is a real budget: the lateral control (same bystander moved 7D aside, where
+    the restart cannot act) measures 0.10%, so 0.1% is the floor this probe can resolve.
+    """
+    base = _row([[0, 0, 0], [800, 0, 0]], ct=[0.8, 0.8])[(10, 0)]
+    with_inert = _row([[0, 0, 0], [400, 0, 0], [800, 0, 0]],
+                      ct=[0.8, 0.001, 0.8])[(10, 0)]
+    err = abs(with_inert - base) / base
+    assert err < 0.005, (
+        f'an inert rotor on the axis moved the rotor behind it by {100*err:.2f}% '
+        f'({base:.6f} -> {with_inert:.6f}): a station is restarting the eddy-viscosity '
+        f'age or the incident TI instead of carrying it')
 
 
 def test_identical_rotors_see_identical_inflow():
@@ -528,8 +563,19 @@ def test_validated_cases_are_unchanged_by_the_ramp_fix():
     #     physical and large: T2 0.69543 -> 0.68731, T5 0.67449 -> 0.66613, i.e. a deeper
     #     row, since the weighting had been deepening the core at the edge's expense.
     # T1 is untouched by both -- an isolated rotor's own Uhub does not read its own wake.
-    golden_row = [0.99693986652197308, 0.68731083792017822, 0.68598409426523121,
-                  0.67703134608536109, 0.66612788959637725]
+    # Re-recorded 2026-10-27 for the SHEAR-LAYER AGE AND INCIDENT TI becoming blended
+    # fields instead of per-station restarts. T1 AND T2 are bit-identical, which is the
+    # one-bay lag in its cleanest form yet and is the consistency check on the change: the
+    # first rotor has no old deficit to blend against, and bay 1's ti_in is frozen ambient,
+    # so neither blend can act before the second station or reach a Uhub before the third
+    # rotor. T3-T5 then move +5.02/+5.71/+5.96%, UPWARD and GROWING down the row -- age and
+    # TI that accumulate down a row instead of restarting at every station. That is a
+    # physics change and it is the largest re-record in this list, as it should be: the
+    # defect it fixes was an inert Ct=0.001 rotor on the axis moving the rotor behind it by
+    # 2.6%, i.e. a station's existence changing the answer. See AGE_BLEND_EPS for the
+    # cut-off that regularises the blend and the window it was measured in.
+    golden_row = [0.99693986652197308, 0.68731083792017822, 0.72043351340170281,
+                  0.71568505264881788, 0.70582886747632745]
     sim = _sim([[i * 400.0, 0.0, 0.0] for i in range(5)])
     got_row = [t.Uhub / 8.0 for t in sim.wind_farm.turbines]
     for i, (got, ref) in enumerate(zip(got_row, golden_row)):
