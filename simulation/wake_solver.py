@@ -71,7 +71,7 @@ def _march_segment(t, seed, need_m, U0, Uin_global, companions=(),
     t.simulate_vortex_field(seed=seed, total_steps=VOR_FULL)
     t.initialize_wake_field(companions, kw0=kw0)
     t.Uin = Uin_global               # solver reference: the GLOBAL profile
-    t.calculate_deficit_field(max_steps=DEF_FULL,
+    t.calculate_deficit_field(max_steps=_deficit_steps(t),
                               companions=companions, carried=carried, n_slots=n_slots)
     if float(t.wake_field[-1].X) < need_m * 0.999:
         raise RuntimeError(f"march at x={t.pos[0]:.0f} reached only "
@@ -94,6 +94,29 @@ def _march_segment(t, seed, need_m, U0, Uin_global, companions=(),
             f"frozen (clamped to the last cloud frame) over the tail of this segment. The "
             f"cloud ages on Uhub while the deficit advances on the local wake speed; raise "
             f"the vortex t_limit in vortex_model.")
+
+
+def _deficit_steps(t):
+    """Scan length for the deficit march, scaled to the grid instead of fixed.
+
+    DEF_FULL was a bare literal, which put a CEILING ON REFINEMENT: the explicit diffusive
+    bound goes as dy^2 while the scan length did not, so the steps needed grow as
+    n_grids^2 and the march failed above n_grids ~ 44-56 with "reached only X m of Y m".
+    A grid-convergence study was therefore structurally impossible above 36, which is
+    uncomfortably close to the 20 and 28 the model is validated at.
+
+    Over-allocating is FREE, measured rather than assumed: on the 8-turbine row,
+    DEF_FULL = 1500 / 3000 / 6000 runs in 70.5 / 68.0 / 74.2 s -- the ordering is noise --
+    and returns a BIT-IDENTICAL T8 (0.650012172 at all three), because an inactive scan
+    step short-circuits through `when_inactive`. Under-allocating costs a whole march. So
+    the asymmetry says to be generous.
+
+    The literal stays the n_grids = 20 reference, since that is where it was tuned, and
+    the quadratic is the bound's own scaling rather than a fitted margin. _march_segment
+    still raises if a march falls short, so this is a budget and not a guarantee.
+    """
+    n = int(getattr(t._params.field_params, "n_grids", 20))
+    return int(DEF_FULL * max(1.0, (n / 20.0) ** 2))
 
 
 def _assert_turbulence_admissible(field_params):

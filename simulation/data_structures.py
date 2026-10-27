@@ -17,11 +17,17 @@ class VortexField:
     U: np.ndarray = field(default_factory=lambda: np.array([]))      # Streamwise velocity field (optional)
     OmegaX: np.ndarray = field(default_factory=lambda: np.array([])) # Vorticity field (optional)
     kw: np.ndarray = field(default_factory=lambda: np.array([]))     # Wake-added TKE, marched with U
+    #: Shear-layer age as a FIELD, in metres of streamwise distance. Distinct from
+    #: `age` above, which is per-VORTEX and sets the Shapiro core law. This one feeds
+    #: Du Eq (26) in place of the station-local scalar x, so that inserting a rotor at
+    #: a new streamwise station cannot restart the eddy viscosity for cells that rotor
+    #: never carves -- see wage_blend in turbine_physics.
+    wage: np.ndarray = field(default_factory=lambda: np.array([]))
     t: float = 0.0
     X: float = 0.0  # streamwise position
 
 jax.tree_util.register_dataclass(
     VortexField,
-    data_fields=["Y", "Z", "Rv", "Circ", "age", "active", "yloc", "zloc", "V", "W", "U", "OmegaX", "kw", "t", "X"],
+    data_fields=["Y", "Z", "Rv", "Circ", "age", "active", "yloc", "zloc", "V", "W", "U", "OmegaX", "kw", "wage", "t", "X"],
     meta_fields=[],
 )
