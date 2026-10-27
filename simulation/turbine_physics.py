@@ -1003,13 +1003,39 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
             # the disc, the uniform-loading idealisation, with no a(r). If a radial
             # loading is wanted again it must come from blade-element data as a per-rotor
             # input, not from the wake.
-            U = U * (1.0 + jnp.tensordot(ramp - 1.0, adapter.rotor_mask, axes=1))
+            # COMPOSED MULTIPLICATIVELY ACROSS ROTORS, not additively. Each rotor's
+            # ramp is a factor on U, so two of them acting on the same streamtube compose
+            # as (1+e1)(1+e2); summing the increments drops the e1*e2 cross term. With
+            # both rotors still inside the ramp's ~1.5 D reach that is a first-order
+            # error, and it only exists where discs OVERLAP while BOTH are ramping -- at
+            # 5 D the carried rotor has e ~ 0 and the two forms agree to rounding, which
+            # is why it has never shown. It bites for the tight layouts the solver now
+            # permits.
+            #
+            # jnp.prod rather than exp(sum(log(.))): exact, with no log domain to worry
+            # about, and it keeps each rotor's own fractional-mask weighting LINEAR while
+            # composing across rotors multiplicatively, which is the actual claim. An
+            # inert or padded slot has ramp = 1 and contributes a factor of exactly 1, so
+            # the padding invariant is preserved in any dtype.
+            U = U * jnp.prod(1.0 + (ramp[:, None, None] - 1.0) * adapter.rotor_mask,
+                             axis=0)
 
             # Accumulate the age by the distance actually marched. Not advected and
             # not diffused -- that is what keeps it local.
             wage_new = current.wage + (X_new - current.X)
             # ti is carried explicitly: like U, kw and wage it must survive
             # interpolate_vec_data, which has no time axis for it.
+            # V and W are left as interpolate_vec_data set them, i.e. the cloud's own
+            # cross-flow AT THIS FRAME'S TIME. They do NOT carry veer, which
+            # advance_wake_field adds from the local U each step -- so a reader of the
+            # emitted frames sees a V that is short by V_veer once WV != 0, and the skew
+            # read in wake_solver is such a reader. Storing V_tot instead was TRIED and is
+            # WRONG: V_tot is the cross-flow at time t while the frame is stamped t + dt,
+            # so it trades a missing veer term for a one-step lag, which at WV = 0 is pure
+            # regression -- measured as full-wake A .9088 -> .9164 on field R2 but the
+            # worst measured-power error +7.8% -> +11.3%, i.e. it moves the answer by
+            # shifting the aerodynamic skew. If veer is ever switched on, recompute
+            # V_veer at t + dt from new.U here rather than importing the previous step's.
             new = dataclasses.replace(new, U=U, kw=kw_new, wage=wage_new, ti=ti_new,
                                       X=X_new, t=current.t + dt)
 
