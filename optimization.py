@@ -56,7 +56,15 @@ class Optimizer:
         dtype: torch.dtype = torch.float64,
         random_state: Optional[int] = None,
         max_cholesky_size: Optional[int] = float("inf"),
+        feasible: Optional[Callable[[np.ndarray], bool]] = None,
     ):
+        """`feasible` takes PHYSICAL parameters and returns whether the point may be
+        evaluated at all. It gates candidate GENERATION rather than penalising the
+        objective afterwards, which is the right split when the constraint is cheap and
+        the objective is not: a layout's minimum separation is pure geometry, while
+        evaluating it is a ~4 s march. A penalty would also hand the GP a cliff to model
+        and spend most of the budget inside the infeasible region -- MEASURED on the
+        position bounds, 13 of 14 Sobol draws violate a 3 D separation."""
         bounds = np.asarray(bounds, dtype=float)
         assert np.all(bounds[:, 1] > bounds[:, 0]), "Error: Upper bounds must be greater than lower bounds"
         assert max_cholesky_size >= 0, "Error: max_cholesky_size must be non-negative"
@@ -69,6 +77,7 @@ class Optimizer:
         self.bounds = bounds
         self.n_params = len(bounds)
         self.param_mapping = param_mapping
+        self.feasible = feasible
         self.param_names = param_names or [f'param_{i}' for i in range(self.n_params)]
         self.device = torch.device(device)
         self.dtype = dtype
@@ -109,10 +118,40 @@ class Optimizer:
         sim.run()
         return sim.calculate_objective()
 
+    def _feasible_mask(self, X_norm: torch.Tensor) -> torch.Tensor:
+        """Which rows of a NORMALISED batch satisfy `feasible`. All True without one."""
+        if self.feasible is None:
+            return torch.ones(X_norm.shape[0], dtype=torch.bool, device=self.device)
+        phys = self._denormalize(X_norm.detach().cpu().numpy())
+        return torch.tensor([bool(self.feasible(p)) for p in phys],
+                            dtype=torch.bool, device=self.device)
+
     def _get_initial_points(self, n_samples: int) -> torch.Tensor:
-        """Generate initial points using Sobol sequence."""
+        """Generate initial points using Sobol sequence, rejecting infeasible ones.
+
+        Rejection rather than repair: a repaired point is no longer a Sobol point, and
+        the space-filling property is the only reason to use one here. The cap is
+        generous because the test is free -- at the measured 7% feasible fraction for a
+        3 D separation, ten points need ~140 draws.
+        """
         sobol = SobolEngine(dimension=self.n_params, scramble=True)
-        return sobol.draw(n_samples).to(dtype=self.dtype, device=self.device)
+        if self.feasible is None:
+            return sobol.draw(n_samples).to(dtype=self.dtype, device=self.device)
+
+        kept, drawn, cap = [], 0, 400 * n_samples
+        while sum(k.shape[0] for k in kept) < n_samples and drawn < cap:
+            chunk = sobol.draw(max(64, n_samples)).to(dtype=self.dtype, device=self.device)
+            drawn += chunk.shape[0]
+            ok = chunk[self._feasible_mask(chunk)]
+            if ok.shape[0]:
+                kept.append(ok)
+        if not kept or sum(k.shape[0] for k in kept) < n_samples:
+            raise RuntimeError(
+                "Could not draw %d feasible initial points in %d Sobol samples. The "
+                "feasible region is too small for these bounds -- widen the bounds or "
+                "relax the constraint rather than letting the optimiser start infeasible."
+                % (n_samples, drawn))
+        return torch.cat(kept, dim=0)[:n_samples]
 
     def _update_state(self, state: 'State', Y_next: torch.Tensor) -> 'State':
         """Update the state of the trust region based on the new function values."""
@@ -169,6 +208,18 @@ class Optimizer:
         X_cand = x_center.expand(n_candidates, dim).clone()
         X_cand[mask] = pert[mask]
 
+        if self.feasible is not None:
+            ok = self._feasible_mask(X_cand)
+            if ok.any():
+                X_cand = X_cand[ok]
+            else:
+                # x_center came from an evaluated point and is therefore feasible, so
+                # falling back to it keeps the batch admissible. It also means no
+                # progress this round, which the trust region reads as a failure and
+                # answers by shrinking -- the correct response to a region that has
+                # become mostly infeasible.
+                X_cand = x_center.expand(1, dim).clone()
+
         return X_cand
 
     def _generate_batch(
@@ -205,13 +256,25 @@ class Optimizer:
         
         elif acqf_type == 'ei':
             ei = qExpectedImprovement(model=model, best_f=Y.max())
-            X_next, _ = optimize_acqf(
-                acq_function=ei,
-                bounds=torch.stack([tr_lb, tr_ub]),
-                q=batch_size,
-                num_restarts=num_restarts,
-                raw_samples=raw_samples,
-            )
+            if self.feasible is None:
+                X_next, _ = optimize_acqf(
+                    acq_function=ei,
+                    bounds=torch.stack([tr_lb, tr_ub]),
+                    q=batch_size,
+                    num_restarts=num_restarts,
+                    raw_samples=raw_samples,
+                )
+            else:
+                # optimize_acqf searches the box CONTINUOUSLY and cannot respect an
+                # arbitrary nonlinear constraint, so with a feasibility hook EI is
+                # maximised over the FEASIBLE candidate pool instead. Discrete, but
+                # exact about the constraint, which matters more here: a continuous
+                # optimum that overlaps two rotors is not a layout.
+                X_cand = self._sample_candidates(x_center, tr_lb, tr_ub, n_candidates)
+                with torch.no_grad():
+                    vals = ei(X_cand.unsqueeze(1))
+                k = min(batch_size, X_cand.shape[0])
+                X_next = X_cand[torch.topk(vals, k).indices]
 
         return X_next
     

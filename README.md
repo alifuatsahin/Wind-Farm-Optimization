@@ -6,7 +6,7 @@ A Python framework for simulating wind turbine wakes with a point-vortex transpo
 
 - **Physics-Based Wake Model**: point-vortex transport of the counter-rotating vortex pair, with an eddy-viscosity closure for the deficit
 - **Single Marched Field**: one velocity field and one vortex cloud for the whole farm -- no superposition rule, and secondary steering comes out for free
-- **JAX-Compiled Solver**: fixed-length `lax.scan` marches, compiled once per grid size and reused across evaluations
+- **JAX-Compiled Solver**: fixed-length `lax.scan` marches, compiled once per grid size and reused across evaluations. The lateral grid is sized from the farm's span quantised to whole diameters, so a layout search reuses a handful of compiled shapes instead of retracing on each candidate
 - **Bayesian Optimization**: optimise yaw angles, turbine positions, or mixed parameters with trust-region BO (TuRBO) and Thompson sampling
 - **Advanced Visualization**: 
   - Cross-sectional wake plots with velocity and vorticity fields

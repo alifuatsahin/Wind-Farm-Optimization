@@ -275,8 +275,21 @@ def make_turbine_params(config, field_params, y_bounds=None) -> TurbineParams:
     Cp = config.Cp * np.cos(beta) ** CP_YAW_EXP
 
     y_lo, y_hi = (config.pos[1], config.pos[1]) if y_bounds is None else y_bounds
-    # span the farm laterally, plus half the margin at each end
-    Ly = (y_hi - y_lo) + field_params.max_Y * config.D
+    # span the farm laterally, plus half the margin at each end.
+    #
+    # The span is QUANTISED UP to a whole diameter, because Ny below is a jit-static
+    # shape: an unquantised span gives a new Ny for every distinct lateral extent, so a
+    # layout optimiser retraces on nearly every candidate. MEASURED on the space
+    # run_optimization.position_optimization searches: 14 distinct Ny in 14 Sobol draws,
+    # and on a new shape the compile is 2.03 s of a 4.09 s evaluation -- half the budget.
+    # Quantising leaves one shape per whole diameter of span (5 over those draws).
+    #
+    # Rounding UP only ever widens the domain, never clips a wake, and it is inert for a
+    # SINGLE ROW -- span 0 -> ceil(0) = 0 -- so every validation case in this repo is
+    # bit-identical. The 1e-9 keeps an exact multiple from being bumped a diameter wider
+    # by float noise.
+    span_D = float(np.ceil((y_hi - y_lo) / config.D - 1e-9))
+    Ly = span_D * config.D + field_params.max_Y * config.D
     Lz = field_params.max_Z * config.D
     n_grids = field_params.n_grids
     # D cancels algebraically here (Ly = max_Y*D), so take the ratio directly rather

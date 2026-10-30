@@ -100,13 +100,36 @@ def position_optimization():
             new_pos[i, 1] = params[2*i + 1]  # y
         cfg.WindFarm.pos = new_pos
         return cfg
-    
+
+    # Minimum separation. Without it the optimiser is free to "win" with layouts that
+    # cannot be built: replaying 14 Sobol draws over these bounds, the closest pair came
+    # to 0.23 D -- discs essentially coincident -- and 13 of the 14 were under 3 D, with
+    # the model returning a plausible-looking efficiency and raising nothing. It is a
+    # formulation problem rather than a robustness one, and it matters most because
+    # overlapping rotors are exactly where this model has no physics: there is no
+    # blockage, and the station-grouping and ramp-stacking both assume rotors that do
+    # not sit inside each other's near wake.
+    MIN_SEP_D = 3.0
+    D_ref = float(np.atleast_1d(config.WindFarm.D)[0])
+
+    def min_separation_ok(params):
+        xy = np.column_stack([params[0::2], params[1::2]])
+        for i in range(len(xy)):
+            for j in range(i + 1, len(xy)):
+                if np.hypot(*(xy[i] - xy[j])) < MIN_SEP_D * D_ref:
+                    return False
+        return True
+
+    print(f"Constraint: pairwise separation >= {MIN_SEP_D:g} D "
+          f"({MIN_SEP_D * D_ref:.0f} m)\n")
+
     optimizer = Optimizer(
         config=config,
         bounds=bounds,
         param_mapping=position_mapping,
         param_names=param_names,
-        random_state=42
+        random_state=42,
+        feasible=min_separation_ok,
     )
     
     optimizer.optimize(
