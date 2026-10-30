@@ -1,6 +1,9 @@
 import os
+import json
+import time
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 import math
 import torch
 import gpytorch
@@ -22,6 +25,8 @@ from typing import Callable, List, Optional, Tuple
 from copy import deepcopy
 
 from simulation import Simulation
+from simulation.viz_style import (style_figure, style_axes, SURFACE, INK_PRIMARY,
+                                  INK_MUTED)
 from config import Config
 
 @dataclass
@@ -96,6 +101,16 @@ class Optimizer:
         self.best_value = -np.inf
         self.best_params = None
 
+        # Per-evaluation record. Written as the run goes rather than assembled at the
+        # end, because X_opt/Y_opt are only populated when optimize() RETURNS: a run that
+        # is interrupted, or one being watched while it works, otherwise leaves nothing.
+        # `restart_evals` holds the evaluation index each trust region started at, which
+        # nothing recorded before and which the convergence figure marks.
+        self.history = []
+        self.restart_evals = []
+        self.log_path = None
+        self._tr_length = float("nan")
+
     def _restart(self):
         """Reset the optimizer state for a new trust region restart."""
         self._X = torch.empty((0, self.n_params), dtype=self.dtype, device=self.device)
@@ -110,13 +125,37 @@ class Optimizer:
         return x_normalized * (self.bounds[:, 1] - self.bounds[:, 0]) + self.bounds[:, 0]
     
     def _evaluate_objective(self, params: np.ndarray) -> float:
-        """Evaluates wind farm power for given normalized parameters."""
+        """Evaluates wind farm power for given normalized parameters.
+
+        Both evaluation sites -- the Sobol initial design and the acquisition batch --
+        come through here, so this is the one place that sees every evaluation and is
+        where the run is logged.
+        """
         physical_params = self._denormalize(params)
         temp_config = self.param_mapping(physical_params, deepcopy(self.config))
-        
+
+        t0 = time.perf_counter()
         sim = Simulation(temp_config)
         sim.run()
-        return sim.calculate_objective()
+        value = sim.calculate_objective()
+        secs = time.perf_counter() - t0
+
+        rec = {
+            "eval": len(self.history),
+            "value": float(value),
+            "best_so_far": float(max(value, self.best_value)),
+            "params": [float(v) for v in physical_params],   # PHYSICAL, not [0,1]
+            "tr_length": float(self._tr_length),
+            "seconds": float(secs),
+        }
+        self.history.append(rec)
+        if self.log_path:
+            # one JSON object per line, flushed, so the file is readable mid-run and
+            # survives an interrupt
+            with open(self.log_path, "a") as fh:
+                fh.write(json.dumps(rec) + "\n")
+                fh.flush()
+        return value
 
     def _feasible_mask(self, X_norm: torch.Tensor) -> torch.Tensor:
         """Which rows of a NORMALISED batch satisfy `feasible`. All True without one."""
@@ -305,7 +344,8 @@ class Optimizer:
             n_candidates: int = 5000,
             acquisition_func: str = 'ts',
             log_freq: int = 5,
-            verbose: bool = True
+            verbose: bool = True,
+            log_path: Optional[str] = None,
         ) -> Tuple[np.ndarray, float]:
         
         """
@@ -333,6 +373,13 @@ class Optimizer:
         best_value : float
             Best objective value achieved
         """
+        if log_path:
+            self.log_path = log_path
+            os.makedirs(os.path.dirname(os.path.abspath(log_path)) or ".", exist_ok=True)
+            open(log_path, "w").close()      # truncate, so a rerun does not append
+            if verbose:
+                print(f"Streaming one JSON record per evaluation to {log_path}")
+
         if verbose:
             print(f"Starting optimization on device: {self.device}")
             print(f"Max evaluations: {max_evals}\n")
@@ -343,6 +390,9 @@ class Optimizer:
         while n_evals < max_evals:
             # Initialize data storage for this TR
             self._restart()
+            # The first entry is the start of the run, not a restart; the convergence
+            # figure drops it and marks the rest.
+            self.restart_evals.append(n_evals)
 
             # Generate and evaluate initial points
             if verbose:
@@ -387,6 +437,7 @@ class Optimizer:
             
             # Main optimization loop
             while n_evals < max_evals and not state.restart_triggered:
+                self._tr_length = state.length     # logged with each evaluation below
                 # Standardize targets for GP fitting
                 train_Y = (self._Y - self._Y.mean()) / self._Y.std()
                 
@@ -445,6 +496,24 @@ class Optimizer:
 
         return self.best_params, self.best_value
     
+    def evals_to_within(self, target: float, tol: float = 1e-3) -> Optional[int]:
+        """Evaluations needed to come within `tol` (relative) of `target`.
+
+        The paper's claim is "BO reaches within 0.1% of the grid optimum of the model in
+        N evaluations, against 117 for the grid", so `target` is the MODEL's own optimum
+        over the measured grid -- not the measured optimum. Comparing against the
+        measured one would conflate the optimiser's convergence with the model's error,
+        which is a separate number (\\mSWlostGain).
+
+        Returns None if the run never got there, which is a result and not a failure:
+        say so rather than reporting the budget.
+        """
+        if not self.history:
+            return None
+        best = np.maximum.accumulate([r["value"] for r in self.history])
+        hit = np.flatnonzero(best >= target * (1.0 - tol))
+        return int(hit[0]) + 1 if hit.size else None
+
     def _ensure_save_dir(self, path: str):
         """Create the run directory (with config.yaml snapshot) and path's parent folder."""
         self.config.ensure_run_dir()
@@ -467,50 +536,75 @@ class Optimizer:
             'best_params': self.best_params,
             'best_value': self.best_value,
             'bounds': self.bounds.tolist(),
-            'param_names': self.param_names
+            'param_names': self.param_names,
+            # per-evaluation record: physical params, wall time, TR length, and the
+            # evaluation index each trust region began at
+            'history': self.history,
+            'restart_evals': self.restart_evals,
         }
         with open(filepath, 'wb') as f:
             pickle.dump(results, f)
         print(f"Optimization results saved to {filepath}")
     
-    def plot_optimization_history(self, save_path: Optional[str] = None):
+    def plot_optimization_history(self, save_path: Optional[str] = None,
+                                  param_label: str = "Parameter"):
+        """Convergence of the run: objective per evaluation, and the parameters tried.
+
+        Reads `self.history`, so it works MID-RUN as well as after, and plots parameters
+        in PHYSICAL units. It used to read X_opt, which is written only when optimize()
+        returns and holds normalised [0,1] coordinates -- panel (b) therefore showed yaw
+        as 0..1 rather than degrees, and nothing could be plotted until the run finished.
+
+        Trust-region restarts are marked. The first entry of `restart_evals` is the start
+        of the run, not a restart, so it is dropped.
         """
-        Plot the optimization history.
-        
-        Parameters:
-        -----------
-        save_path : str, optional
-            Path to save the figure
-        """        
-        iterations = np.arange(len(self.Y_opt))
-        y_best_so_far = np.maximum.accumulate(self.Y_opt)
-        
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
-        
-        # Plot objective value over iterations
-        ax1.plot(iterations, self.Y_opt, 'bo-', alpha=0.6, label='Sampled points')
-        ax1.plot(iterations, y_best_so_far, 'r-', linewidth=2, label='Best so far')
-        ax1.set_xlabel('Iteration')
-        ax1.set_ylabel('Objective Value')
-        ax1.set_title('Optimization History')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # Plot parameters over iterations
-        X_array = np.array(self.X_opt)
-        for i in range(self.n_params):
-            ax2.plot(iterations, X_array[:, i], 'o-', alpha=0.6, label=self.param_names[i])
-        ax2.set_xlabel('Iteration')
-        ax2.set_ylabel('Parameter Value')
-        ax2.set_title('Parameters Over Iterations')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
+        if self.history:
+            y = np.array([r["value"] for r in self.history])
+            P = np.array([r["params"] for r in self.history])
+        elif self.Y_opt:                       # a run loaded from save_results
+            y = np.asarray(self.Y_opt)
+            P = self._denormalize(np.asarray(self.X_opt))
+        else:
+            raise RuntimeError("Nothing to plot: no evaluations recorded yet.")
+
+        it = np.arange(len(y))
+        best = np.maximum.accumulate(y)
+
+        plt.close("all")
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7.0, 4.8), sharex=True)
+        style_figure(fig)
+
+        for k, r in enumerate(self.restart_evals[1:]):
+            ax1.axvline(r, color=INK_MUTED, lw=0.8, ls=":", zorder=1,
+                        label="TR restart" if k == 0 else None)
+            ax2.axvline(r, color=INK_MUTED, lw=0.8, ls=":", zorder=1)
+
+        ax1.plot(it, y, "o", ms=3.5, alpha=0.65, color="#1c5cab", label="Evaluation")
+        ax1.plot(it, best, "-", lw=1.6, color=INK_PRIMARY, label="Best so far")
+        ax1.set_ylabel("Farm efficiency", fontsize=9)
+        ax1.legend(frameon=False, fontsize=7.5, loc="lower right", ncol=3)
+        ax1.tick_params(labelsize=8)
+        style_axes(ax1)
+
+        for i in range(P.shape[1]):
+            ax2.plot(it, P[:, i], "o-", ms=2.5, lw=0.8, alpha=0.75,
+                     label=self.param_names[i])
+        ax2.set_xlabel("Evaluation", fontsize=9)
+        ax2.xaxis.set_major_locator(MaxNLocator(integer=True))   # evaluations are counts
+        ax2.set_ylabel(param_label, fontsize=9)
+        ax2.legend(frameon=False, fontsize=7.5, ncol=min(4, P.shape[1]))
+        ax2.tick_params(labelsize=8)
+        style_axes(ax2)
+
+        for ax, L in zip((ax1, ax2), "ab"):
+            ax.text(0.008, 0.97, f"({L})", transform=ax.transAxes, ha="left", va="top",
+                    fontsize=9, color=INK_PRIMARY,
+                    bbox=dict(facecolor=SURFACE, edgecolor="none", alpha=0.75, pad=1.5))
+
+        fig.tight_layout()
         if save_path:
             self._ensure_save_dir(save_path)
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            fig.savefig(save_path, dpi=300, bbox_inches="tight", facecolor=SURFACE)
             print(f"Plot saved to {save_path}")
         else:
             plt.show()
