@@ -1,9 +1,20 @@
 *__pycache__
+.pytest_cache/
 .vscode/
 .claude/
 runs/
 data/
+experiments/
+
+# Validation and paper scripts. Every one of these reads data/, which is not
+# redistributable (PIV from the WIRE tunnel and the LES volumes), so they cannot run
+# from a clone and are kept out of the repo.
 make_paper_figures.py
 paper_metrics.py
 validation.py
-experiments/
+validation_fullwake.py
+
+# Tests. NOTE: test_invariants.py does NOT read data/ -- it is the solver-invariant
+# suite with golden values and would run fine from a clone. Excluded by request, not
+# by necessity; `git rm --cached` it back and drop this line to restore.
+tests/
