@@ -30,6 +30,7 @@ from simulation.viz_style import (style_figure, style_axes, SURFACE, INK_PRIMARY
 from config import Config
 
 
+@dataclass
 class State:
     """State used to track the recent history of the trust region."""
     dim: int
@@ -216,9 +217,14 @@ class Optimizer:
     def _compute_tr_bounds(self, model: SingleTaskGP, X: torch.Tensor, Y: torch.Tensor, state: 'State') -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute the trust region bounds."""
         x_center = X[Y.argmax(), :].clone()
-        weights = model.covar_module.base_kernel.lengthscale.squeeze().detach()
+        # reshape(-1), not squeeze(): squeeze() collapses the (1, 1) lengthscale of a
+        # ONE-dimensional problem to a 0-d tensor, and len() then raises, so a
+        # single-parameter search could not run at all.
+        weights = model.covar_module.base_kernel.lengthscale.reshape(-1).detach()
         weights = weights / weights.mean()
-        weights = weights / torch.prod(weights.pow(1.0 / len(weights)))
+        # geometric mean via logs: equivalent to prod(w ** (1/d)) but it cannot
+        # over- or underflow while taking a product over many dimensions
+        weights = weights / torch.exp(torch.log(weights).mean())
         tr_lb = torch.clamp(x_center - weights * state.length / 2.0, 0.0, 1.0)
         tr_ub = torch.clamp(x_center + weights * state.length / 2.0, 0.0, 1.0)
         return tr_lb, tr_ub, x_center
@@ -241,7 +247,11 @@ class Optimizer:
         prob_perturb = min(20.0 / dim, 1.0)
         mask = torch.rand(n_candidates, dim, dtype=self.dtype, device=self.device) <= prob_perturb
         ind = torch.where(mask.sum(dim=1) == 0)[0]
-        mask[ind, torch.randint(0, dim - 1, size=(len(ind),), device=self.device)] = 1
+        # randint's upper bound is EXCLUSIVE, so `dim - 1` never selected the last
+        # parameter -- a candidate that perturbed nothing was always repaired along some
+        # other axis, in every dimension, not just d=1 (where `randint(0, 0)` is an
+        # empty range and raises outright).
+        mask[ind, torch.randint(0, dim, size=(len(ind),), device=self.device)] = 1
 
         # Create candidate points from the perturbations and the mask
         X_cand = x_center.expand(n_candidates, dim).clone()
