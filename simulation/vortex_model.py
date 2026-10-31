@@ -284,6 +284,19 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
         qualifies_all = (real_dist[i_idx, j_idx] <= jnp.maximum(
             a_eff2 / MERGE_CORE_RATIO ** 2, threshold ** 2)) & distinct
 
+    # NOT compacted to the qualifying pairs, though it is tempting: 98-99.9% of steps
+    # have none at all, and gathering them into a fixed buffer made merge 1.8x faster
+    # again. TRIED AND REVERTED -- it is not lossless. Sizing the buffer from the
+    # qualifying-pair count measured per turbine (max 48) overran it, because
+    # solve_single_field CONCATENATES the rotors' clouds, so the live N_cap during a farm
+    # march is far larger than any single turbine's stored field suggests, and so is the
+    # pair count. Two of six cases moved (full-wake C in the 7th digit, the 8-turbine row
+    # in the 5th) from merges being dropped once the buffer filled.
+    #
+    # A buffer can only be made safe by a bound that holds for the CONCATENATED cloud,
+    # and jit cannot raise when one is exceeded -- so the failure would stay silent.
+    # Measure the pair count inside the march, not per turbine, before trying again.
+
     def merge_step(carry, xs):
         Y, Z, Rv, age, Circ, claimed, locked = carry
         i, j, qualifies = xs
