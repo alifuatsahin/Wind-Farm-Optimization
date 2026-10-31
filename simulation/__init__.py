@@ -1,5 +1,28 @@
+import os
 import jax
-jax.config.update("jax_enable_x64", True)
+
+# SINGLE precision by default. Set WFO_FLOAT64=1 to get the old behaviour back, which is
+# worth doing whenever a result looks like it might be a rounding artefact -- but it is
+# not needed for accuracy, and it is actively harmful on the GPU.
+#
+# MEASURED against double, on the three cases the model is validated on:
+#
+#   full-wake normalised power   0.64815825 -> 0.64815789,  0.65805729 -> 0.65805607
+#   3x3 farm efficiency          0.57348380 -> 0.57348371
+#   8-turbine row, T8/T1         0.69832005 -> 0.69830831
+#   8-turbine power_bias/rmse    -0.07717983/0.09844260 -> -0.07719210/0.09845628
+#
+# i.e. ~1e-5 at worst, on the 8-turbine row, which marches furthest and accumulates the
+# most explicit steps. That is four orders below the model's own error and invisible at
+# the precision anything is reported to. The march being explicit over thousands of
+# sequential steps is exactly where single precision WOULD accumulate, so this was
+# measured on the longest case rather than assumed from the short ones.
+#
+# It also buys 1.16-1.35x on CPU for nothing. The real reason, though, is the GPU: a
+# consumer card (this machine has an RTX 5070) runs float64 at 1/64 of float32, so in
+# double precision a GPU run takes the slowest path the hardware has and can lose to the
+# CPU outright. Data-centre parts are 1/2 and would not care.
+jax.config.update("jax_enable_x64", os.environ.get("WFO_FLOAT64", "0") == "1")
 
 from .utils import plot_data, plot_farm_deficit_map, plot_turbine_layout
 from .core_types import WindFarm
