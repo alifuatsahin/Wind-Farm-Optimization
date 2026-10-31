@@ -850,10 +850,8 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
     kept_count = int(jnp.sum(was_active)) + 1
 
     grid = (np.asarray(seed.yloc), np.asarray(seed.zloc))
-    frames = [_vortex_field_to_numpy(seed, grid)]
-    frames += [_vortex_field_to_numpy(_frame(stacked_out, i), grid)
-               for i in range(kept_count - 1)]
-    return frames
+    return ([_vortex_field_to_numpy(seed, grid)]
+            + _stacked_frames_to_numpy(stacked_out, kept_count - 1, grid))
 
 
 @partial(jax.jit, static_argnames=("max_steps",))
@@ -1106,5 +1104,41 @@ def _vortex_field_to_numpy(vortex_field, grid=None):
         V=np.asarray(vortex_field.V), W=np.asarray(vortex_field.W),
         U=np.asarray(vortex_field.U), OmegaX=np.asarray(vortex_field.OmegaX),
         kw=np.asarray(vortex_field.kw),
+        # wage and ti used to be left alone here, which made them the only jax arrays
+        # to survive into the Loop-2 boundary this function exists to enforce. Converted
+        # for the same reason as the rest: the contract is "no device arrays downstream".
+        wage=np.asarray(vortex_field.wage), ti=np.asarray(vortex_field.ti),
         t=float(vortex_field.t), X=float(vortex_field.X),
     )
+
+
+def _stacked_frames_to_numpy(stacked, n, grid):
+    """The first `n` frames of a stacked march as numpy VortexFields, in ONE transfer.
+
+    The obvious loop -- `_vortex_field_to_numpy(_frame(stacked, i), grid)` per frame --
+    costs 15 eager device slices and 13 device-to-host transfers PER FRAME, and a march
+    retains hundreds of them. On the default 3-rotor case that is ~12,800 eager jax ops
+    against two marches that together take under a second: measured at 70% of the whole
+    evaluation (2.71 s of 3.86 s), i.e. the readback cost more than the physics.
+
+    Slicing is the same arithmetic wherever it runs, so run it on the host. The trim
+    stays on the device -- a march buffers max_steps frames and keeps far fewer, so
+    transferring the untrimmed buffer would give back what the batching wins -- and
+    everything after it is numpy. Bit-identical by construction: no value is
+    recomputed, only moved across the boundary in one piece instead of in 11,000.
+
+    The frames therefore SHARE one backing array per field; frame i's U is a view into
+    the stacked U, not a copy. Nothing downstream writes into a frame (checked across
+    simulation/, plotting.py and the validation scripts), and that is what makes the
+    sharing free -- a consumer that needs to mutate one must copy it first.
+    """
+    host = jax.device_get({f.name: getattr(stacked, f.name)[:n]
+                           for f in dataclasses.fields(stacked)
+                           if f.name not in _UNSTACKED_MEMBERS})
+    yloc, zloc = grid
+    scalars = ("t", "X")
+    return [dataclasses.replace(
+                stacked, yloc=yloc, zloc=zloc,
+                t=float(host["t"][i]), X=float(host["X"][i]),
+                **{k: v[i] for k, v in host.items() if k not in scalars})
+            for i in range(n)]
