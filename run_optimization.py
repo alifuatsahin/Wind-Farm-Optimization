@@ -1,21 +1,28 @@
 import os
 
-from optimization import Optimizer, yaw_parameterisation
+from optimization import Optimizer
 from config import Config
 import numpy as np
 
-def yaw_optimization(parameterisation="per_rotor", tol_D=0.5):
-    """Optimize yaw angles for maximum power.
+def yaw_optimization():
+    """Optimize yaw angles for maximum power. Every rotor gets its own angle.
 
-    parameterisation='per_rotor' gives every rotor its own angle. That is the general
-    case and the one to keep for wind that is not perpendicular to the rows, since the
-    station grouping then ties together rotors that no longer share an inflow.
+    There is deliberately NO option to tie rotors together. Grouping them by streamwise
+    station was built and removed, because it does not answer a question worth asking.
+    It collapses the lateral dimension, which makes an 8-wide, 10-deep farm a
+    10-parameter search -- the SAME dimension as one 10-rotor streamwise line searched
+    per-rotor, at eight times the cost per evaluation. MEASURED on the 3x3, a single
+    line found [16.96, 11.56, -0.46] against the farm's [17.48, 13.24, -0.90], and the
+    LINE's angles kept 98.6% of the farm's own gain. The mechanism that could have
+    separated them -- yaw deflecting a wake laterally into the next column, which an
+    isolated line has no neighbour to receive -- does not reach at 5 D lateral spacing
+    and ~17 deg.
 
-    'station' gives one angle per streamwise station. On the 3x3 that reached a better
-    optimum than per-rotor in 18 evaluations against 140 -- not because the restriction
-    helps in principle (it is a strict subspace) but because a per-rotor search does not
-    converge at any budget a large farm can afford. It is what makes an 80-rotor farm a
-    10-parameter problem rather than an 80-parameter one.
+    So for perpendicular wind on a regular grid, optimise a LINE and run the farm once
+    to report it; a farm-wide grouped search is worse than both that and this. And a
+    grouping cannot serve the cases that genuinely need a farm -- layout search, or wind
+    that is not perpendicular, where rotors sharing a grid row no longer share an
+    inflow. That leaves it no case at all.
     """
     print("\n" + "="*70)
     print("Optimizing Yaw Angles")
@@ -23,32 +30,16 @@ def yaw_optimization(parameterisation="per_rotor", tol_D=0.5):
 
     config = Config(run_prefix="opt")
 
-    pos = np.array([t.pos[:2] for t in config.WindFarm.turbines()], dtype=float)
-    D_ref = float(config.WindFarm.turbines()[0].D)
-    to_yaw, n_params, gid = yaw_parameterisation(pos, D_ref, parameterisation, tol_D)
-    if gid is None:
-        print(f"Parameterisation: per-rotor, {n_params} free angles\n")
-        names = [f'yaw_T{i}' for i in range(n_params)]
-    else:
-        print(f"Parameterisation: station-wise, {n_params} free angles for "
-              f"{len(pos)} rotors (station width {tol_D:g} D)")
-        for g in range(n_params):
-            members = np.flatnonzero(gid == g)
-            print(f"   station {g}: x = {pos[members[0], 0] / D_ref:6.2f} D, "
-                  f"rotors {list(members)}")
-        print("")
-        names = [f'yaw_S{g}' for g in range(n_params)]
-
     def yaw_mapping(params, cfg):
-        cfg.WindFarm.yaw = to_yaw(params)
+        cfg.WindFarm.yaw = params.copy()
         return cfg
 
     optimizer = Optimizer(
         config=config,
-        bounds=[(-30, 30)] * n_params,
+        bounds=[(-30, 30)] * len(config.WindFarm),
         device='cuda',
         param_mapping=yaw_mapping,
-        param_names=names,
+        param_names=[f'yaw_T{i}' for i in range(len(config.WindFarm))],
         random_state=42
     )
 
