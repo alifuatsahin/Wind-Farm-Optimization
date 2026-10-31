@@ -48,6 +48,17 @@ def station_groups(positions, D, tol_D=0.5):
     grouping degrades towards per-rotor on its own, instead of silently averaging
     rotors that no longer share an inflow. tol_D is the width of a station in diameters.
 
+    USE IT SPARINGLY. Collapsing the lateral dimension makes an 8-wide, 10-deep farm a
+    10-parameter search -- which is the SAME dimension as one 10-rotor streamwise line
+    searched per-rotor, at eight times the cost per evaluation. MEASURED on the 3x3: a
+    single line found [16.96, 11.56, -0.46] against the farm's [17.48, 13.24, -0.90],
+    and applying the LINE's angles to the farm kept 98.6% of the farm's own gain, for
+    3.3x less search. So for perpendicular wind on a regular grid, optimise a line and
+    run the farm once to report it; this grouping only earns its place where lateral
+    coupling matters enough to need the farm but not enough to need per-rotor freedom.
+    (Yaw deflects a wake laterally into the next column and an isolated line has no
+    neighbour to receive it -- at 5 D lateral and ~17 deg the deflection does not reach.)
+
     Anchored on each group's FIRST member rather than its predecessor, so a long row of
     small gaps cannot chain into one group spanning the whole farm.
 
