@@ -7,14 +7,14 @@ import pandas as pd
 import os
 
 class Turbine:
-    def __init__(self, config, field_params, y_bounds=None):
+    def __init__(self, config, field_params, y_bounds=None, n_rotors=1):
         self.config = config
         self.field_params = field_params
 
         # y_bounds is the farm's lateral extent; it makes every rotor share one
         # absolute cross-plane grid, which the single marched field needs in order
         # to carry a wake from one column to the next (see make_turbine_params).
-        self._params = make_turbine_params(config, field_params, y_bounds)
+        self._params = make_turbine_params(config, field_params, y_bounds, n_rotors)
         local = tp.init_local_conditions(self._params)
 
         # Config-fixed quantities are READ-ONLY properties delegating to _params (below),
@@ -225,8 +225,9 @@ class WindFarm:
     def _construct_wind_farm(self):
         ys = [float(t.pos[1]) for t in self.turbine_configs.turbines()]
         y_bounds = (min(ys), max(ys))
-        self.turbines = [Turbine(t_config, self.field_params, y_bounds)
-                         for t_config in self.turbine_configs.turbines()]
+        _configs = list(self.turbine_configs.turbines())
+        self.turbines = [Turbine(t_config, self.field_params, y_bounds, len(_configs))
+                         for t_config in _configs]
         self.turbines = sorted(self.turbines, key=lambda t: t.pos[0])
         self._get_calculation_domain()
 

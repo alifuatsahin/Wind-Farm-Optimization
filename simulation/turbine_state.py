@@ -91,6 +91,10 @@ class TurbineParams:
     #: Local inflow angle arctan(Vbar/Ubar) over this rotor's disc, radians. Set by
     #: wake_solver from the field the station is handed; 0 for the first station.
     skew: float = 0.0
+    #: How many rotors the farm has. Read only by vortex_adapter, to decide whether
+    #: the cloud's projection onto the field grid is worth doing by particle mesh --
+    #: see field_params.pm_min_rotors for why that is a size question.
+    n_rotors: int = 1
 
     @property
     def beta(self):
@@ -175,7 +179,7 @@ jax.tree_util.register_dataclass(
     TurbineParams,
     data_fields=["pos", "D", "Zhub", "yaw", "TSR", "Ct", "Cp", "Uh", "Zh", "WV",
                  "phi", "dphi", "yloc", "zloc", "skew"],
-    meta_fields=["config", "field_params", "Nv"],
+    meta_fields=["config", "field_params", "Nv", "n_rotors"],
 )
 
 
@@ -220,12 +224,20 @@ class VortexSimConfig:
     W: np.ndarray
     yloc: np.ndarray
     zloc: np.ndarray
+    #: Precomputed particle-mesh kernels, or None to use the exact pairwise sum. None is
+    #: a different pytree STRUCTURE rather than a different value, so the two paths
+    #: compile separately and the direct one is untouched by the existence of the other.
+    pm_Av: np.ndarray = None
+    pm_Aw: np.ndarray = None
+    pm_lo: float = 0.0
+    pm_lnr: float = 0.0
 
 
 jax.tree_util.register_dataclass(
     VortexSimConfig,
     data_fields=["D", "Uhub", "dgamma", "calculation_domain", "phi", "beta", "Yoffset",
-                 "Zhub", "nu_slope", "nu_const", "U_conv", "V", "W", "yloc", "zloc"],
+                 "Zhub", "nu_slope", "nu_const", "U_conv", "V", "W", "yloc", "zloc",
+                 "pm_Av", "pm_Aw", "pm_lo", "pm_lnr"],
     meta_fields=["Nv"],
 )
 
@@ -254,7 +266,8 @@ jax.tree_util.register_dataclass(
 )
 
 
-def make_turbine_params(config, field_params, y_bounds=None) -> TurbineParams:
+def make_turbine_params(config, field_params, y_bounds=None,
+                        n_rotors=1) -> TurbineParams:
     """Replicates the static portion of the current Turbine.__init__.
 
     `y_bounds` is the (min, max) lateral position of EVERY rotor in the farm. The
@@ -354,4 +367,5 @@ def make_turbine_params(config, field_params, y_bounds=None) -> TurbineParams:
         dphi=dphi,
         yloc=yloc,
         zloc=zloc,
+        n_rotors=n_rotors,
     )

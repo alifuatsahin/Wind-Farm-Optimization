@@ -274,6 +274,30 @@ def squire_nu(params, Uhub):
     return 0.005 * abs(compute_gamma0(params, Uhub) * GAMMA_TRAILING_K)
 
 
+#: Particle-mesh kernels, keyed by grid and ladder. They depend only on the cross-plane
+#: grid and the core ladder, both fixed for a run, so every rotor in a farm shares one
+#: set and the build cost is paid once rather than per rotor per evaluation.
+_PM_CACHE = {}
+
+
+def _pm_config(params):
+    """The PM kernels for this rotor's grid, or None to use the exact pairwise sum."""
+    fp = params.field_params
+    nmin = getattr(fp, "pm_min_rotors", None)
+    if nmin is None or getattr(params, "n_rotors", 1) < nmin:
+        return None, 0.0, 0.0
+    from .vortex_model import pm_ladder, pm_kernels
+    tol = float(getattr(fp, "pm_tol", 0.05))
+    cores, lo, lnr = pm_ladder(params.D, tol)
+    key = (params.yloc.shape, float(params.yloc[1, 0] - params.yloc[0, 0]),
+           float(params.zloc[0, 1] - params.zloc[0, 0]), float(params.zloc[0, 0]),
+           round(lo, 12), round(lnr, 12), len(cores))
+    if key not in _PM_CACHE:
+        _PM_CACHE[key] = pm_kernels(cores, params.yloc, params.zloc)
+    Av, Aw = _PM_CACHE[key]
+    return (Av, Aw), lo, lnr
+
+
 def vortex_adapter(params, local):
     """Builds a VortexSimConfig. field_params.vortex_nu selects the core-diffusion model:
     'abl' (default, Shapiro Eq 4.7) or 'squire' (the original PVT closure)."""
@@ -281,6 +305,7 @@ def vortex_adapter(params, local):
         nu_slope, nu_const = 0.0, squire_nu(params, local.Uhub)
     else:
         nu_slope, nu_const = abl_nu_slope(params), 0.0
+    _pm, _pm_lo, _pm_lnr = _pm_config(params)
     return VortexSimConfig(
         D=params.D,
         Uhub=local.Uhub,
@@ -318,6 +343,10 @@ def vortex_adapter(params, local):
         W=jnp.asarray(local.W),
         yloc=jnp.asarray(params.yloc),
         zloc=jnp.asarray(params.zloc),
+        pm_Av=None if _pm is None else _pm[0],
+        pm_Aw=None if _pm is None else _pm[1],
+        pm_lo=_pm_lo,
+        pm_lnr=_pm_lnr,
     )
 
 

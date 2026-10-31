@@ -209,6 +209,26 @@ class FieldConfig:
     cfl_factor: float = 0.125 # CFL factor for adaptive time stepping
     merge_threshold: float = 0.05 # Vortex merging distance, IN ROTOR DIAMETERS.
     vortex_nu: str = 'abl'
+    #: Rotor count at or above which the cloud's induction on the field grid is evaluated
+    #: by the particle-mesh solver instead of the direct pairwise sum. None disables it.
+    #:
+    #: The direct sum is O(N*M) and is 86-92% of a cloud step at every farm size, so it is
+    #: THE scaling term. The PM solve replaces it with a fixed number of FFTs, which is a
+    #: large win at farm scale (80 rotors: 2313 ms -> ~90 ms) and a LOSS below a handful of
+    #: rotors, because the bin count has to be static under jit: the ladder must span every
+    #: core the whole run produces (measured 23x on the 3-rotor case, 34x on the 8-rotor
+    #: row), so it costs ~76 transforms whether or not a given step needs them, against a
+    #: direct sum that only costs 15 ms at that size.
+    #:
+    #: The threshold therefore exists to keep the VALIDATED cases on the exact kernel. PM
+    #: is not bit-identical -- depositing vortices onto cells costs ~0.05% even with exact
+    #: cores, and the ladder costs ~1% at pm_tol 0.05 -- so every published 3- and
+    #: 8-rotor number stays on the direct path and is unchanged by construction.
+    pm_min_rotors: int | None = None
+    #: Relative width of the geometric core ladder the PM solver bins vortices onto.
+    #: Measured field error against the direct sum: 4.70% at 0.20, 1.89% at 0.10, 0.95% at
+    #: 0.05, 0.68% at 0.02. Cost is linear in the bin count, which goes as 1/ln(1+pm_tol).
+    pm_tol: float = 0.05
     #: Friction velocity in m/s for the ABL vortex-core diffusivity. None derives it from
     #: the log law, u* = kappa*Uh/ln(Zh/z0), which is the historical behaviour and leaves
     #: every result unchanged.

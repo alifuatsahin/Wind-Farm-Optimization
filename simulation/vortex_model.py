@@ -114,7 +114,11 @@ def _vortex2velocity(data, config):
     yloc = config.yloc
     zloc = config.zloc
 
-    V, W = _oseenlamb(Circ, Y, Z, Rv, yloc, zloc)
+    if getattr(config, "pm_Av", None) is None:
+        V, W = _oseenlamb(Circ, Y, Z, Rv, yloc, zloc)
+    else:
+        V, W = _oseenlamb_pm(Circ, Y, Z, Rv, yloc, zloc,
+                             config.pm_Av, config.pm_Aw, config.pm_lo, config.pm_lnr)
     V = V + data.V
     W = W + data.W
 
@@ -383,6 +387,133 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
         OmegaX=vortex_field.OmegaX,
         t=vortex_field.t
     )
+
+def _fast_dct2(x):
+    """DCT-II along the last axis, Makhoul-style on a real FFT.
+
+    jax.scipy.fft.dct is written on a full COMPLEX fft plus a pad and a reorder, which
+    makes a DST-II of length H cost MORE than the rfft of length 2H it is meant to
+    replace (2.20 ms against 0.736 at farm scale). jax has no dst at all.
+    """
+    H = x.shape[-1]
+    v = jnp.concatenate([x[..., 0::2], x[..., 1::2][..., ::-1]], axis=-1)
+    u = jnp.fft.rfft(v, axis=-1) * jnp.exp(-1j * jnp.pi * jnp.arange(H // 2 + 1) / (2 * H))
+    # the two branches overlap at k = H/2 and agree there because rfft(v)[H/2] is real
+    return jnp.concatenate([2 * jnp.real(u), -2 * jnp.imag(u[..., H // 2 - 1:0:-1])], -1)
+
+
+def _fast_dst2(x):
+    return _fast_dct2(x * (-1.0) ** jnp.arange(x.shape[-1]))[..., ::-1]
+
+
+def _idst2(S):
+    n = S.shape[-1]
+    return jax.scipy.fft.idct(S[..., ::-1], type=2, axis=-1) * (-1.0) ** jnp.arange(n)
+
+
+def pm_ladder(D, tol, lo_D=0.04, hi_D=2.2):
+    """The fixed geometric ladder of core radii the PM solver bins onto.
+
+    It must span every Rv the whole march produces, not the spread of any one step: Rv
+    grows as Rv^2 += 4 nu dt and merging makes new cores, so a snapshot spans ~1.5x while
+    a full run spans 23x (3-rotor case) to 34x (8-rotor row). Sizing the ladder from a
+    snapshot would silently clamp most of the run into the end rungs.
+    """
+    n = int(np.ceil(np.log(hi_D / lo_D) / np.log1p(tol)))
+    return lo_D * D * (1.0 + tol) ** (np.arange(n) + 0.5), lo_D * D, float(np.log1p(tol))
+
+
+def pm_kernels(cores, yloc, zloc):
+    """Av, Aw per ladder rung: the whole cost of the ground image, paid once per run.
+
+    psi = 0 on the ground, so the field is ODD in z and the mirror vortices carry no
+    information. Solving on the half domain imposes that by construction, which halves
+    both the grid and the vortex count. The grid is CELL-CENTRED, so the ground is a
+    HALF-SAMPLE point and this is the DST-II family, not DST-I.
+
+    With Kv ~ -z f(r2) odd in z and Kw ~ y f(r2) even, the phase factors of the odd
+    extension cancel and the solve is real arithmetic on half-length transforms:
+
+        dct2(V)[k]   = -i Kv_hat[k] dst2(src)[k-1]        V is EVEN in z
+        dst2(W)[k-1] =    Kw_hat[k] dst2(src)[k-1]        W is ODD  in z
+
+    The odd kernel's NYQUIST row must be zeroed: offsets -P/2 and +P/2 are the same
+    lattice point, so an odd kernel is only self-consistent at zero there, and leaving it
+    makes Kv_hat complex and corrupts the cosine branch by ~5e-4. That is exact only
+    because H = 2 nz keeps every source-target pair inside |offset| < P/2 -- the largest
+    is 2 nz - 1, which is why the half array is twice the physical grid and not less.
+    """
+    yl, zl = np.asarray(yloc), np.asarray(zloc)
+    ny, nz = yl.shape
+    dy, dz = yl[1, 0] - yl[0, 0], zl[0, 1] - zl[0, 0]
+    Py, H = 2 * ny, 2 * nz
+    P = 2 * H
+    ay, aq = np.arange(Py), np.arange(P)
+    MY = np.where(ay < Py // 2, ay, ay - Py)[:, None] * dy
+    MZ = np.where(aq < P // 2, aq, aq - P)[None, :] * dz
+    R2 = MY ** 2 + MZ ** 2
+    R2s = np.where(R2 == 0, 1.0, R2)
+    Av = np.empty((len(cores), Py // 2 + 1, H - 1), np.complex128)
+    Aw = np.empty((len(cores), Py // 2 + 1, H), np.complex128)
+    for i, a in enumerate(cores):
+        p = np.where(R2 == 0, 0.0, (1 - np.exp(-R2 / a ** 2)) / (2 * np.pi * R2s))
+        Kv, Kw = -p * MZ, p * MY
+        Kv[:, P // 2] = 0.0
+        Av[i] = -1j * np.fft.fft(np.fft.rfft(Kv, axis=0), axis=1)[:, 1:H]
+        Aw[i] = np.fft.fft(np.fft.rfft(Kw, axis=0), axis=1)[:, 1:H + 1]
+    return jnp.asarray(Av), jnp.asarray(Aw)
+
+
+def _oseenlamb_pm(Circ, Y, Z, Rv, yloc, zloc, Av, Aw, lo, lnr):
+    """Particle-mesh form of _oseenlamb: same field, O(bins * M log M) instead of O(N*M).
+
+    Only the REAL half of the cloud is deposited; the mirrors are reproduced by the odd
+    symmetry of the basis. That is safe because the march keeps the halves exactly
+    paired -- verified at 0.00e+00 over 14000 steps -- and the pairing is relied on here,
+    so it is asserted in the invariant tests rather than assumed.
+    """
+    ny, nz = yloc.shape
+    Py, H = 2 * ny, 2 * nz
+    oy = (Py - ny) // 2
+    dy = yloc[1, 0] - yloc[0, 0]
+    dz = zloc[0, 1] - zloc[0, 0]
+    nb = Av.shape[0]
+    N = Circ.shape[0] // 2
+
+    c0, Y0, Z0, R0 = Circ[:N], Y[:N], Z[:N], Rv[:N]
+    gid = jnp.clip((jnp.log(jnp.maximum(R0, lo) / lo) / lnr).astype(int), 0, nb - 1)
+
+    gy = (Y0 - (yloc[0, 0] - oy * dy)) / dy
+    gz = Z0 / dz - 0.5                       # cell j is centred at (j + 1/2) dz
+    # Retired vortices are parked far off-grid and carry no circulation; clamp so their
+    # index arithmetic cannot overflow or alias onto a live cell.
+    gy = jnp.clip(jnp.nan_to_num(gy), -1.0, Py - 2.0)
+    gz = jnp.clip(jnp.nan_to_num(gz), -0.5, H - 2.0)
+    i0, j0 = jnp.floor(gy).astype(int), jnp.floor(gz).astype(int)
+    fy, fz = gy - i0, gz - j0
+
+    Cvh = jnp.zeros((Py // 2 + 1, H), jnp.complex128)
+    Swh = jnp.zeros((Py // 2 + 1, H), jnp.complex128)
+    for g in range(nb):
+        c = jnp.where(gid == g, c0, 0.0)
+        src = jnp.zeros((Py, H))
+        for di, wy in ((0, 1 - fy), (1, fy)):
+            for dj, wz in ((0, 1 - fz), (1, fz)):
+                jj = j0 + dj
+                # Weight landing at index -1 belongs to this vortex's OWN mirror cell, so
+                # it folds back to index 0 with a SIGN FLIP. Letting it wrap to the top of
+                # the array instead looks harmless and is not.
+                jf = jnp.where(jj < 0, -1 - jj, jj)
+                sg = jnp.where(jj < 0, -1.0, 1.0)
+                src = src.at[(i0 + di) % Py, jf % H].add(c * wy * wz * sg)
+        Sh = jnp.fft.rfft(_fast_dst2(src), axis=0)
+        Cvh = Cvh.at[:, 1:].add(Av[g] * Sh[:, :H - 1])
+        Swh = Swh + Aw[g] * Sh
+
+    V = jax.scipy.fft.idct(jnp.fft.irfft(Cvh, n=Py, axis=0), type=2, axis=-1)
+    W = _idst2(jnp.fft.irfft(Swh, n=Py, axis=0))
+    return V[oy:oy + ny, :nz], W[oy:oy + ny, :nz]
+
 
 def _oseenlamb(Circ, Y, Z, Rv, yloc, zloc):
     # Reshape vortex properties to (N, 1, 1) to enable broadcasting against (H, W)
