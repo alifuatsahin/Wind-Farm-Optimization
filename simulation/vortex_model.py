@@ -206,6 +206,13 @@ _GRAVEYARD = 1.0e6  # finite (not inf, to avoid 0*inf -> nan if masking is ever 
 #: before adopting; see the note on the result below.
 MERGE_CORE_RATIO = None
 
+#: How many nearest neighbours of each vortex the merge scan considers. Must be >= the
+#: most vortices ever within the merge threshold of one vortex, or merges are silently
+#: missed; MEASURED maximum is 2 over every step of four representative cases, so 12 is
+#: a six-fold margin. Cost is linear in it.
+MERGE_NEIGHBOURS = 12
+
+
 def _merge_close_vortices(vortex_field, threshold, dist_matrix):
     """Merge vortices that are closer than the threshold distance.
     """
@@ -221,9 +228,49 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
     active0 = active_full[:N_cap]
 
     real_dist = dist_matrix[:N_cap, :N_cap]
-    i_idx, j_idx = np.triu_indices(N_cap, k=1)  # static -- N_cap is a concrete Python int
+
+    # CANDIDATE PAIRS, not all of them. This scan was the single most expensive thing in
+    # the model: it walked all N_cap*(N_cap-1)/2 pairs SEQUENTIALLY every time step --
+    # claimed/locked make each merge depend on the ones before it, so it cannot vectorise
+    # -- and that is what drove the n^2.29 farm-size scaling. MEASURED per vortex step:
+    #
+    #     farm   N(vtx)   pairwise   project   merge
+    #     1x3       246     1.0 ms    5.0 ms    33 ms
+    #     3x3       738     4.1 ms     76 ms   435 ms
+    #     4x4      1312     9.1 ms    191 ms  1292 ms
+    #     6x6      2952    36.6 ms   1677 ms  6840 ms      <- 80-87% of the step
+    #
+    # Nearly every one of those pairs is far apart and can never qualify. MEASURED over
+    # every step of the full-wake optimum, the (+40,-40) sweep edge, the 8-turbine row and
+    # a yawed 3x3: the most vortices ever within merge_threshold of one vortex is TWO, and
+    # the median is ZERO. So scanning each vortex's MERGE_NEIGHBOURS nearest instead is
+    # exact with a wide margin, and shortens the scan from N^2/2 to N*k.
+    #
+    # EXACTNESS, which is the only reason this is allowed to be a pure speedup: the scan
+    # walks pairs in INDEX order and locks, so the partner that wins for vortex i is the
+    # lowest-INDEX qualifying one, NOT the nearest. Restricting to k nearest is therefore
+    # only identical if k covers every QUALIFYING neighbour -- then the candidate set
+    # contains every qualifying pair, re-sorting by i*N_cap + j restores the triu order
+    # the scan used to see, and the pairs dropped were no-ops. Both orientations are built
+    # and folded to (min, max) because j may list i without i listing j; the resulting
+    # duplicate pairs are harmless, since `locked` makes the second visit inert.
+    #
+    # test_merge_candidates_cover_every_qualifying_pair guards k.
+    k_nbr = min(MERGE_NEIGHBOURS, N_cap - 1)
+    _, nbr = lax.top_k(-real_dist, k_nbr)              # nearest first; diagonal is +inf
+    src = jnp.repeat(jnp.arange(N_cap), k_nbr)
+    dst = nbr.reshape(-1)
+    lo = jnp.minimum(src, dst)
+    hi = jnp.maximum(src, dst)
+    order = jnp.argsort(lo * N_cap + hi)               # back into triu order
+    i_idx, j_idx = lo[order], hi[order]
+    # A degenerate row -- an inactive vortex, whose whole row of dist_matrix is +inf --
+    # gives top_k an all-equal score and it may return the vortex itself. can_merge would
+    # reject it anyway via active0, but excluding it here keeps `qualifies` meaning what
+    # it says.
+    distinct = i_idx != j_idx
     if MERGE_CORE_RATIO is None:
-        qualifies_all = real_dist[i_idx, j_idx] <= threshold**2
+        qualifies_all = (real_dist[i_idx, j_idx] <= threshold**2) & distinct
     else:
         # Physical merger criterion instead of an absolute distance: two co-rotating
         # vortices merge once their core-to-separation ratio a/b exceeds ~0.29
@@ -234,8 +281,8 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
         # downstream, which is the physically right behaviour and removes an absolute
         # length from the model.
         a_eff2 = 0.5 * (Rv0[i_idx] ** 2 + Rv0[j_idx] ** 2)   # RMS core; = a for equal cores
-        qualifies_all = real_dist[i_idx, j_idx] <= jnp.maximum(
-            a_eff2 / MERGE_CORE_RATIO ** 2, threshold ** 2)
+        qualifies_all = (real_dist[i_idx, j_idx] <= jnp.maximum(
+            a_eff2 / MERGE_CORE_RATIO ** 2, threshold ** 2)) & distinct
 
     def merge_step(carry, xs):
         Y, Z, Rv, age, Circ, claimed, locked = carry
