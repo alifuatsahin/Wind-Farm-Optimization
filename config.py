@@ -224,7 +224,17 @@ class FieldConfig:
     #: is not bit-identical -- depositing vortices onto cells costs ~0.05% even with exact
     #: cores, and the ladder costs ~1% at pm_tol 0.05 -- so every published 3- and
     #: 8-rotor number stays on the direct path and is unchanged by construction.
-    pm_min_rotors: int | None = None
+    #:
+    #: 16 is the MEASURED crossover (square farms, 5 D, pm_tol 0.10, seconds per solve):
+    #:
+    #:     rotors     9     16     25     36     49     64
+    #:     direct  7.98  13.62  20.21  32.27  61.54  84.13
+    #:     PM      9.26  12.47  14.19  19.83  37.36  50.47
+    #:
+    #: i.e. 0.86x at 9 rotors, 1.09x at 16, settling near 1.65x. Farm efficiency agrees
+    #: with the direct path to ~1e-5 across that whole range. No validated case reaches
+    #: 16 rotors, so this default leaves every published number on the exact kernel.
+    pm_min_rotors: int | None = 16
     #: Relative width of the geometric core ladder the PM solver bins vortices onto.
     #: Measured field error against the direct sum: 4.70% at 0.20, 1.89% at 0.10, 0.95% at
     #: 0.05, 0.68% at 0.02. Cost is linear in the bin count, which goes as 1/ln(1+pm_tol).

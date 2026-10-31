@@ -492,23 +492,29 @@ def _oseenlamb_pm(Circ, Y, Z, Rv, yloc, zloc, Av, Aw, lo, lnr):
     i0, j0 = jnp.floor(gy).astype(int), jnp.floor(gz).astype(int)
     fy, fz = gy - i0, gz - j0
 
-    Cvh = jnp.zeros((Py // 2 + 1, H), jnp.complex128)
-    Swh = jnp.zeros((Py // 2 + 1, H), jnp.complex128)
-    for g in range(nb):
-        c = jnp.where(gid == g, c0, 0.0)
-        src = jnp.zeros((Py, H))
-        for di, wy in ((0, 1 - fy), (1, fy)):
-            for dj, wz in ((0, 1 - fz), (1, fz)):
-                jj = j0 + dj
-                # Weight landing at index -1 belongs to this vortex's OWN mirror cell, so
-                # it folds back to index 0 with a SIGN FLIP. Letting it wrap to the top of
-                # the array instead looks harmless and is not.
-                jf = jnp.where(jj < 0, -1 - jj, jj)
-                sg = jnp.where(jj < 0, -1.0, 1.0)
-                src = src.at[(i0 + di) % Py, jf % H].add(c * wy * wz * sg)
-        Sh = jnp.fft.rfft(_fast_dst2(src), axis=0)
-        Cvh = Cvh.at[:, 1:].add(Av[g] * Sh[:, :H - 1])
-        Swh = Swh + Aw[g] * Sh
+    # The bins are a BATCH AXIS, not a loop. Unrolling them in Python cost ~15 ops per
+    # bin and ~600 kernel launches per projection, and at real farm grid sizes that
+    # overhead beat the transforms it was meant to save -- it is what made the landed
+    # solver slower than the direct sum below ~16 rotors.
+    #
+    # Scattering into (nb, Py, H) indexed by gid also drops the bin factor out of the
+    # DEPOSIT: every vortex is written once, to its own bin's slice, instead of all N
+    # being masked and re-scanned for each of the nb bins.
+    src = jnp.zeros((nb, Py, H))
+    for di, wy in ((0, 1 - fy), (1, fy)):
+        for dj, wz in ((0, 1 - fz), (1, fz)):
+            jj = j0 + dj
+            # Weight landing at index -1 belongs to this vortex's OWN mirror cell, so it
+            # folds back to index 0 with a SIGN FLIP. Letting it wrap to the top of the
+            # array instead looks harmless and is not.
+            jf = jnp.where(jj < 0, -1 - jj, jj)
+            sg = jnp.where(jj < 0, -1.0, 1.0)
+            src = src.at[gid, (i0 + di) % Py, jf % H].add(c0 * wy * wz * sg)
+
+    Sh = jnp.fft.rfft(_fast_dst2(src), axis=1)            # (nb, Py//2+1, H)
+    Cvh = jnp.zeros((Py // 2 + 1, H), Sh.dtype)
+    Cvh = Cvh.at[:, 1:].set(jnp.sum(Av * Sh[:, :, :H - 1], axis=0))
+    Swh = jnp.sum(Aw * Sh, axis=0)
 
     V = jax.scipy.fft.idct(jnp.fft.irfft(Cvh, n=Py, axis=0), type=2, axis=-1)
     W = _idst2(jnp.fft.irfft(Swh, n=Py, axis=0))
