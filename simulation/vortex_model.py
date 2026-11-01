@@ -365,8 +365,29 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
 
     _none = jnp.zeros(N_cap, dtype=bool)
     init_carry = (Y0, Z0, Rv0, age0, Circ0, _none, _none)
-    (Y, Z, Rv, age, Circ, claimed, _locked), _ = lax.scan(
-        merge_step, init_carry, (i_idx, j_idx, qualifies_all))
+
+    # SKIP THE WHOLE SCAN WHEN NOTHING QUALIFIES, which the note above measures at
+    # 98-99.9% of steps. The scan is sequential by construction -- claimed/locked make
+    # each pair depend on the ones before it -- so an empty one still costs N_cap*k
+    # dependent iterations to compute nothing.
+    #
+    # Exact, not approximate: with no qualifying pair every can_merge is False, so each
+    # `.at[j].set(where(False, new, old))` writes the old value back and claimed/locked
+    # stay all-False. The scan IS the identity on the carry, which is the other branch.
+    #
+    # The predicate is `any(qualifies_all)` and not `any(real_dist <= threshold**2)`.
+    # The latter is equivalent only while MERGE_CORE_RATIO is None: the relative
+    # criterion merges at max(a_eff^2/ratio^2, threshold^2), which EXCEEDS threshold^2
+    # once cores have grown, so a distance predicate would start skipping real merges
+    # the day that criterion is switched on -- silently, and precisely in the deep-array
+    # regime it exists for. Reusing qualifies_all cannot drift from the scan's own test,
+    # and is cheaper anyway (N_cap*k against N_cap^2).
+    def _scan_merges(carry):
+        out, _ = lax.scan(merge_step, carry, (i_idx, j_idx, qualifies_all))
+        return out
+
+    (Y, Z, Rv, age, Circ, claimed, _locked) = lax.cond(
+        jnp.any(qualifies_all), _scan_merges, lambda carry: carry, init_carry)
 
     active_new = active0 & (~claimed)
     Circ_new = jnp.where(claimed, 0.0, Circ)
