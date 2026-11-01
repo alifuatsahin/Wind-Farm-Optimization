@@ -359,13 +359,34 @@ def initial_vortex_state(params, local):
 def simulate_vortex_field(params, local, seed=None, total_steps=1000):
     """Evolve this rotor's vortex system. `seed` continues an existing cloud instead of
     starting a fresh ring -- used by the single-field march.
+
+    Returns (stacked, exhausted). `exhausted` is True when the march was still running at
+    the final step, i.e. it ran out of BUDGET instead of reaching its natural t_limit stop.
+
+    This deliberately does not raise on it. A truncated cloud is harmless as long as it
+    still spans the deficit march's own t range: every frame it did produce is correct and
+    nothing reads past the last one. It matters only when the cloud ALSO fails to cover,
+    and wake_solver._march_segment already detects that. What the flag buys is the
+    diagnosis -- the two causes of a short cloud, budget exhausted and t_limit too small,
+    need opposite fixes and used to be indistinguishable, so the one error message blamed
+    t_limit either way.
+
+    MEASURED margin at the shipped cfl, worst rotor of a 1x8, against VOR_FULL = 1000:
+    33 steps at yaw 0, 481 at yaw 20, 632 at yaw 30, 411 at yaw 40. Non-monotone in yaw,
+    so the sweep edge is NOT the worst case, and the binding configuration is the LONG ROW
+    -- a Horns Rev column -- not the wide farm, which reaches only 313 at yaw 30 because a
+    wide farm is fewer segments rather than longer ones.
     """
     adapter = vortex_adapter(params, local)
-    stacked, _was_active = _simulate_vortex_evolution_jit(
+    stacked, was_active = _simulate_vortex_evolution_jit(
         adapter, params.field_params.merge_threshold * params.D,  # config value is in diameters
         params.field_params.cfl_factor, total_steps, seed,
     )
-    return stacked
+    # was_active[i] is the carry's flag ENTERING step i, so a march that froze carries at
+    # least one False at the end while one that never froze is True throughout. A freeze on
+    # the very last step therefore reads as exhausted; that is the right side to err on,
+    # since such a march is at the budget edge either way.
+    return stacked, bool(was_active[-1])
 
 
 # ---------------------------------------------------------------------------------------

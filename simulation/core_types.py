@@ -20,6 +20,10 @@ class Turbine:
         # Config-fixed quantities are READ-ONLY properties delegating to _params (below),
         # not copies -- one source of truth. Only genuinely mutable state lives here.
         self.vortex_field = None       # filled by simulate_vortex_field
+        #: True when the vortex march used its whole step budget instead of reaching its
+        #: natural t_limit stop. Benign on its own -- see simulate_vortex_field -- and
+        #: read only by the march's coverage check, to tell VOR_FULL from t_limit.
+        self.vortex_exhausted = False
         self.wake_field = None         # filled by calculate_deficit_field
         self.dl = None                 # grid spacing in y, set by initialize_wake_field
         self.calculation_domain = 0.0  # set by WindFarm, then per segment by the march
@@ -97,8 +101,8 @@ class Turbine:
         return tp.calculate_efficiency(self._params, self.Uhub3)
 
     def simulate_vortex_field(self, seed=None, total_steps=1000):
-        self.vortex_field = tp.simulate_vortex_field(self._params, self._current_local(),
-                                                     seed=seed, total_steps=total_steps)
+        self.vortex_field, self.vortex_exhausted = tp.simulate_vortex_field(
+            self._params, self._current_local(), seed=seed, total_steps=total_steps)
 
     def initialize_wake_field(self, companions=(), kw0=None, wage0=None, ti0=None):
         """`companions` are the other rotors at this same streamwise station, as

@@ -88,12 +88,25 @@ def _march_segment(t, seed, need_m, U0, Uin_global, companions=(),
     # rotor, so a slower wake (deeper array, higher Ct) could exhaust it.
     _vt = np.asarray(t.vortex_field.t)
     if _vt.size and float(t.wake_field[-1].t) > float(_vt.max()) * (1.0 + 1e-9):
+        # A short cloud has TWO causes needing opposite fixes, and this message used to
+        # name only one of them. Either the march reached its natural t_limit stop and
+        # t_limit is too small, or it ran out of steps first and VOR_FULL is too small --
+        # and the step budget was never checked at all, because turbine_physics discarded
+        # was_active. Measured worst use at the shipped cfl is 632 of 1000 (1x8 at yaw 30,
+        # last rotor), so the margin is 1.6x on exactly the configuration a Horns Rev
+        # column is, and the budget is the likelier cause the moment a row gets longer.
+        _cause = (f"it EXHAUSTED its step budget of VOR_FULL={VOR_FULL} without ever "
+                  f"reaching its natural stop, so raise VOR_FULL"
+                  if t.vortex_exhausted else
+                  f"it reached its natural t_limit stop with {int(np.sum(np.diff(_vt) > 0)) + 1} "
+                  f"of VOR_FULL={VOR_FULL} steps used, so raise the vortex t_limit in "
+                  f"vortex_model")
         raise RuntimeError(
             f"vortex cloud at x={t.pos[0]:.0f} stopped at t={float(_vt.max()):.5f} but the "
             f"deficit march reached t={float(t.wake_field[-1].t):.5f}, so the cross-flow is "
             f"frozen (clamped to the last cloud frame) over the tail of this segment. The "
-            f"cloud ages on Uhub while the deficit advances on the local wake speed; raise "
-            f"the vortex t_limit in vortex_model.")
+            f"cloud ages on Uhub while the deficit advances on the local wake speed, and "
+            f"{_cause}.")
 
 
 def _deficit_steps(t):
