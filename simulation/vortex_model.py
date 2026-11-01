@@ -260,33 +260,54 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
     # duplicate pairs are harmless, since `locked` makes the second visit inert.
     #
     # test_merge_candidates_cover_every_qualifying_pair guards k.
+    #
+    # Deferred into a function so the OUTER gate below can skip building the list at all.
+    # top_k is O(N_cap^2 log k) and the argsort O(N_cap k log N_cap k), and both ran every
+    # step to assemble a candidate list that is almost always empty: measured at 25% of a
+    # vortex step on a 10x8 farm, against 19% for the whole cloud-on-cloud induction.
     k_nbr = min(MERGE_NEIGHBOURS, N_cap - 1)
-    _, nbr = lax.top_k(-real_dist, k_nbr)              # nearest first; diagonal is +inf
-    src = jnp.repeat(jnp.arange(N_cap), k_nbr)
-    dst = nbr.reshape(-1)
-    lo = jnp.minimum(src, dst)
-    hi = jnp.maximum(src, dst)
-    order = jnp.argsort(lo * N_cap + hi)               # back into triu order
-    i_idx, j_idx = lo[order], hi[order]
-    # A degenerate row -- an inactive vortex, whose whole row of dist_matrix is +inf --
-    # gives top_k an all-equal score and it may return the vortex itself. can_merge would
-    # reject it anyway via active0, but excluding it here keeps `qualifies` meaning what
-    # it says.
-    distinct = i_idx != j_idx
+
+    def _candidates():
+        _, nbr = lax.top_k(-real_dist, k_nbr)          # nearest first; diagonal is +inf
+        src = jnp.repeat(jnp.arange(N_cap), k_nbr)
+        dst = nbr.reshape(-1)
+        lo = jnp.minimum(src, dst)
+        hi = jnp.maximum(src, dst)
+        order = jnp.argsort(lo * N_cap + hi)           # back into triu order
+        i_idx, j_idx = lo[order], hi[order]
+        # A degenerate row -- an inactive vortex, whose whole row of dist_matrix is +inf --
+        # gives top_k an all-equal score and it may return the vortex itself. can_merge
+        # would reject it anyway via active0, but excluding it here keeps `qualifies`
+        # meaning what it says.
+        distinct = i_idx != j_idx
+        if MERGE_CORE_RATIO is None:
+            qual = (real_dist[i_idx, j_idx] <= threshold**2) & distinct
+        else:
+            # Physical merger criterion instead of an absolute distance: two co-rotating
+            # vortices merge once their core-to-separation ratio a/b exceeds ~0.29
+            # (Meunier & Leweke 2001; Cerretelli & Williamson 2003; Griffiths & Hopfinger
+            # 1987 give 0.29-0.32, Dritschel's 2D stability bound is 0.32). Using the
+            # CURRENT core radius couples merging to the vortex viscosity the model already
+            # evolves -- cores grow as a^2 = a0^2 + 4*nu*t, so the merge distance grows
+            # downstream, which is the physically right behaviour and removes an absolute
+            # length from the model.
+            a_eff2 = 0.5 * (Rv0[i_idx] ** 2 + Rv0[j_idx] ** 2)  # RMS core; = a for equal cores
+            qual = (real_dist[i_idx, j_idx] <= jnp.maximum(
+                a_eff2 / MERGE_CORE_RATIO ** 2, threshold ** 2)) & distinct
+        return i_idx, j_idx, qual
+
+    # The widest separation at which ANY pair could possibly merge. Under the absolute
+    # criterion that is the threshold; under the relative one the per-pair bound is
+    # a_eff2 = (Rv_i^2 + Rv_j^2)/2, which cannot exceed max(Rv)^2 over the ACTIVE vortices,
+    # since can_merge requires both members active. So this bounds BOTH criteria, and
+    # unlike a bare threshold test it does not silently stop being a bound the day
+    # MERGE_CORE_RATIO is switched on.
     if MERGE_CORE_RATIO is None:
-        qualifies_all = (real_dist[i_idx, j_idx] <= threshold**2) & distinct
+        r_max2 = threshold ** 2
     else:
-        # Physical merger criterion instead of an absolute distance: two co-rotating
-        # vortices merge once their core-to-separation ratio a/b exceeds ~0.29
-        # (Meunier & Leweke 2001; Cerretelli & Williamson 2003; Griffiths & Hopfinger
-        # 1987 give 0.29-0.32, Dritschel's 2D stability bound is 0.32). Using the
-        # CURRENT core radius couples merging to the vortex viscosity the model already
-        # evolves -- cores grow as a^2 = a0^2 + 4*nu*t, so the merge distance grows
-        # downstream, which is the physically right behaviour and removes an absolute
-        # length from the model.
-        a_eff2 = 0.5 * (Rv0[i_idx] ** 2 + Rv0[j_idx] ** 2)   # RMS core; = a for equal cores
-        qualifies_all = (real_dist[i_idx, j_idx] <= jnp.maximum(
-            a_eff2 / MERGE_CORE_RATIO ** 2, threshold ** 2)) & distinct
+        r_max2 = jnp.maximum(
+            jnp.max(jnp.where(active0, Rv0, 0.0)) ** 2 / MERGE_CORE_RATIO ** 2,
+            threshold ** 2)
 
     # NOT compacted to the qualifying pairs, though it is tempting: 98-99.9% of steps
     # have none at all, and gathering them into a fixed buffer made merge 1.8x faster
@@ -366,28 +387,39 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
     _none = jnp.zeros(N_cap, dtype=bool)
     init_carry = (Y0, Z0, Rv0, age0, Circ0, _none, _none)
 
-    # SKIP THE WHOLE SCAN WHEN NOTHING QUALIFIES, which the note above measures at
-    # 98-99.9% of steps. The scan is sequential by construction -- claimed/locked make
-    # each pair depend on the ones before it -- so an empty one still costs N_cap*k
-    # dependent iterations to compute nothing.
+    # SKIP THE WHOLE MERGE WHEN NOTHING CAN QUALIFY, which the note above measures at
+    # 98-99.9% of steps. Two gates, because the two halves cost differently.
     #
-    # Exact, not approximate: with no qualifying pair every can_merge is False, so each
-    # `.at[j].set(where(False, new, old))` writes the old value back and claimed/locked
-    # stay all-False. The scan IS the identity on the carry, which is the other branch.
+    # OUTER, on min(real_dist): skips building the candidate list as well as walking it.
+    # The list costs a top_k over the N_cap^2 matrix plus an argsort, which together were
+    # 25% of a vortex step on a 10x8 farm -- more than the cloud-on-cloud induction. A
+    # single O(N_cap^2) min with no sort replaces them whenever the closest pair in the
+    # whole cloud is wider apart than any merge radius could be.
     #
-    # The predicate is `any(qualifies_all)` and not `any(real_dist <= threshold**2)`.
-    # The latter is equivalent only while MERGE_CORE_RATIO is None: the relative
-    # criterion merges at max(a_eff^2/ratio^2, threshold^2), which EXCEEDS threshold^2
-    # once cores have grown, so a distance predicate would start skipping real merges
-    # the day that criterion is switched on -- silently, and precisely in the deep-array
-    # regime it exists for. Reusing qualifies_all cannot drift from the scan's own test,
-    # and is cheaper anyway (N_cap*k against N_cap^2).
-    def _scan_merges(carry):
-        out, _ = lax.scan(merge_step, carry, (i_idx, j_idx, qualifies_all))
-        return out
+    # INNER, on any(qualifies_all): the scan is sequential by construction -- claimed and
+    # locked make each pair depend on the ones before it -- so an empty one still costs
+    # N_cap*k dependent iterations to compute nothing. Under the absolute criterion the
+    # outer gate already implies this one (the closest pair is in its own k-nearest), but
+    # under the relative criterion the outer bound uses max(Rv) and can pass when no
+    # individual pair qualifies, so the inner gate still earns its place. It is an any()
+    # over an array already built.
+    #
+    # Both are exact, not approximate. With no qualifying pair every can_merge is False,
+    # so each `.at[j].set(where(False, new, old))` writes the old value back and
+    # claimed/locked stay all-False: the scan IS the identity on the carry, which is the
+    # other branch. And r_max2 bounds both merge criteria, so neither gate can hide a
+    # merge the scan would have made.
+    def _merge_pass(carry):
+        i_idx, j_idx, qualifies_all = _candidates()
+
+        def _scan_merges(c):
+            out, _ = lax.scan(merge_step, c, (i_idx, j_idx, qualifies_all))
+            return out
+
+        return lax.cond(jnp.any(qualifies_all), _scan_merges, lambda c: c, carry)
 
     (Y, Z, Rv, age, Circ, claimed, _locked) = lax.cond(
-        jnp.any(qualifies_all), _scan_merges, lambda carry: carry, init_carry)
+        jnp.min(real_dist) <= r_max2, _merge_pass, lambda carry: carry, init_carry)
 
     active_new = active0 & (~claimed)
     Circ_new = jnp.where(claimed, 0.0, Circ)
