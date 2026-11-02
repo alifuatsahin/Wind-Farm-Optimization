@@ -16,45 +16,20 @@ from .field_ops import interpolate_vec_data
 
 
 def init_Uin(params):
-    zsafe = np.maximum(params.zloc, params.field_params.z0 + 1e-6)  # avoid log(0) issues
+    zsafe = np.maximum(params.zloc, params.field_params.z0 + 1e-6)
     Uin = params.Uh * (np.log(zsafe / params.field_params.z0) / np.log(params.Zh / params.field_params.z0))
     return Uin
 
 
 def rotor_disc_mask(params):
-    """The yaw-projected rotor disc as a BOOLEAN, for diagnostics that want cell counts.
-
-    Not what the model averages over -- see rotor_disc_weights.
-    """
+    """The yaw-projected rotor disc as a BOOLEAN, for diagnostics that want cell counts."""
     r2 = (((params.yloc + params.Yoffset) ** 2) / (np.cos(params.beta) ** 2)
           + (params.zloc - params.Zhub) ** 2)
     return np.sqrt(r2) <= params.R
 
 
 def disc_weights_on(yloc, zloc, p, dy):
-    """Fractional cell coverage of rotor p's disc on a grid whose local y is offset by dy.
-
-    THE WEIGHT EVERY ROTOR-AVERAGE IN THE MODEL IS TAKEN WITH. A boolean disc counts a
-    cell fully or not at all, so as the ellipse narrows with cos(beta) the averaged SET
-    changes in jumps and the rotor average inherits a sawtooth in yaw. That matters more
-    here than for the carve: this is the OUTPUT side, with no downstream diffusion to
-    smooth it, and the power the yaw optimiser reads is built straight from it.
-
-    Measured on a partially-waked disc (wake centre 0.25 D off axis), sweeping beta over
-    0-40 deg in 1 deg steps and taking the mean |2nd difference| of (<U^3>)^(1/3):
-
-        n_grids          14         20         28         36
-        boolean     1.08e-03   8.31e-04   7.02e-04   6.42e-04
-        weighted    5.67e-05   5.00e-05   5.40e-05   3.99e-05
-
-    13-19x rougher, and the decisive part is that the boolean form barely CONVERGES: it
-    falls 1.7x for a 2.6x refinement, roughly h^0.55, where the weighted form is flat.
-    A slowly-converging error term is what keeps a grid dependence alive under refinement.
-
-    Both sides of the efficiency ratio use this same weight, so a pure area error cancels;
-    what does not cancel is the weighting of edge cells across a disc the wake only partly
-    covers -- which is maximal at partial overlap, the yaw range a steering optimum sits in.
-    """
+    """Fractional cell coverage of rotor p's disc on a grid whose local y is offset by dy."""
     y = np.asarray(yloc)
     z = np.asarray(zloc)
     dl_cell = np.sqrt((y[1, 0] - y[0, 0]) * (z[0, 1] - z[0, 0]))
@@ -74,31 +49,14 @@ def rotor_average(U, w):
 
 
 def rotor_equivalent_cubic(U, w):
-    """Cubic rotor-equivalent wind speed, (<U^3>)^(1/3) over the disc.
-
-    This is the speed POWER must be read from. Zong & Porte-Agel (2020) Eq (4.11) defines
-    available power as the disc integral of U^3, and the IEC rotor-equivalent wind speed
-    for a sheared or partially waked inflow is the same cubic mean. The arithmetic mean
-    <U> is what the AERODYNAMICS use (induction, circulation, Omega, nu_T) and is left
-    alone -- only the power functional changes.
-
-    Why it matters: by Jensen <U^3> >= <U>^3, with the gap growing as the VARIANCE of U
-    across the disc, which is maximal at PARTIAL WAKE OVERLAP -- exactly the yaw range
-    where a steering optimum sits. Measured on full-wake case C along the gamma_2 = +15
-    ridge the gap is 4.0% at gamma_1 = 0 rising to 6.4% at +15/+20 for T2, and rises
-    monotonically for T3 (1.9% -> 4.2% over 0 -> +30), so the farm total is corrected
-    by 1.4% at zero yaw and 3.0% at +30 -- i.e. <U>^3 systematically UNDER-REWARDS yaw.
-    It is a real bias in the right direction but only ~10-15% of the sweep's slope error;
-    it flattens the ridge without moving the argmax. Fixed because it is correct and free,
-    not because it resolves the optimum."""
+    """Cubic rotor-equivalent wind speed, (<U^3>)^(1/3) over the disc."""
     u = np.asarray(U)
     w = np.asarray(w, dtype=float)
     return float((np.sum(w * u ** 3) / np.sum(w)) ** (1.0 / 3.0))
 
 
 def nominal_hub_velocity(params):
-    """Rotor-averaged undisturbed inflow -- depends only on config, never on the mutated Uin.
-    """
+    """Rotor-averaged undisturbed inflow -- depends only on config, never on the mutated Uin."""
     return rotor_average(init_Uin(params), rotor_disc_weights(params))
 
 
@@ -121,20 +79,13 @@ def compute_omega(params, Uhub):
 
 
 def compute_gamma0(params, Uhub):
-    """Total circulation shed from the blade tips, Zong & Porte-Agel (2020) Eq (4.3):
-    Gamma0 = k*pi*Uh^2*Ct / (Omega*(1+a')), with a' dropped at large tip-speed ratio
-    and k applied in compute_dgamma.
-
-    Ct is the thrust coefficient AT the yaw angle. Eq (4.3) comes from vortex-cylinder
-    theory relating shed circulation to thrust, and a yawed rotor produces less thrust
-    and less bound circulation."""
+    """Total circulation shed from the blade tips, Zong & Porte-Agel (2020) Eq (4.3): Gamma0 =..."""
     omega = compute_omega(params, Uhub)
     return np.pi * Uhub ** 2 * params.Ct_yawed / omega
 
 
 def compute_Ut(params, Uhub, beta=None):
-    """Blade-tip velocity around the azimuth. `beta` defaults to the turbine's own yaw;
-    pass 0.0 to get the same rotor unyawed, which compute_dgamma uses as a reference."""
+    """Blade-tip velocity around the azimuth."""
     beta = params.beta if beta is None else beta
     omega = compute_omega(params, Uhub)
     z = params.Zhub + params.D / 2.0 * np.sin(params.phi)
@@ -155,36 +106,11 @@ def _shed_shape(params, Uhub, beta):
     return np.sin(alpha) * params.dphi
 
 
-#: Scaling on the trailing (root-vortex) circulation in Zong & Porte-Agel (2020) Eq (4.3),
-#: Gamma_0 = k*pi*Uh^2*Ct/Omega. 0.45 is Zong's value and it is MEASURED, not fitted: his
-#: figure 4(a) compares the azimuthal circulation distribution from stereo-PIV against
-#: Eq (4.4) at beta = -30, 0 and +30 deg, and states "the experimental circulation values
-#: are only 45% of the modelled values".
-#:
-#: It has a physical meaning. Eq (4.3) comes from vortex-cylinder theory assuming zero drag
-#: and uniform spanwise circulation. Real blades violate both: part of the thrust is
-#: drag-induced and generates no circulation, and non-uniform spanwise loading sheds some
-#: vorticity inboard rather than at the tip. The paper's appendix says k is therefore the
-#: ratio of lift-induced thrust to total thrust, obtainable per turbine from blade element
-#: momentum theory -- so it is a per-rotor physical parameter, not a universal constant.
-#:
-#: THIS WAS SET TO 1.0 AND THAT WAS WRONG. The reasoning was that Bastankhah et al. (2022)
-#: JFM 933 A2 Eq (38) derives Gamma_r = (pi R/lambda) U_h C_T cos^2(beta) parameter-free,
-#: which reduces exactly to compute_gamma0 and so implies k = 1. The algebra is right but
-#: the conclusion is not: Eq (38) is the same IDEALISED vortex-cylinder value as Zong's
-#: Eq (4.3) with k = 1, and Zong measured the real rotor to shed 45% of it. Deriving the
-#: ideal and measuring the actual are not in conflict -- k is the gap between them.
-#:
-#: Measured consequences of k = 1, all bad: the yawed wake width ratio ran past the
-#: unyawed one by 4D (1.036, unphysical), and the curl at 6D fell from 0.134 to 0.098 D
-#: against an LES value of 0.318 D.
 GAMMA_TRAILING_K = 0.45
 
 
 def compute_dgamma(params, Uhub):
-    """Shed circulation per azimuthal element, with the torque- and force-driven parts
-    scaled separately.
-    """
+    """Shed circulation per azimuthal element, with the torque- and force-driven parts scaled..."""
     gamma_ref = -compute_gamma0(params, Uhub) * GAMMA_TRAILING_K
 
     shape_b = _shed_shape(params, Uhub, params.beta_aero)
@@ -192,7 +118,6 @@ def compute_dgamma(params, Uhub):
     dgamma_b = gamma_ref / np.sum(shape_b) * shape_b
     dgamma_0 = gamma_ref / np.sum(shape_0) * shape_0
 
-    # zero-mean, so rescaling it leaves the total (torque) circulation untouched
     asym_yaw = (dgamma_b - dgamma_b.mean()) - (dgamma_0 - dgamma_0.mean())
     z_rel = params.R * np.sin(params.phi)
     M_yaw = float(np.sum(asym_yaw * z_rel))
@@ -204,17 +129,7 @@ def compute_dgamma(params, Uhub):
 
 
 def power_and_reference(params, Uhub3):
-    """One rotor's power and its undisturbed reference, up to the common pi/4 * rho.
-
-    Returned as a PAIR because a farm objective has to sum the two sides separately. The
-    mean of per-rotor ratios is proportional to total farm power only when every rotor has
-    the same D, Cp and undisturbed inflow -- otherwise it weights a 2 MW machine the same
-    as a 15 MW one, which is the wrong objective for a mixed layout. Every validation case
-    in this repo is uniform, so the two agree exactly on all of them.
-
-    The D^2 is why: it cancels from a single rotor's ratio and does not cancel from a sum
-    over rotors of different diameters.
-    """
+    """One rotor's power and its undisturbed reference, up to the common pi/4 * rho."""
     A = params.D ** 2
     P = A * params.Cp * (Uhub3 ** 3)
     P0 = A * params.config.Cp * (nominal_hub_velocity_cubic(params) ** 3)
@@ -222,61 +137,24 @@ def power_and_reference(params, Uhub3):
 
 
 def calculate_efficiency(params, Uhub3):
-    """Power ratio against the same rotor in undisturbed inflow.
-
-    `Uhub3` is the CUBIC rotor-equivalent speed, not the arithmetic Uhub -- see
-    rotor_equivalent_cubic. Both sides of the ratio use the same convention, so an
-    isolated rotor still returns exactly Cp(beta)/Cp(0): the yawed disc is the unyawed
-    one scaled by cos(beta) in y only, which leaves the z-weighting of the log profile
-    unchanged, and Yoffset is a pure y shift."""
+    """Power ratio against the same rotor in undisturbed inflow."""
     P, nominal_P = power_and_reference(params, Uhub3)
     return P / nominal_P
 
 
 def abl_nu_slope(params):
-    """d(nu_T)/dx for a vortex in the ABL -- Shapiro, Gayme & Meneveau (JFM), "Generation
-    and decay of counter-rotating vortices downstream of yawed wind turbines in the
-    atmospheric boundary layer", Eq (4.7):
-
-        nu_T(x) = u* * 2k(x - x0)/sqrt(24),   k = kappa/ln(z_h/z0),   u* = k*U_inf
-
-    Their argument (Sec 4): a vortex in the ABL is not diffused by its own swirl but by
-    boundary-layer turbulence, so the velocity scale is the friction velocity and the
-    length scale is the vortex size, which grows linearly as the Jensen wake scale. The
-    sqrt(24) converts a top-hat width to a Gaussian second moment. Every constant is
-    fixed by the log law -- there is no fitted decay rate.
-
-    Contrast Zong Sec 4.1's nu_E = 0.005*Gamma0, which is the Squire (1965) scaling on the
-    vortex's OWN circulation and carries no ambient turbulence at all; it is 7-33x smaller
-    over x/D = 2-10 (NREL-5MW, 25 deg, LES inflow; paper_metrics.py mNuRatioLo/Hi), which is why the model conserved circulation where the LES does not.
-    """
+    """d(nu_T)/dx for a vortex in the ABL -- Shapiro, Gayme & Meneveau (JFM), "Generation and decay of..."""
     k = 0.4 / np.log(params.Zh / params.field_params.z0)
-    # u* may be given directly. z0 does double duty -- the inflow profile AND, through this
-    # function, the CVP decay that sets how far a yawed wake steers -- and for the WIRE-01
-    # tunnel the two want different numbers: the back-scaled z0 gives u* = 0.245 against
-    # Zong Sec 2's measured 0.22 (11% high), while his measured z0 = 0.7 mm would give
-    # 0.378 (72% high) and FLIPS THE SIGN of the steering gain. So the roughness is wrong
-    # for the profile and nearly right for the friction velocity. None keeps the log-law
-    # identity and every historical result; see FieldConfig.u_star.
-    #
-    # k is left on z0 deliberately: in Shapiro Eq (4.7) it is the Jensen wake growth rate,
-    # not a friction quantity, so it is not what an u* measurement replaces.
     u_star = getattr(params.field_params, "u_star", None)
     u_star = k * params.Uh if u_star is None else float(u_star)
     return u_star * 2.0 * k / np.sqrt(24.0)
 
 
 def squire_nu(params, Uhub):
-    """Zong Sec 4.1's core diffusivity, nu_E = 0.03*Gamma_0/(2pi) = 0.005*Gamma_0 -- the
-    Squire (1965) scaling, in which the vortex is diffused by the turbulence it generates
-    itself. Superseded by abl_nu_slope; retained only so the ablation in the paper can be
-    reproduced without editing the model."""
+    """Zong Sec 4.1's core diffusivity, nu_E = 0.03*Gamma_0/(2pi) = 0.005*Gamma_0 -- the Squire (1965)..."""
     return 0.005 * abs(compute_gamma0(params, Uhub) * GAMMA_TRAILING_K)
 
 
-#: Particle-mesh kernels, keyed by grid and ladder. They depend only on the cross-plane
-#: grid and the core ladder, both fixed for a run, so every rotor in a farm shares one
-#: set and the build cost is paid once rather than per rotor per evaluation.
 _PM_CACHE = {}
 
 
@@ -299,8 +177,7 @@ def _pm_config(params):
 
 
 def vortex_adapter(params, local):
-    """Builds a VortexSimConfig. field_params.vortex_nu selects the core-diffusion model:
-    'abl' (default, Shapiro Eq 4.7) or 'squire' (the original PVT closure)."""
+    """Builds a VortexSimConfig."""
     if getattr(params.field_params, "vortex_nu", "abl") == "squire":
         nu_slope, nu_const = 0.0, squire_nu(params, local.Uhub)
     else:
@@ -317,26 +194,6 @@ def vortex_adapter(params, local):
         Zhub=params.Zhub,
         nu_slope=nu_slope,
         nu_const=nu_const,
-        # THE SPEED THE CORES AGE ON, derived rather than assumed. age is a length feeding
-        # nu = nu_const + nu_slope*age, so it must be the distance the vortex has actually
-        # travelled, and the vortex travels with the WAKE, not with the undisturbed hub
-        # flow. The deficit march advances on Zong's U_m = representative_velocity, which
-        # averages U over the cells whose deficit exceeds a fifth of the plane maximum.
-        #
-        # That threshold has a closed form. For a Gaussian deficit d(r) = d0 exp(-r^2/2s^2)
-        # the region d > 0.2 d0 is r < s*sqrt(2 ln 5) = 1.794 s, and the area-weighted mean
-        # deficit inside it is 2 d0 s^2 (1 - 0.2) / r^2 = 0.497 d0. With d0 = 2a*Uhub at
-        # the rotor that gives
-        #
-        #     U_m ~= Uhub (1 - 0.994 a)  ~=  (1 - a) Uhub
-        #
-        # so the 0.497 is the model's own 20% threshold, not a fitted number. It predicts
-        # 0.712 for the full-wake rig against a MEASURED U_m/Uhub of 0.714.
-        #
-        # a_at(beta) is the yawed induction, so this is automatically per-rotor and
-        # per-yaw. Measured against a two-pass scheme that re-marches the cloud on the
-        # deficit's own X(t): the two agree to within 0.0005 on every bench metric, at
-        # 1x runtime instead of 2.1x, so the closed form captures the whole correction.
         U_conv=float(local.Uhub * (1.0 - params.a_at(params.beta))),
         Nv=params.Nv,
         V=jnp.asarray(local.V),
@@ -357,172 +214,26 @@ def initial_vortex_state(params, local):
 
 
 def simulate_vortex_field(params, local, seed=None, total_steps=1000):
-    """Evolve this rotor's vortex system. `seed` continues an existing cloud instead of
-    starting a fresh ring -- used by the single-field march.
-
-    Returns (stacked, exhausted). `exhausted` is True when the march was still running at
-    the final step, i.e. it ran out of BUDGET instead of reaching its natural t_limit stop.
-
-    This deliberately does not raise on it. A truncated cloud is harmless as long as it
-    still spans the deficit march's own t range: every frame it did produce is correct and
-    nothing reads past the last one. It matters only when the cloud ALSO fails to cover,
-    and wake_solver._march_segment already detects that. What the flag buys is the
-    diagnosis -- the two causes of a short cloud, budget exhausted and t_limit too small,
-    need opposite fixes and used to be indistinguishable, so the one error message blamed
-    t_limit either way.
-
-    MEASURED margin at the shipped cfl, worst rotor of a 1x8, against VOR_FULL = 1000:
-    33 steps at yaw 0, 481 at yaw 20, 632 at yaw 30, 411 at yaw 40. Non-monotone in yaw,
-    so the sweep edge is NOT the worst case, and the binding configuration is the LONG ROW
-    -- a Horns Rev column -- not the wide farm, which reaches only 313 at yaw 30 because a
-    wide farm is fewer segments rather than longer ones.
-    """
+    """Evolve this rotor's vortex system."""
     adapter = vortex_adapter(params, local)
     stacked, was_active = _simulate_vortex_evolution_jit(
-        adapter, params.field_params.merge_threshold * params.D,  # config value is in diameters
+        adapter, params.field_params.merge_threshold * params.D,
         params.field_params.cfl_factor, total_steps, seed,
     )
-    # was_active[i] is the carry's flag ENTERING step i, so a march that froze carries at
-    # least one False at the end while one that never froze is True throughout. A freeze on
-    # the very last step therefore reads as exhausted; that is the right side to err on,
-    # since such a march is at the budget edge either way.
     return stacked, bool(was_active[-1])
 
 
-# ---------------------------------------------------------------------------------------
-# Eddy-viscosity closure. ONE closure, every part of it traceable to a source: Du et al.
-# (2025) arXiv:2511.19881 for the wake-added TKE budget Eq (13) and for Eq (26) nu_t(TI, x).
-# The dissipation is his UNLINEARISED C_eps k_w^(3/2)/l_m rather than the Psi form he
-# substitutes to make Eq (13) analytically solvable -- see utils.advance_kw -- so Eq (28) and
-# its constant c = 0.67 are no longer used, and the dissipation is age-independent. There are
-# no alternatives left to select between and no fitted constant anywhere in the chain.
-#
-# WHAT WAS REMOVED, and what it cost. Four closures that scored BETTER on velocity were taken
-# out for being outside the literature, non-local, or both, after being measured in full:
-#   * Crespo & Hernandez (1996) added-TI superposition: mean R2 .9288, power 6.3%, and the
-#     8-turbine array .9535. Disqualified because it must be TOLD which rotors are upstream:
-#     station grouping moves a 3-rotor column by 9.3% and a rotor 7D aside by 13.7%, so it
-#     cannot be used for the oblique and irregular layouts this model exists to optimise.
-#   * a k_w-weighted TRANSPORTED age (ours): mean R2 .9234, power 5.07%, locality 0.17%. It
-#     alone reproduced the deep-array turn-around (T3/T2 = 1.04 against a measured 1.08,
-#     where every rotor-local variant gives 0.92-0.95), but no literature transports an age,
-#     and it over-predicted the measured bay-2/3 TKE by +38/+56%.
-#   * l_m floored at the incoming WAKE WIDTH, after Klemmer & Howland (2025) JRSE 17, 033304:
-#     mean R2 .9237, power 13.4%, locality 1.74%.
-#   * a FARM-referenced age, saturating: the best accuracy of all, and disqualified -- a rotor
-#     7D to the side and 5D upstream moved a column by 12.26%, worse than Crespo.
-# The last three needed a fitted saturation distance. The full comparison, the cap frontier
-# over 2-9 D and the rejected kappa*z_h derivation are in [[budget-length-scale-brackets]];
-# the locality measurements are in [[transported-turbulence-age]]. Reinstating any of them
-# means reinstating a constant this closure no longer has, or a non-locality that breaks
-# layout optimisation -- see test_station_grouping_does_not_change_the_physics and
-# test_distant_upstream_rotor_does_not_change_a_column.
-
-# The deficit's eddy viscosity is Du et al. (2025) Eq (26) evaluated with the turbulence
-# intensity INCIDENT on the station plane, read per cell from the marched wake-added TKE field
-# and FROZEN at the rotor plane. This is Du's own usage: his TI is the inflow value for the
-# rotor whose wake is modelled (his Tables 1 and 3), and Eq (26)'s x/D factor already carries
-# the wake's own downstream growth -- letting the TI evolve with x double-counts that and
-# over-mixes T2 by ~45-50%, confirmed both from k_w and by feeding in the measured TI directly.
-#
-# No superposition rule is needed, because k_w is transported: each rotor adds production to a
-# field already being carried, so the incident TI at rotor i is that field read at rotor i.
-#
-# Measured on all six validation cases, with the four layout probes:
-#   full-wake C/A/B   .9418 / .8957 / .9064      grouping invariance   0.357%
-#   LES aligned/yawed .9268 / .9002              distant upstream rotor 0.12%
-#   8-turbine array   .9087                      station companion     -0.05%
-#   TI R2             +.874 / +.781 / +.787      off-axis at 2 D       -0.04%
-#   mean |power err|  6.82%
-#
-# KNOWN COST, diagnosed and bounded -- and PARTLY RESOLVED 2026-10-26. The deep-array
-# shortfall was long attributed to Psi: being linear in x from the MARCHING rotor it restarts
-# at every one, so with k_w,eq = Psi |grad Uw|^2 every bay equilibrated to the same k_w and the
-# incident TI stayed flat down the row. That diagnosis was right about the symptom and wrong
-# about the cause. The linearised dissipation makes k_eq ~ S^2; Du's own unlinearised form
-# makes it ~ S^(4/3), and since the deficit gradient collapses 6x down an 8-turbine row that
-# is the difference between 36x and 11x of equilibrium TKE. With the physical form the model's
-# per-bay effective nu_T stops declining (bays 3-7 .0071 .0072 .0071 .0069 .0068) and rises
-# then flattens (.0075 .0080 .0080 .0077 .0076).
-#
-# WHAT REMAINS, and where it is NOT. The measurement spreads at ~.0141 over the same bays
-# while the model realises ~.0078, and T8 reaches 0.67 of its measured power. That residual
-# is NOT Eq (26) under-supplying: measured per bay, the incident TI is 0.121 so the ramp
-# length x_nu_t = 0.5/TI = 4.14 D COMPLETES inside the 5 D bay (reach 0.83), the plateau it
-# reaches is .0209 -- 27% ABOVE Du's own Table-2 asymptote of .0164 and 48% above the
-# measured spreading -- and the bay-average supplied is .0122, only 13% short of .0141.
-#
-# So the loss is between the nu_t SUPPLIED (.0122) and the spreading REALISED (.0078), a
-# factor 1.6 inside the march rather than in the closure. Unattributed; candidates are the
-# conservative diffusion form against the ground boundary, the reflecting lid the divergence
-# form creates at the domain top, and the second-moment estimator itself once the deficit is
-# broad and shallow. Do not blame Eq (26)'s calibration range for this one without
-# re-measuring: that attribution was made and retracted on 2026-10-26.
-#
-# NOTE this resolves nu_T per cell, where Du calibrates nu_t(x) as one value per cross-plane
-# from rotor-level quantities (his Sec 3.2 reduces c and C_eps from 2-D to 1-D explicitly).
-# That is an extension of his closure and should be stated as one.
-
-#: Distance in D past which the erf ramp has saturated, so a carried rotor's term is
-#: mathematically zero and its slot can be left empty. Bounds the PHYSICS, not the bits:
-#: carrying such a rotor still reassociates the tensordot below, which moved the 5D row by
-#: 1.7e-13. Irrelevant physically, but do not claim bit-identity from this constant.
 RAMP_REACH_D = 6.0
 
-#: Safety margin on the explicit cross-plane diffusion limit. The bound itself is exact
-#: for a pure diffusion step; the march also advects laterally by (V, W) and runs a
-#: predictor-corrector, neither of which the bound accounts for, so it is not a margin
-#: that can be set to 1.
 DIFFUSIVE_CFL = 0.9
 
-#: Bluff-body drag coefficient for the nacelle disc. 1.0 is the textbook value for a
-#: short cylinder/disc at these Reynolds numbers; it is not fitted.
 NACELLE_CD = 1.0
 
-#: Cut-off deficit for the shear-layer age blend, as a multiple of the ambient streamwise
-#: fluctuation sigma_u = I_amb*U0. See the REGULARISED paragraph in initialize_wake_field
-#: for what it does; this is the measurement that sets it.
-#:
-#: It is justified by an INSENSITIVITY WINDOW, not by a physical velocity scale. Swept on
-#: the four locality probes and on the answer (T5 of a 5 D row of five), f = eps/sigma_u:
-#:
-#:      f        grouping   distant   threshold        T5
-#:   0.0002       +0.071%   +0.591%     -0.088%   0.705509
-#:   0.001        +0.066%   +0.156%     -0.096%   0.705415
-#:   0.005        +0.055%   +0.063%     -0.116%   0.705455
-#:   0.02         +0.035%   +0.046%     -0.151%   0.706436
-#:   0.05         +0.012%   +0.043%     -0.192%   0.708308
-#:   1.0          -0.154%   +0.045%     -0.497%   0.718340
-#:
-#: Below f ~ 0.005 the eps -> 0 pathology sets in and distant-upstream climbs away
-#: (+7.7% by f ~ 1e-11). Above f ~ 0.02 the answer starts drifting -- +1.8% in T5 by
-#: f = 1 -- because eps is then no longer small against the mean deficits it sits beside
-#: (Uw ~ 0.3*U0 in the core), so it stops being a cut-off and becomes a systematic
-#: rejuvenation of the whole wake. Between those, T5 is flat to 0.013% over a 25x range
-#: and the full bench moves by 0.0002 in 8T R2 and 0.0005 in full-wake R2.
-#:
-#: 0.01 is the middle of that window. sigma_u ITSELF (f = 1) was tried first as the
-#: derived candidate -- "a deficit below the ambient fluctuation is not a shear layer" --
-#: and is REFUTED: it is 1.8% off on T5, halves the locality gain and loses the bench.
-#: A sharper derivation is available if this ever needs to be more than a plateau: the
-#: pathology is driven by INTERPOLATION TAILS putting non-zero Uw_old where the upstream
-#: rotor cannot physically have reached, so sizing eps by the measured tail would replace
-#: the constant with a numerical property of the scheme.
 AGE_BLEND_EPS = 0.01
 
 
 def axial_induction_ramped(Ct_eff, x_D):
-    """Axial induction with the near-wake pressure-gradient development of Shapiro,
-    Gayme & Meneveau (2018), as used by Zong & Porte-Agel (2020) JFM 889 A8 Sec 3.1:
-
-        Ct(x) = Ct * (1 + erf(x/D)) / 2,   a(x) = (1 - sqrt(1 - Ct(x)/cos(beta))) / 2
-
-    The deficit grows from a(0) at the rotor to the fully-developed value by x ~ 2D
-    instead of appearing all at once. Zong's own transport equation cannot create
-    deficit downstream -- it only advects and diffuses -- so injecting the far-wake
-    value at x=0 leaves the model correct at 0.5D and ~17% shallow by 2D, where the
-    measured wake is still deepening.
-    """
+    """Axial induction with the near-wake pressure-gradient development of Shapiro, Gayme & Meneveau..."""
     ramp = 0.5 * (1.0 + jerf(x_D))
     return 0.5 * (1.0 - jnp.sqrt(jnp.maximum(1.0 - Ct_eff * ramp, 0.0)))
 
@@ -531,21 +242,11 @@ def _ct_eff(params):
     return float(params.Ct_yawed / np.cos(params.beta))
 
 
-#: Members of a stacked VortexField that carry NO leading frame axis. The cross-plane
-#: grid is identical at every step, so the marches store one copy instead of one per
-#: step; see vortex_model._simulate_vortex_evolution_jit.
 _UNSTACKED_MEMBERS = ("yloc", "zloc")
 
 
 def _frame(stacked, i, unstacked=_UNSTACKED_MEMBERS):
-    """Frame `i` of a stacked VortexField, leaving the unstacked members alone.
-
-    Replaces a plain tree_map(leaf[i]), which would slice the grid's first row instead
-    of selecting a frame. `unstacked` differs between the two marches: U carries no
-    frame axis coming out of the vortex march (initialize_wake_field stores the single
-    seed field), but does carry one coming out of the deficit march, where it is the
-    quantity being marched.
-    """
+    """Frame `i` of a stacked VortexField, leaving the unstacked members alone."""
     sliced = {f.name: getattr(stacked, f.name)[i]
               for f in dataclasses.fields(stacked)
               if f.name not in unstacked}
@@ -553,16 +254,7 @@ def _frame(stacked, i, unstacked=_UNSTACKED_MEMBERS):
 
 
 def _disc_mask(yloc, zloc, p, dy, radius=None):
-    """Rotor p's disc on a grid whose local y is offset from p's own by `dy`.
-
-    Every turbine shares one absolute cross-plane grid, but `yloc` is stored local to
-    each rotor, so a companion rotor at the same station sits at yloc + dy where
-    dy = lead.pos[1] - p.pos[1].
-
-    `radius` defaults to the rotor radius; the nacelle disc passes its own, so that both
-    bodies are projected by the same cos(beta) foreshortening and centred on the same
-    overhang-corrected axis rather than repeating the geometry.
-    """
+    """Rotor p's disc on a grid whose local y is offset from p's own by `dy`."""
     r2 = ((yloc + dy + p.Yoffset) ** 2) / (np.cos(p.beta) ** 2) + (zloc - p.Zhub) ** 2
     return np.sqrt(r2) <= (p.R if radius is None else radius)
 
@@ -574,32 +266,7 @@ def _disc_radius(yloc, zloc, p, dy):
 
 
 def _disc_fraction(yloc, zloc, p, dy, dl_cell, radius=None):
-    """Fractional cell coverage of the yaw-projected disc, instead of in/out.
-
-    A BOOLEAN mask makes the carved area -- and therefore the momentum removed at the
-    rotor -- a SAWTOOTH in both yaw and resolution, because it counts whichever cell
-    centres happen to fall inside the ellipse. Measured against the exact pi R^2 cos(beta),
-    worst case over beta = 0-40 deg:
-
-        n_grids        14      20      28      36      44
-        boolean      3.21%   1.47%   1.62%   0.87%   0.51%
-        fractional   0.97%   0.22%   0.15%   0.05%   0.04%
-
-    The magnitudes matter less than the SHAPE: the boolean error is non-monotone in both
-    arguments -- 28 is worse than 20 at beta = 25 deg -- so refining the grid does not
-    reliably improve it and a yaw sweep inherits a sawtooth that looks like physics. The
-    fractional error falls smoothly as O(dl^2). This is the same argument that replaced the
-    nacelle's boolean mask in 51c71fd, where a 1.34-cell body made the term sawtooth 2.1x
-    over yaw; the rotor spans many more cells, so the error is smaller but has the same
-    non-smooth character.
-
-    NOT normalised to the exact area, unlike the nacelle carve below. Normalising rescales
-    every cell's weight to force the total, which is right for a sub-cell body whose
-    coverage estimate is otherwise unreliable, and wrong here -- it would trade a 0.15%
-    area error for a systematic distortion of the radial profile across a well-resolved
-    disc. The table above is the justification: unnormalised coverage is already accurate
-    to a few tenths of a percent at every resolution the model is run at.
-    """
+    """Fractional cell coverage of the yaw-projected disc, instead of in/out."""
     rad = p.R if radius is None else radius
     r = _disc_radius(yloc, zloc, p, dy)
     return np.clip(0.5 - (r - rad) / dl_cell, 0.0, 1.0)
@@ -611,57 +278,16 @@ def initialize_wake_field(params, stacked, local, companions=(), kw0=None, wage0
     zloc = np.asarray(stacked.zloc)
     beta = params.beta
 
-    dl = params.dl  # equivalent to yloc[1,0]-yloc[0,0]; verified in Step 1 sub-step 5
+    dl = params.dl
     Uin = np.asarray(local.Uin)
     U = Uin.copy()
-    U_pre = Uin.copy()   # the field this station was HANDED, before any carve here
-    # Rotors sharing this station shed simultaneously, so all their discs are carved
-    # into the same initial condition. `companions` is empty for one turbine per x,
-    # which is the single-row case and reduces to the original single-disc carve.
+    U_pre = Uin.copy()
     _dl_cell = np.sqrt((yloc[1, 0] - yloc[0, 0]) * (zloc[0, 1] - zloc[0, 0]))
     for p, dy in ((params, 0.0),) + tuple(companions):
         frac = _disc_fraction(yloc, zloc, p, dy, _dl_cell)
-        a0 = float(0.5 * (1.0 - np.sqrt(max(1.0 - _ct_eff(p) * 0.5, 0.0))))  # erf(0) = 0
+        a0 = float(0.5 * (1.0 - np.sqrt(max(1.0 - _ct_eff(p) * 0.5, 0.0))))
         U -= 2.0 * U * a0 * frac
 
-    # THE NACELLE AS A SECOND, CO-LOCATED ACTUATOR DISC.
-    #
-    # Real rotors overshoot momentum theory's 2a by 33-36% at the wake centre; actuator
-    # discs overshoot by 3-13%. The excess is central, confined to x < ~2.2 D, and absent
-    # from the ADM cases, so it is a central body -- nacelle and hub -- and not pressure
-    # recovery, which is already the erf ramp. Measured on the 8-turbine rig at hub height,
-    # the bay-1 error is +0.138 in |y| < 0.10 D and +0.010 by |y| = 0.25-0.45 D: it lives
-    # almost entirely on the centreline.
-    #
-    # Sized as a DISC, not as a momentum-conserving blob. Setting the carve from the
-    # far-wake integral int Uw dA = 0.5 Cd A_n U spreads the body's momentum over the width
-    # it eventually reaches, so it closes only 1.6% of the depth gap at the rotor.
-    # Immediately behind a bluff body the flow is near stagnation over the body's own
-    # frontal area, so the body is a second actuator disc of thrust coefficient Cd:
-    #
-    #     a_n = (1 - sqrt(1 - Cd)) / 2,   Cd = 1  ->  a_n = 0.5, full stagnation
-    #
-    # and it takes NO erf ramp -- a bluff-body wake is established AT the body, unlike a
-    # rotor's, whose ramp IS the pressure recovery.
-    #
-    # NOTHING IS FITTED. nacelle_D is per-turbine hardware (Zong Sec 2: the WIRE-01 nacelle
-    # is a Maxon DCX10L, 10 mm on 150 mm, so 0.0667) and Cd ~ 1 is the textbook bluff-body
-    # value. It is ZERO for actuator-disc cases, which is the discrimination the term
-    # passes: all three real-rotor datasets improve and both ADM datasets degrade.
-    # RESOLUTION. The nacelle is 0.0667 D, so at n_grids = 20 it is 1.34 cells and a
-    # BOOLEAN mask carves whatever 1 or 2 cells happen to fall inside the ellipse. Since
-    # a_n = 0.5 drives U -> 0 over the mask, the momentum sink is exactly proportional to
-    # that cell count, which made the term's strength sawtooth 2.1x over yaw at n_grids =
-    # 20 and 2.6x at 28 -- and differ 4x between those two resolutions at zero yaw, which
-    # are the two the model is validated at. That is not a 0.0667 D body, it is a
-    # quantisation artefact sitting inside the yaw ridge.
-    #
-    # So carve FRACTIONAL cell coverage and renormalise to the exact projected area
-    # pi r_n^2 cos(beta). The linear ramp over one cell width is the standard
-    # volume-of-fluid smoothing; the renormalisation is what actually pins the sink, and
-    # it makes the carved momentum resolution-independent by construction rather than by
-    # luck. Measured carved/true after this: 1.00 at every yaw from 0 to 40 and every
-    # n_grids from 20 to 60.
     a_n = 0.5 * (1.0 - np.sqrt(max(1.0 - NACELLE_CD, 0.0)))
     cell = (yloc[1, 0] - yloc[0, 0]) * (zloc[0, 1] - zloc[0, 0])
     dl_cell = np.sqrt(cell)
@@ -684,50 +310,6 @@ def initialize_wake_field(params, stacked, local, companions=(), kw0=None, wage0
     kw_seed = (np.zeros_like(U_smooth) if kw0 is None
                else np.asarray(kw0).reshape(U_smooth.shape))
 
-    # SHEAR-LAYER AGE, blended by the DEFICIT each rotor contributes.
-    #
-    # Du Eq (26) ramps nu_t with the distance from the rotor, and that distance used to be
-    # the station-local scalar x. Creating a station therefore restarted the ramp for the
-    # WHOLE PLANE, so inserting any rotor anywhere -- even a Ct = 0.001 one seven diameters
-    # out of the column -- moved every column by a Ct-INDEPENDENT 2.6%. That is a
-    # grouping-invariance failure of the kind Crespo was deleted for, and both existing
-    # locality tests were blind to it because both place the bystander at the same x as an
-    # existing rotor or upstream of the whole column.
-    #
-    # The age is a field now, and the only thing that can reset it at a cell is a rotor
-    # putting NEW deficit into that cell:
-    #
-    #     A_new = A_old * Uw_old / (Uw_old + Uw_new)
-    #
-    # the deficit-weighted mean age of the deficit actually present. A first rotor has
-    # Uw_old = 0 so A starts at 0; a rotor that carves nothing here leaves A untouched, so
-    # a lateral or inert bystander cannot touch this column; a real rotor deep in a row
-    # carves Uw_new comparable to Uw_old and roughly halves A, which is physically right --
-    # the fluid carries the old wake's turbulence through the new shear layer. No fitted
-    # constant, and no normalisation to choose: the weights are the two deficits.
-    #
-    # It is NOT advected and NOT diffused, only accumulated (wage += dx in the march) and
-    # reset geometrically. That is the whole difference from the transported age M = k_w A,
-    # which was built in full and refuted at 3.4-4.1% lateral locality precisely BECAUSE it
-    # moved: "old turbulence really does arrive from 7 D away and age the local field". An
-    # accumulator cannot leak sideways.
-    #
-    # REGULARISED by a deficit SCALE, not by a numerical floor. With a bare 1e-12 the
-    # weight outside a new rotor's disc is Uw_old/(Uw_old + 0) = 1 for ANY non-zero
-    # Uw_old, so an interpolation tail from a rotor 7 D away preserved the whole fringe's
-    # stale age at full strength -- the column then started Eq (26) near its plateau
-    # instead of ramping, and the distant-upstream locality probe went from +0.048% to
-    # +7.746%, i.e. a worse failure than the one being fixed. Dividing by
-    # (Uw_old + Uw_new + eps) instead makes a cell whose deficit is negligible fall back
-    # to the fresh value, which is what "the age of the deficit present here" means when
-    # there is no deficit present.
-    #
-    # eps INTERPOLATES BETWEEN THE TWO FAILURE MODES, so it has to be kept small rather
-    # than merely non-zero: eps -> 0 keeps the stale fringe at full strength (+7.7%
-    # distant-upstream), while eps -> infinity rejuvenates the whole plane and recovers
-    # exactly the per-station restart this fix exists to remove (-2.6%). It is sized by a
-    # measured insensitivity window, not by a physical velocity scale -- see
-    # AGE_BLEND_EPS for the sweep and for the derived candidate that was refuted.
     Uw_old = np.maximum(np.asarray(init_Uin(params)) - U_pre, 0.0)
     Uw_new = np.maximum(U_pre - U, 0.0)
     _eps_w = (AGE_BLEND_EPS * params.field_params.I_amb
@@ -736,24 +318,6 @@ def initialize_wake_field(params, stacked, local, companions=(), kw0=None, wage0
                else np.asarray(wage0).reshape(U_smooth.shape))
     wage_seed = wage_in * Uw_old / (Uw_old + Uw_new + _eps_w)
 
-    # THE INCIDENT TI IS BLENDED THE SAME WAY, and for the same reason.
-    #
-    # Fixing the age alone made locality WORSE, -2.64% -> +2.93%, because the defect has a
-    # second half of opposite sign: ti_in was re-read from the carried k_w at EVERY station,
-    # for the WHOLE plane. In a column that jumps it from ambient 0.0625 to 0.1174, so nu_T
-    # rises, mixing rises and the wake shallows -- whoever happens to sit at that x, and
-    # whatever their Ct. The two halves had been partially cancelling.
-    #
-    # Blending by deficit contribution makes the bystander case IDENTICAL to the no-bystander
-    # case: where a rotor carves nothing the incident TI is whatever it already was, and where
-    # it carves fully it is the freshly read value, which is exactly today's behaviour for a
-    # real rotor in a row. So the deep array and the TI scores should be untouched while the
-    # spurious sensitivity goes.
-    #
-    # The physical statement is the same as for the age: the incident TI of the shear layer at
-    # a cell is the deficit-weighted mean of the incident TIs of the shear layers present
-    # there. Still frozen ALONG a segment -- nothing in the march feeds back on it, so the
-    # nu_T <-> k_w circularity the freeze exists to prevent stays prevented.
     _U0n = float(nominal_hub_velocity(params))
     _kBn = 1.5 * ((params.field_params.I_amb / IU_TO_TI) * _U0n) ** 2
     _kws = np.asarray(kw_seed)
@@ -777,71 +341,22 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
                             carried=(), n_slots=None):
     yloc = np.asarray(params.yloc)
     zloc = np.asarray(params.zloc)
-    # (params, dy, x_off). x_off is how far UPSTREAM of this station the rotor sits, so
-    # its near wake is x_off older than the station-local march distance. Station members
-    # are at x_off = 0 and reproduce the original single-origin behaviour exactly.
     rotors = (((params, 0.0, 0.0),)
               + tuple((p, dy, 0.0) for p, dy in companions)
               + tuple(carried))
-    # Fixed stack length: the stack grows by one station per march, so a length that
-    # tracked it would retrace the scan once per station. Padding slots keep Ct_eff = 0, which makes a_old = a_new = 0
-    # and the ramp factor exactly 1.0 in any dtype -- see
-    # test_completed_and_padded_rotors_are_inert_in_the_ramp_stack.
     n_slots = max(len(rotors) if n_slots is None else n_slots, len(rotors))
     rotor_mask = np.zeros((n_slots,) + yloc.shape)
     Ct_eff = np.zeros(n_slots)
     x_off = np.zeros(n_slots)
     dl_cell = np.sqrt((yloc[1, 0] - yloc[0, 0]) * (zloc[0, 1] - zloc[0, 0]))
     for i, (p, dy, off) in enumerate(rotors):
-        # Beyond RAMP_REACH_D the erf has saturated and the factor is 1 to within 1e-12,
-        # so the slot is left inert rather than paying for a mask that cannot change U.
-        # This is an optimisation only; including it would give the same answer.
         if off >= RAMP_REACH_D * p.D:
             continue
-        # BY COVERAGE, then smoothed. The Gaussian conserves the integral EXACTLY --
-        # measured, a boolean mask and its smoothed version agree to every digit -- so
-        # smoothing never hid the quantisation, it only spread it. Against the exact
-        # pi R^2 cos(beta) over beta = 0-40 deg the boolean footprint errs by up to 3.15%
-        # at n_grids 20 and 1.69% at 28, where coverage errs by 0.32% and 0.24%.
-        #
-        # It matters here more than for the carve, because the carve injects only a(0)
-        # and THIS is where the rest of the deficit develops. Measured as the roughness
-        # of farm power over a 0-40 deg yaw sweep in 2 deg steps, mean |2nd difference|:
-        #
-        #     n_grids            20         28
-        #     boolean      1.718e-03  1.975e-03
-        #     coverage     1.212e-03  1.183e-03
-        #
-        # -29% and -40%, but the shape is the real argument: the boolean form gets WORSE
-        # under refinement, which is the quantisation signature, while coverage is
-        # resolution-independent. The smoothing is KEPT -- coverage alone scores the same
-        # mean roughness (1.203e-03), so dropping the Gaussian buys nothing and would be
-        # an unjustified second change, sharpening the footprint by ~3 cells and moving
-        # where Ct develops.
         rotor_mask[i] = np.asarray(smooth_2d(_disc_fraction(yloc, zloc, p, dy, dl_cell),
                                              kernel_size=3))
         Ct_eff[i] = _ct_eff(p)
         x_off[i] = off
 
-    # Total TI incident on this station, from the k_w the station was HANDED (the seed carries
-    # kw0, before any production from this rotor). FROZEN at the rotor plane and held constant
-    # along the march: Du's TI is the INFLOW value for the rotor whose wake is modelled, and
-    # the wake's own downstream growth is already carried by Eq (26)'s x/D factor -- letting TI
-    # evolve with x double-counts it and over-mixes T2 by ~45%.
-    #
-    # It is a FIELD, not one number per rotor, so that two rotors sharing a streamwise station
-    # each see their own inflow: a scalar from rotor_mask[0] gave a rotor in clean air the
-    # waked rotor's turbulence. A field needs no lateral gate to do that, which is what
-    # Crespo's |dy| < 3D criterion was for.
-    #
-    # Zero added TKE at the first rotor, so TI_in = ambient there -- Du's calibration condition.
-    # Read from the seed, where initialize_wake_field BLENDED it by the deficit each rotor
-    # contributes rather than re-reading the whole plane. Re-reading here is what let a
-    # rotor at a new streamwise station change nu_T in a column it never carves.
-    #
-    # It enters through the FRAME, not the adapter, because the march now carries it --
-    # see utils.advect_incident_ti. An adapter field would be constant for the segment,
-    # which is the position freeze this removes.
     ti_seed = np.asarray(stacked.ti)
     if ti_seed.ndim == 3:
         ti_seed = ti_seed[0]
@@ -858,7 +373,7 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
         Ct_eff=jnp.asarray(Ct_eff),
         x_off=jnp.asarray(x_off),
     )
-    dt_cap = min(dl / local.Uhub, 0.25 * params.D / local.Uhub)  # constant for the whole run -- plain floats
+    dt_cap = min(dl / local.Uhub, 0.25 * params.D / local.Uhub)
 
     seed = _frame(stacked, 0, unstacked=_UNSTACKED_MEMBERS + ("U", "kw", "wage", "ti"))
     stacked_out, was_active = _calculate_deficit_field_jit(
@@ -866,8 +381,6 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
         dl, dt_cap,
         local.calculation_domain, max_steps,
     )
-    # was_active[k] corresponds to buffer index k+1 (the loop below is 1-indexed exactly like
-    # the original); kept_count includes the seed (index 0) plus every real advance.
     kept_count = int(jnp.sum(was_active)) + 1
 
     grid = (np.asarray(seed.yloc), np.asarray(seed.zloc))
@@ -882,86 +395,9 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
         current, active = carry
 
         def when_active(_):
-            # Wake-added TKE replaces the Crespo correlation. The budget's own nu_t
-            # takes the TI INCIDENT on this rotor, frozen at the station plane, which
-            # keeps the march non-circular. age = current.X/D is the distance from THIS
-            # station's rotor, i.e. the shear-layer age; the dissipation no longer needs
-            # it at all, since C_eps/l_m is age-independent.
-            # The shear-layer age is a FIELD, not this station's scalar x: see the
-            # blend in initialize_wake_field for why. A cell's age advances with the
-            # march and is reset only where a rotor carves new deficit into it.
             age_D = jnp.maximum(current.wage / adapter.D, 1e-6)
-            # ONE eddy viscosity, Du's Eq (26), evaluated on the TI INCIDENT on this rotor
-            # (current.ti, carried by the march) -- for the deficit AND for the budget's diffusion and
-            # production.
-            #
-            # Du's nu_t(x) and Psi(x) are functions of the inflow TI OF THE ROTOR WHOSE WAKE
-            # IS MODELLED (his Tables 1 and 3, and Sec 3.3's fits against "the ambient
-            # turbulence variable"). For an isolated rotor -- every case he calibrates on --
-            # that inflow TI IS the farm-ambient value, which is why the distinction never
-            # appears in his paper. For rotor n of a row it is the elevated incident value.
-            #
-            # This code previously fed the budget the farm-AMBIENT TI for every rotor. That
-            # was a divergence from Du with a real consequence: Psi was then identical in
-            # every bay, so every bay equilibrated to the same k_w = Psi|grad Uw|^2 and the
-            # accumulation hard-saturated. Feeding it ti_in lets each bay's equilibrium rise
-            # with the turbulence it actually sits in. The feedback is self-limiting rather
-            # than divergent, because Psi -> 0.1 TI at large TI makes k_eq ~ TI while
-            # TI ~ sqrt(k_B + k_w), i.e. k_w ~ sqrt(k_w): a fixed point. The measured
-            # accumulation saturates the same way (k_w/k_B = 4.98 at rotor 2, 5.51 at rotor 3).
-            #
-            # No circularity: ti_in is frozen IN VALUE, read from the k_w the station was
-            # HANDED, so nothing inside the march feeds back on it. It is NOT frozen in
-            # POSITION -- utils.advect_incident_ti carries it with (V, W), because the
-            # label belongs to the fluid and a yawed wake takes its fluid sideways. See
-            # that function for what the position freeze was costing.
-            #
-            # Measured on the 8-turbine row: R2 .9087 -> .9177, bias -.0218 -> -.0197, and
-            # the measured three-rotor TI BIAS improves to ~0 (-.0016/-.0004/-.0014 ->
-            # +.0003/+.0013/+.0001) while its R2 slips (+.874/+.781/+.787 ->
-            # +.868/+.751/+.773). Adopted for the semantics, not the score.
             NuT = du_nu_t(current.ti, age_D, adapter.U0, adapter.D)
             nut_bud = NuT
-            # NuT is a FIELD now, but the step must stay scalar, so the diffusive limit
-            # is taken at its largest value on the plane. For a uniform NuT this is the
-            # same number it always was.
-            #
-            # The limit is the TWO-dimensional one, 1/(2 nu (1/dy^2 + 1/dz^2)), with a
-            # safety factor. It used to be the one-dimensional dl^2/(2 nu), which on these
-            # grids (dz/dy = 1.02 for the wind tunnel) sits a factor 1.96 ABOVE the real
-            # bound.
-            #
-            # That was survivable only because the diffusion stencil was ALSO wrong: two
-            # applications of jnp.gradient is a 2h-lattice operator, whose own limit is
-            # ~4x looser, so the two errors covered for each other. They have to be fixed
-            # together -- the compact stencil of utils.div_nu_grad at the old dt diverges
-            # outright (LES R2 -77), and at exactly this bound with no margin it is only
-            # marginally stable (LES R2 0.78 against 0.93).
-            #
-            # The bound is on the PSEUDO-TIME the diffusion operator actually sees, which
-            # is NOT dt. This is a parabolic march: advance_wake_field forms dx = dt*U_rep
-            # and then steps dU/dx = (... + div(nu grad U))/U, so the diffusive step is
-            # dx/U, inflated by U_rep/U. That is largest exactly where U is smallest --
-            # the deep wake core, which is also where nu_T peaks. Bounding max(nu_T)
-            # alone left bay 3 of the 8-turbine row unstable at x ~ 1.7D downstream of
-            # its rotor: a checkerboard burst (hub-row roughness 0.011 -> 0.289, the
-            # deficit minimum hopping 8 cells), which then diffused away but left that
-            # wake permanently 0.52 deep instead of 0.42, and showed up in the contour
-            # figures as a crescent notch in every bay from the third on. Bounding
-            # max(nu_T/U) is the condition the scheme actually has to satisfy.
-            #
-            # Taken over the INTERIOR only, which is the set the marched equations
-            # actually evolve. Note that div_nu_grad does NOT leave the whole boundary
-            # alone: it adds the y-flux on every z, the ground row included, and the
-            # z-flux on every y, so only the four CORNERS are diffusion-free. What makes
-            # the interior the right domain is instead that each equation overwrites its
-            # own boundary afterwards -- advance_wake_field resets the ground to Uin and
-            # _lateral_bc the sides, and utils.advance_kw does the matching thing with a
-            # zero-flux ground and zero-gradient sides. The log profile sends U -> 0 on
-            # the ground row, so including it would let a cell whose value is discarded
-            # set the step for the whole plane: max(nu_T/U) measures 0.792 over the full
-            # plane against 0.0047 over the interior, a 170x cut in dt -- measured as the
-            # first station failing to march at all.
             _dz = current.zloc[0, 1] - current.zloc[0, 0]
             _inv2d = 1.0 / dl ** 2 + 1.0 / _dz ** 2
             _Urep = representative_velocity(current.U, adapter.Uin)
@@ -979,115 +415,19 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
                                         current.zloc, X_new - current.X, V_tot, W_tot,
                                         nu_t=nut_bud)
 
-            # EACH ROTOR AGES ON ITS OWN STREAMWISE ORIGIN.
-            #
-            # The factor is a ratio of consecutive ages, so over a march it telescopes to
-            # (1 - 2a(age_end)) / (1 - 2a(age_start)), and the initial condition is carved
-            # with exactly a(0) -- a full segment therefore composes to the correctly
-            # developed deficit. But the stack used to hold only the current station's
-            # rotors and age them all by current.X, so a rotor dropped out when the march
-            # advanced and its ramp froze wherever it had reached. Cut a segment to
-            # L << 2D and the deficit sticks near the half-strength carve value 1 - 2a(0):
-            # a 3x3 farm rotated 0.01 deg, geometrically indistinguishable from aligned,
-            # read 21% high once its rows split into separate stations.
-            #
-            # Adding x_off and keeping shed rotors in the stack makes the handover exact,
-            # not merely better. A rotor leaves segment p at age dx_station + x_off_p
-            # (the field is read at the interpolation distance, not at need_m) and
-            # re-enters at x_off_{p+1} = x_off_p + dx_station -- the same number, so the
-            # telescoping continues across the cut with no jump.
             age_old = (current.X + adapter.x_off) / adapter.D
             age_new = (X_new + adapter.x_off) / adapter.D
             a_old = axial_induction_ramped(adapter.Ct_eff, age_old)
             a_new = axial_induction_ramped(adapter.Ct_eff, age_new)
             ramp = (1.0 - 2.0 * a_new) / jnp.maximum(1.0 - 2.0 * a_old, 1e-6)
-            # WHERE the increment goes, radially. Shapiro's ramp is 1-D momentum theory,
-            # which fixes the DISC AVERAGE and leaves the radial distribution open; the
-            # streamtube expansion that theory also carries is already supplied here by
-            # continuity and (V, W), so the footprint stays the rotor disc at radius R.
-            # Widening it to R*sqrt((1-a)/(1-2a(x))) was tested and degrades all five
-            # datasets -- worst on the LES actuator disc, the rotor for which 1-D theory
-            # is most nearly exact -- because it decelerates ambient fluid in place that
-            # should merely have been displaced. T1's P/Pref falls 1.01 -> 0.85.
-            #
-            # Applied as a plain multiplier over the mask, the deficit maps as
-            # d <- (1 - f) + f*d with f = ramp: a UNIFORM pedestal, which re-flattens the
-            # profile as fast as diffusion rounds it and holds a super-Gaussian order of
-            # ~7 at 1D where both datasets measure ~2.3-2.5. That pedestal is the uniform
-            # -loading idealisation; real rotors are centre-peaked and actuator discs
-            # annular (measured at 0.5D, bay 1: WIRE-01 falls 0.818 -> 0.363 from axis to
-            # 0.43D, the LES disc RISES 0.332 -> 0.449).
-            #
-            # A RADIALLY WEIGHTED INCREMENT WAS SHIPPED HERE AND IS NOW REMOVED.
-            #
-            # It weighted the same increment by the wake's own deficit, azimuthally
-            # averaged about the rotor axis -- the radially varying a(r) that QBlade's DWM
-            # and FAST.Farm's curled-wake module both carry. It was worth, against this
-            # uniform form, +0.0168/+0.0200/+0.0146 of field R2 on full-wake C/A/B and
-            # +0.0068 on the 8-turbine row, with -0.0026 on the LES disc.
-            #
-            # Removed on PROVENANCE, with the cost measured and accepted. Two reasons:
-            #
-            #   1. It was the only closure in this model that READ THE SOLUTION IT WAS
-            #      MODIFYING. Eq (26) takes a frozen incident TI, the circulation comes
-            #      from Kutta-Joukowski, Ct(beta) from cos^2, the nacelle from a spec
-            #      sheet -- all functions of fixed inputs. Inferring a(r) from the wake is
-            #      self-referential, and DWM and FAST.Farm both read a(r) from
-            #      blade-element data instead, so the literature supports the SHAPE and
-            #      not our way of obtaining it. The renormalisation also conserved a
-            #      footprint measure, sum(w) == sum(mask), and not momentum flux.
-            #
-            #   2. It was buying the wrong thing. The near-wake defect is the profile
-            #      order n, and n's error is a RELAXATION RATE -- ours decays over ~6 D
-            #      against 1.14-1.52 D in the literature -- while the weighting left n
-            #      "essentially unchanged" by its own measurement. It bought DEPTH, and
-            #      the price shows up where depth is converted to power: removing it
-            #      IMPROVES the worst measured-power error on all three full-wake cases,
-            #      +2.9/+10.0/+14.0% -> +2.2/+7.3/+11.4%, and improves deflection on B
-            #      (0.078 -> 0.074) and the LES disc. Those are the only MEASURED powers
-            #      we have ([[fullwake-dataset]]).
-            #
-            # So this is Zong Eq (4.10)/A8 as written: the ramp is a plain multiplier over
-            # the disc, the uniform-loading idealisation, with no a(r). If a radial
-            # loading is wanted again it must come from blade-element data as a per-rotor
-            # input, not from the wake.
-            # COMPOSED MULTIPLICATIVELY ACROSS ROTORS, not additively. Each rotor's
-            # ramp is a factor on U, so two of them acting on the same streamtube compose
-            # as (1+e1)(1+e2); summing the increments drops the e1*e2 cross term. With
-            # both rotors still inside the ramp's ~1.5 D reach that is a first-order
-            # error, and it only exists where discs OVERLAP while BOTH are ramping -- at
-            # 5 D the carried rotor has e ~ 0 and the two forms agree to rounding, which
-            # is why it has never shown. It bites for the tight layouts the solver now
-            # permits.
-            #
-            # jnp.prod rather than exp(sum(log(.))): exact, with no log domain to worry
-            # about, and it keeps each rotor's own fractional-mask weighting LINEAR while
-            # composing across rotors multiplicatively, which is the actual claim. An
-            # inert or padded slot has ramp = 1 and contributes a factor of exactly 1, so
-            # the padding invariant is preserved in any dtype.
             U = U * jnp.prod(1.0 + (ramp[:, None, None] - 1.0) * adapter.rotor_mask,
                              axis=0)
 
-            # Accumulate the age by the distance actually marched. Not advected and
-            # not diffused -- that is what keeps it local.
             wage_new = current.wage + (X_new - current.X)
-            # ti is carried explicitly: like U, kw and wage it must survive
-            # interpolate_vec_data, which has no time axis for it.
-            # V and W are left as interpolate_vec_data set them, i.e. the cloud's own
-            # cross-flow AT THIS FRAME'S TIME. They do NOT carry veer, which
-            # advance_wake_field adds from the local U each step -- so a reader of the
-            # emitted frames sees a V that is short by V_veer once WV != 0, and the skew
-            # read in wake_solver is such a reader. Storing V_tot instead was TRIED and is
-            # WRONG: V_tot is the cross-flow at time t while the frame is stamped t + dt,
-            # so it trades a missing veer term for a one-step lag, which at WV = 0 is pure
-            # regression -- measured as full-wake A .9088 -> .9164 on field R2 but the
-            # worst measured-power error +7.8% -> +11.3%, i.e. it moves the answer by
-            # shifting the aerodynamic skew. If veer is ever switched on, recompute
-            # V_veer at t + dt from new.U here rather than importing the previous step's.
             new = dataclasses.replace(new, U=U, kw=kw_new, wage=wage_new, ti=ti_new,
                                       X=X_new, t=current.t + dt)
 
-            still_active = new.X <= calculation_domain  # this crossing entry stays the final real one
+            still_active = new.X <= calculation_domain
             return new, still_active
 
         def when_inactive(_):
@@ -1104,15 +444,7 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
 
 
 def _vortex_field_to_numpy(vortex_field, grid=None):
-    """Converts every array field of a VortexField from jnp back to plain numpy, and t/X
-    (0-d jnp arrays once produced inside jax-based code) back to Python floats -- the Loop-2/
-    downstream (save_results, plotting) boundary contract.
-
-    `grid` is an optional pre-converted (yloc, zloc) pair. Every frame of a march has the
-    same cross-plane grid, so converting it per frame would give each of the hundreds of
-    retained frames its own identical copy; pass it once and share the reference. Nothing
-    downstream writes to yloc/zloc.
-    """
+    """Converts every array field of a VortexField from jnp back to plain numpy, and t/X (0-d jnp..."""
     yloc, zloc = grid if grid is not None else (np.asarray(vortex_field.yloc),
                                                 np.asarray(vortex_field.zloc))
     return dataclasses.replace(
@@ -1125,34 +457,13 @@ def _vortex_field_to_numpy(vortex_field, grid=None):
         V=np.asarray(vortex_field.V), W=np.asarray(vortex_field.W),
         U=np.asarray(vortex_field.U), OmegaX=np.asarray(vortex_field.OmegaX),
         kw=np.asarray(vortex_field.kw),
-        # wage and ti used to be left alone here, which made them the only jax arrays
-        # to survive into the Loop-2 boundary this function exists to enforce. Converted
-        # for the same reason as the rest: the contract is "no device arrays downstream".
         wage=np.asarray(vortex_field.wage), ti=np.asarray(vortex_field.ti),
         t=float(vortex_field.t), X=float(vortex_field.X),
     )
 
 
 def _stacked_frames_to_numpy(stacked, n, grid):
-    """The first `n` frames of a stacked march as numpy VortexFields, in ONE transfer.
-
-    The obvious loop -- `_vortex_field_to_numpy(_frame(stacked, i), grid)` per frame --
-    costs 15 eager device slices and 13 device-to-host transfers PER FRAME, and a march
-    retains hundreds of them. On the default 3-rotor case that is ~12,800 eager jax ops
-    against two marches that together take under a second: measured at 70% of the whole
-    evaluation (2.71 s of 3.86 s), i.e. the readback cost more than the physics.
-
-    Slicing is the same arithmetic wherever it runs, so run it on the host. The trim
-    stays on the device -- a march buffers max_steps frames and keeps far fewer, so
-    transferring the untrimmed buffer would give back what the batching wins -- and
-    everything after it is numpy. Bit-identical by construction: no value is
-    recomputed, only moved across the boundary in one piece instead of in 11,000.
-
-    The frames therefore SHARE one backing array per field; frame i's U is a view into
-    the stacked U, not a copy. Nothing downstream writes into a frame (checked across
-    simulation/, plotting.py and the validation scripts), and that is what makes the
-    sharing free -- a consumer that needs to mutate one must copy it first.
-    """
+    """The first `n` frames of a stacked march as numpy VortexFields, in ONE transfer."""
     host = jax.device_get({f.name: getattr(stacked, f.name)[:n]
                            for f in dataclasses.fields(stacked)
                            if f.name not in _UNSTACKED_MEMBERS})

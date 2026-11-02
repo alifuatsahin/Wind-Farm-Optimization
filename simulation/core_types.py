@@ -11,32 +11,21 @@ class Turbine:
         self.config = config
         self.field_params = field_params
 
-        # y_bounds is the farm's lateral extent; it makes every rotor share one
-        # absolute cross-plane grid, which the single marched field needs in order
-        # to carry a wake from one column to the next (see make_turbine_params).
         self._params = make_turbine_params(config, field_params, y_bounds, n_rotors)
         local = tp.init_local_conditions(self._params)
 
-        # Config-fixed quantities are READ-ONLY properties delegating to _params (below),
-        # not copies -- one source of truth. Only genuinely mutable state lives here.
-        self.vortex_field = None       # filled by simulate_vortex_field
-        #: True when the vortex march used its whole step budget instead of reaching its
-        #: natural t_limit stop. Benign on its own -- see simulate_vortex_field -- and
-        #: read only by the march's coverage check, to tell VOR_FULL from t_limit.
+        self.vortex_field = None
         self.vortex_exhausted = False
-        self.wake_field = None         # filled by calculate_deficit_field
-        self.dl = None                 # grid spacing in y, set by initialize_wake_field
-        self.calculation_domain = 0.0  # set by WindFarm, then per segment by the march
+        self.wake_field = None
+        self.dl = None
+        self.calculation_domain = 0.0
 
         self.V = local.V
         self.W = local.W
         self.Uin = local.Uin
         self.Uhub = local.Uhub
-        # Cubic rotor-equivalent speed on the same disc; POWER reads this, the
-        # aerodynamics read Uhub. Set alongside Uhub by wake_solver each station.
         self.Uhub3 = local.Uhub
 
-    # --- config-fixed, read-only: single source of truth is self._params ---
     pos = property(lambda self: self._params.pos)
     D = property(lambda self: self._params.D)
     Zhub = property(lambda self: self._params.Zhub)
@@ -105,22 +94,14 @@ class Turbine:
             self._params, self._current_local(), seed=seed, total_steps=total_steps)
 
     def initialize_wake_field(self, companions=(), kw0=None, wage0=None, ti0=None):
-        """`companions` are the other rotors at this same streamwise station, as
-        (TurbineParams, dy) pairs with dy this turbine's local-y offset from theirs.
-
-        `wage0` is the incoming shear-layer age field, carried like kw0; it is blended by
-        deficit rather than restarted, so a rotor that carves nothing here cannot reset
-        the eddy viscosity for this column."""
+        """`companions` are the other rotors at this same streamwise station, as (TurbineParams, dy) pairs..."""
         self.vortex_field, self.dl = tp.initialize_wake_field(
             self._params, self.vortex_field, self._current_local(), companions,
             kw0=kw0, wage0=wage0, ti0=ti0)
 
     def calculate_deficit_field(self, max_steps=1500, companions=(), carried=(),
                                 n_slots=None):
-        """`carried` are rotors shed at EARLIER stations whose near wake may still be
-        developing, as (TurbineParams, dy, x_off) triples. They take no part in the
-        initial condition -- they are already in the field -- and exist only so the ramp
-        can go on ageing them past the station boundary."""
+        """`carried` are rotors shed at EARLIER stations whose near wake may still be developing, as..."""
         self.wake_field = tp.calculate_deficit_field(
             self._params, self._current_local(), self.vortex_field, self.dl,
             max_steps=max_steps, companions=companions, carried=carried, n_slots=n_slots
@@ -135,43 +116,29 @@ class WindFarm:
         self._construct_wind_farm()
 
     def get_grid(self, tolerance=None):
-        """
-        Return grid dimensions and layout of the wind farm.
-        Handles misaligned turbines by clustering positions within a tolerance.
-        
-        Args:
-            tolerance: Distance tolerance for grouping positions (default: D/3)
-        
-        Returns:
-            dict: Contains 'rows', 'cols', 'x_positions', 'y_positions', 'layout'
-        """
+        """Return grid dimensions and layout of the wind farm."""
         if not self.turbines:
             return {'rows': 0, 'cols': 0, 'x_positions': [], 'y_positions': [], 'layout': None}
-        
-        # Use rotor diameter as default tolerance if not specified
+
         if tolerance is None:
             tolerance = self.turbines[0].D / 3.0
-        
-        # Cluster x positions (streamwise)
+
         x_coords = [t.pos[0] for t in self.turbines]
         x_positions = self._cluster_positions(x_coords, tolerance)
-        
-        # Cluster y positions (spanwise)
+
         y_coords = [t.pos[1] for t in self.turbines]
         y_positions = self._cluster_positions(y_coords, tolerance)
-        
+
         rows = len(x_positions)
         cols = len(y_positions)
-        
-        # Create a 2D layout grid
+
         layout = [[None for _ in range(cols)] for _ in range(rows)]
-        
+
         for idx, turbine in enumerate(self.turbines):
-            # Find closest cluster centers
             row_idx = self._find_closest_cluster(turbine.pos[0], x_positions)
             col_idx = self._find_closest_cluster(turbine.pos[1], y_positions)
             layout[row_idx][col_idx] = idx
-        
+
         return {
             'rows': rows,
             'cols': cols,
@@ -182,42 +149,32 @@ class WindFarm:
         }
 
     def _cluster_positions(self, positions, tolerance):
-        """
-        Cluster positions that are within tolerance distance.
-        Returns sorted list of cluster centers.
-        """
+        """Cluster positions that are within tolerance distance."""
         if not positions:
             return []
-        
+
         sorted_pos = sorted(positions)
         clusters = []
         current_cluster = [sorted_pos[0]]
-        
+
         for pos in sorted_pos[1:]:
             if pos - current_cluster[-1] <= tolerance:
                 current_cluster.append(pos)
             else:
-                # Save cluster center (mean of positions in cluster)
                 clusters.append(np.mean(current_cluster))
                 current_cluster = [pos]
-        
-        # Don't forget the last cluster
+
         clusters.append(np.mean(current_cluster))
-        
+
         return clusters
 
     def _find_closest_cluster(self, position, cluster_centers):
-        """
-        Find index of closest cluster center to given position.
-        """
+        """Find index of closest cluster center to given position."""
         distances = [abs(position - center) for center in cluster_centers]
         return distances.index(min(distances))
-    
+
     def _get_calculation_domain(self):
-        """
-        Calculate the downstream domain for each turbine as the distance to the furthest downstream turbine,
-        with an additional buffer proportional to the rotor diameter.
-        """
+        """Calculate the downstream domain for each turbine as the distance to the furthest downstream..."""
         if not self.turbines:
             return
         x_positions = [t.pos[0] for t in self.turbines]
@@ -236,15 +193,7 @@ class WindFarm:
         self._get_calculation_domain()
 
     def calculate_efficiency(self, verbose=False):
-        """Farm power as a fraction of the same farm with every rotor unwaked.
-
-        Sums POWER on both sides rather than averaging per-rotor ratios. The mean of
-        ratios weights every rotor equally regardless of size, so for a mixed-D layout it
-        would value a 2 MW machine the same as a 15 MW one -- the wrong objective for the
-        layout optimisation this model exists to serve. For a uniform farm, which is every
-        validation case here, the two are identical: with D, Cp and U0 common to all
-        rotors both reduce to sum(Uhub3^3)/(n*U0^3).
-        """
+        """Farm power as a fraction of the same farm with every rotor unwaked."""
         num = den = 0.0
         for t in self.turbines:
             P, P0 = tp.power_and_reference(t._params, t.Uhub3)
@@ -288,7 +237,6 @@ class WindFarm:
                 Xval = float(getattr(frame, "X", np.nan))
                 tval = float(getattr(frame, "t", np.nan))
 
-                # build rows efficiently as list of dicts
                 for idx in range(Ny * Nz):
                     rows.append({
                         "turbine_index": i,

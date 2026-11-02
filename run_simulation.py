@@ -24,9 +24,7 @@ def run_simulation(profiling=False):
         end = time.perf_counter()
         print(f"Simulation completed in {end - start:.2f} seconds.")
 
-    # sim.plot_single_turbine(turbine_index=0, show=False, save_graphic=True, save_at_x=[0.1, 1, 2, 4, 8, 10])
     sim.plot_wind_farm_wake(save_graphic=True)
-    # sim.save_results()
     sim.calculate_objective(verbose=True)
 
 if __name__ == "__main__":

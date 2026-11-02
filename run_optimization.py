@@ -5,25 +5,7 @@ from config import Config
 import numpy as np
 
 def yaw_optimization():
-    """Optimize yaw angles for maximum power. Every rotor gets its own angle.
-
-    There is deliberately NO option to tie rotors together. Grouping them by streamwise
-    station was built and removed, because it does not answer a question worth asking.
-    It collapses the lateral dimension, which makes an 8-wide, 10-deep farm a
-    10-parameter search -- the SAME dimension as one 10-rotor streamwise line searched
-    per-rotor, at eight times the cost per evaluation. MEASURED on the 3x3, a single
-    line found [16.96, 11.56, -0.46] against the farm's [17.48, 13.24, -0.90], and the
-    LINE's angles kept 98.6% of the farm's own gain. The mechanism that could have
-    separated them -- yaw deflecting a wake laterally into the next column, which an
-    isolated line has no neighbour to receive -- does not reach at 5 D lateral spacing
-    and ~17 deg.
-
-    So for perpendicular wind on a regular grid, optimise a LINE and run the farm once
-    to report it; a farm-wide grouped search is worse than both that and this. And a
-    grouping cannot serve the cases that genuinely need a farm -- layout search, or wind
-    that is not perpendicular, where rotors sharing a grid row no longer share an
-    inflow. That leaves it no case at all.
-    """
+    """Optimize yaw angles for maximum power."""
     print("\n" + "="*70)
     print("Optimizing Yaw Angles")
     print("="*70 + "\n")
@@ -51,10 +33,8 @@ def yaw_optimization():
         verbose=True,
     )
 
-    # Plot results
     optimizer.plot_optimization_history(save_path=os.path.join(config.out_path, 'figures', 'yaw_optimization.png'))
 
-    # Plot trust region evolution
     optimizer.plot_trust_region_snapshots(
         iterations=[10, 30, 60, 90],
         param_idx_x=0,
@@ -62,7 +42,6 @@ def yaw_optimization():
         save_path=os.path.join(config.out_path, 'figures', 'yaw_trust_region.png')
     )
 
-    # Plot GP posterior (works with both TS and EI)
     optimizer.plot_gp_posterior_snapshots(
         iterations=[10, 30, 60, 90],
         param_idx_x=0,
@@ -70,24 +49,16 @@ def yaw_optimization():
         save_path=os.path.join(config.out_path, 'figures', 'yaw_gp_posterior.png')
     )
 
-    # Plot acquisition function (only for EI)
-    # optimizer.plot_acquisition_function(
-    #     iterations=[10, 30, 50, 70],
-    #     param_idx_x=0,
-    #     param_idx_y=1,
-    #     acqf_type='ei',
-    #     save_path=os.path.join(config.out_path, 'figures', 'yaw_acquisition.png')
-    # )
 
     optimizer.save_results(os.path.join(config.out_path, 'results', 'yaw_optimization_results.pkl'))
-    
+
     print("\n" + "="*70)
     print("RESULTS: Best yaw configuration found")
     print("="*70)
     for i, yaw in enumerate(optimizer.best_params):
         print(f"  Turbine {i}: {yaw:.2f}°")
     print(f"\nWind Farm Efficiency: {optimizer.best_value:.2f}")
-    
+
     return optimizer
 
 
@@ -99,34 +70,24 @@ def position_optimization():
 
     config = Config(run_prefix="opt")
     n_turbines = len(config.WindFarm)
-    
-    # Define bounds: [x0, y0, x1, y1, ...]
+
     bounds = []
     param_names = []
     for i in range(n_turbines):
-        bounds.append([0, 1000])      # x position (m)
-        bounds.append([-200, 200])    # y position (m)
+        bounds.append([0, 1000])
+        bounds.append([-200, 200])
         param_names.extend([f'x_T{i}', f'y_T{i}'])
-    
+
     bounds = np.array(bounds)
-    
+
     def position_mapping(params, cfg):
-        # Update turbine positions (keep z unchanged)
         new_pos = cfg.WindFarm.pos.copy()
         for i in range(n_turbines):
-            new_pos[i, 0] = params[2*i]      # x
-            new_pos[i, 1] = params[2*i + 1]  # y
+            new_pos[i, 0] = params[2*i]
+            new_pos[i, 1] = params[2*i + 1]
         cfg.WindFarm.pos = new_pos
         return cfg
 
-    # Minimum separation. Without it the optimiser is free to "win" with layouts that
-    # cannot be built: replaying 14 Sobol draws over these bounds, the closest pair came
-    # to 0.23 D -- discs essentially coincident -- and 13 of the 14 were under 3 D, with
-    # the model returning a plausible-looking efficiency and raising nothing. It is a
-    # formulation problem rather than a robustness one, and it matters most because
-    # overlapping rotors are exactly where this model has no physics: there is no
-    # blockage, and the station-grouping and ramp-stacking both assume rotors that do
-    # not sit inside each other's near wake.
     MIN_SEP_D = 3.0
     D_ref = float(np.atleast_1d(config.WindFarm.D)[0])
 
@@ -149,17 +110,17 @@ def position_optimization():
         random_state=42,
         feasible=min_separation_ok,
     )
-    
+
     optimizer.optimize(
         n_init=10,
         max_evals=50,
         acquisition_func='ei',
         verbose=True
     )
-    
+
     optimizer.plot_optimization_history(save_path=os.path.join(config.out_path, 'figures', 'position_optimization.png'))
     optimizer.save_results(os.path.join(config.out_path, 'results', 'position_optimization_results.pkl'))
-    
+
     print("\n" + "="*70)
     print("RESULTS: Best position configuration found")
     print("="*70)
@@ -168,7 +129,7 @@ def position_optimization():
         y = optimizer.best_params[2*i + 1]
         print(f"  Turbine {i}: x={x:.2f} m, y={y:.2f} m")
     print(f"\nTotal Power: {optimizer.best_value:.2f} W")
-    
+
     return optimizer
 
 
@@ -180,33 +141,28 @@ def mixed_optimization():
 
     config = Config(run_prefix="opt")
     n_turbines = len(config.WindFarm)
-    
-    # Define bounds: [yaw_0, yaw_1, ..., Ct_0]
+
     bounds = []
     param_names = []
-    
-    # Yaw angles for all turbines
+
     for i in range(n_turbines):
         bounds.append([-30, 30])
         param_names.append(f'yaw_T{i}')
-    
-    # Thrust coefficient for first turbine
+
     bounds.append([0.6, 0.9])
     param_names.append('Ct_T0')
-    
+
     bounds = np.array(bounds)
-    
+
     def mixed_mapping(params, cfg):
-        # First n_turbines params are yaw angles
         cfg.WindFarm.yaw = params[:n_turbines].copy()
-        
-        # Last param is Ct for turbine 0
+
         new_ct = cfg.WindFarm.Ct.copy()
         new_ct[0] = params[-1]
         cfg.WindFarm.Ct = new_ct
-        
+
         return cfg
-    
+
     optimizer = Optimizer(
         config=config,
         bounds=bounds,
@@ -214,30 +170,25 @@ def mixed_optimization():
         param_names=param_names,
         random_state=42
     )
-    
+
     optimizer.optimize(
         n_init=15,
         max_evals=60,
         acquisition_func='ts',
         verbose=True
     )
-    
+
     optimizer.plot_optimization_history(save_path=os.path.join(config.out_path, 'figures', 'mixed_optimization.png'))
     optimizer.save_results(os.path.join(config.out_path, 'results', 'mixed_optimization_results.pkl'))
-    
+
     print("\n" + "="*70)
     print("RESULTS: Best parameter configuration found")
     print("="*70)
     for name, value in zip(optimizer.param_names, optimizer.best_params):
         print(f"  {name}: {value:.2f}")
     print(f"\nTotal Power: {optimizer.best_value:.2f} W")
-    
+
     return optimizer
 
-if __name__ == "__main__":    
-    # Run yaw optimization
+if __name__ == "__main__":
     optimizer = yaw_optimization()
-    
-    # Uncomment to run other examples:
-    # optimizer = position_optimization()
-    # optimizer = mixed_optimization()

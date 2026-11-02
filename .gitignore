@@ -18,3 +18,6 @@ validation_fullwake.py
 # suite with golden values and would run fine from a clone. Excluded by request, not
 # by necessity; `git rm --cached` it back and drop this line to restore.
 tests/
+
+# Archive of the comments stripped from the source; regenerate, do not edit.
+COMMENTS_ARCHIVE.md

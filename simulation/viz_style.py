@@ -1,6 +1,4 @@
-"""Shared plot styling: a single-hue sequential colormap for magnitude fields
-(replacing the rainbow 'turbo'), and consistent chrome (ink/grid/spine colors)
-so wake and optimization figures read as one family."""
+"""Shared plot styling: a single-hue sequential colormap for magnitude fields (replacing the..."""
 from matplotlib.colors import LinearSegmentedColormap
 
 SEQ_BLUE = LinearSegmentedColormap.from_list("seq_blue", [
@@ -8,8 +6,6 @@ SEQ_BLUE = LinearSegmentedColormap.from_list("seq_blue", [
     "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b",
 ])
 
-# Signed fields (vorticity). Same blue as SEQ_BLUE on the negative side, the rust accent
-# on the positive, meeting at the surface color so zero reads as background.
 DIV_BLUE_RUST = LinearSegmentedColormap.from_list("div_blue_rust", [
     "#0d366b", "#184f95", "#256abf", "#5598e7", "#9ec5f4", "#cde2fb",
     "#fcfcfb",

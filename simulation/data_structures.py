@@ -4,32 +4,23 @@ from dataclasses import dataclass, field
 
 @dataclass
 class VortexField:
-    Y: np.ndarray = field(default_factory=lambda: np.array([]))      # Vortex Y positions
-    Z: np.ndarray = field(default_factory=lambda: np.array([]))      # Vortex Z positions
-    Rv: np.ndarray = field(default_factory=lambda: np.array([]))     # Vortex core radii
-    Circ: np.ndarray = field(default_factory=lambda: np.array([]))   # Vortex circulations
-    age: np.ndarray = field(default_factory=lambda: np.array([]))    # Distance travelled since shed (Shapiro)
-    active: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))  # Live (True) vs merged-away (False)
-    yloc: np.ndarray = field(default_factory=lambda: np.array([]))   # For velocity field grid (optional)
-    zloc: np.ndarray = field(default_factory=lambda: np.array([]))   # For velocity field grid (optional)
-    V: np.ndarray = field(default_factory=lambda: np.array([]))      # Velocity field (optional)
-    W: np.ndarray = field(default_factory=lambda: np.array([]))      # Velocity field (optional)
-    U: np.ndarray = field(default_factory=lambda: np.array([]))      # Streamwise velocity field (optional)
-    OmegaX: np.ndarray = field(default_factory=lambda: np.array([])) # Vorticity field (optional)
-    kw: np.ndarray = field(default_factory=lambda: np.array([]))     # Wake-added TKE, marched with U
-    #: Shear-layer age as a FIELD, in metres of streamwise distance. Distinct from
-    #: `age` above, which is per-VORTEX and sets the Shapiro core law. This one feeds
-    #: Du Eq (26) in place of the station-local scalar x, so that inserting a rotor at
-    #: a new streamwise station cannot restart the eddy viscosity for cells that rotor
-    #: never carves -- see wage_blend in turbine_physics.
+    Y: np.ndarray = field(default_factory=lambda: np.array([]))
+    Z: np.ndarray = field(default_factory=lambda: np.array([]))
+    Rv: np.ndarray = field(default_factory=lambda: np.array([]))
+    Circ: np.ndarray = field(default_factory=lambda: np.array([]))
+    age: np.ndarray = field(default_factory=lambda: np.array([]))
+    active: np.ndarray = field(default_factory=lambda: np.array([], dtype=bool))
+    yloc: np.ndarray = field(default_factory=lambda: np.array([]))
+    zloc: np.ndarray = field(default_factory=lambda: np.array([]))
+    V: np.ndarray = field(default_factory=lambda: np.array([]))
+    W: np.ndarray = field(default_factory=lambda: np.array([]))
+    U: np.ndarray = field(default_factory=lambda: np.array([]))
+    OmegaX: np.ndarray = field(default_factory=lambda: np.array([]))
+    kw: np.ndarray = field(default_factory=lambda: np.array([]))
     wage: np.ndarray = field(default_factory=lambda: np.array([]))
-    #: Total TI incident on the shear layer, per cell, frozen along a segment. Was
-    #: recomputed from the carried k_w at EVERY station, which re-read the whole
-    #: plane and so let a rotor anywhere change nu_T in a column it never touches.
-    #: Now blended by the deficit each rotor contributes, like `wage`.
     ti: np.ndarray = field(default_factory=lambda: np.array([]))
     t: float = 0.0
-    X: float = 0.0  # streamwise position
+    X: float = 0.0
 
 jax.tree_util.register_dataclass(
     VortexField,

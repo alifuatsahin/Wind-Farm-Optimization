@@ -39,9 +39,9 @@ class State:
     length_min: float = 0.5**7
     length_max: float = 1.6
     failure_counter: int = 0
-    failure_tolerance: int = float("nan")  # Note: Post-initialized
+    failure_tolerance: int = float("nan")
     success_counter: int = 0
-    success_tolerance: int = 10  # Note: The original paper uses 3
+    success_tolerance: int = 10
     best_value: float = -float("inf")
     restart_triggered: bool = False
 
@@ -64,13 +64,7 @@ class Optimizer:
         max_cholesky_size: Optional[int] = float("inf"),
         feasible: Optional[Callable[[np.ndarray], bool]] = None,
     ):
-        """`feasible` takes PHYSICAL parameters and returns whether the point may be
-        evaluated at all. It gates candidate GENERATION rather than penalising the
-        objective afterwards, which is the right split when the constraint is cheap and
-        the objective is not: a layout's minimum separation is pure geometry, while
-        evaluating it is a ~4 s march. A penalty would also hand the GP a cliff to model
-        and spend most of the budget inside the infeasible region -- MEASURED on the
-        position bounds, 13 of 14 Sobol draws violate a 3 D separation."""
+        """`feasible` takes PHYSICAL parameters and returns whether the point may be evaluated at all."""
         bounds = np.asarray(bounds, dtype=float)
         assert np.all(bounds[:, 1] > bounds[:, 0]), "Error: Upper bounds must be greater than lower bounds"
         assert max_cholesky_size >= 0, "Error: max_cholesky_size must be non-negative"
@@ -88,11 +82,11 @@ class Optimizer:
         self.device = torch.device(device)
         self.dtype = dtype
         self.max_cholesky_size = max_cholesky_size
-        
+
         if random_state is not None:
             torch.manual_seed(random_state)
             np.random.seed(random_state)
-        
+
         self.X = torch.empty((0, self.n_params), dtype=self.dtype, device=self.device)
         self.Y = torch.empty((0, 1), dtype=self.dtype, device=self.device)
         self._X = torch.empty((0, self.n_params), dtype=self.dtype, device=self.device)
@@ -102,11 +96,6 @@ class Optimizer:
         self.best_value = -np.inf
         self.best_params = None
 
-        # Per-evaluation record. Written as the run goes rather than assembled at the
-        # end, because X_opt/Y_opt are only populated when optimize() RETURNS: a run that
-        # is interrupted, or one being watched while it works, otherwise leaves nothing.
-        # `restart_evals` holds the evaluation index each trust region started at, which
-        # nothing recorded before and which the convergence figure marks.
         self.history = []
         self.restart_evals = []
         self.log_path = None
@@ -120,18 +109,13 @@ class Optimizer:
     def _normalize(self, x_physical: np.ndarray) -> np.ndarray:
         """Normalize parameters from physical bounds to [0, 1]."""
         return (x_physical - self.bounds[:, 0]) / (self.bounds[:, 1] - self.bounds[:, 0])
-    
+
     def _denormalize(self, x_normalized: np.ndarray) -> np.ndarray:
         """Denormalize parameters from [0, 1] to physical bounds."""
         return x_normalized * (self.bounds[:, 1] - self.bounds[:, 0]) + self.bounds[:, 0]
-    
-    def _evaluate_objective(self, params: np.ndarray) -> float:
-        """Evaluates wind farm power for given normalized parameters.
 
-        Both evaluation sites -- the Sobol initial design and the acquisition batch --
-        come through here, so this is the one place that sees every evaluation and is
-        where the run is logged.
-        """
+    def _evaluate_objective(self, params: np.ndarray) -> float:
+        """Evaluates wind farm power for given normalized parameters."""
         physical_params = self._denormalize(params)
         temp_config = self.param_mapping(physical_params, deepcopy(self.config))
 
@@ -145,21 +129,19 @@ class Optimizer:
             "eval": len(self.history),
             "value": float(value),
             "best_so_far": float(max(value, self.best_value)),
-            "params": [float(v) for v in physical_params],   # PHYSICAL, not [0,1]
+            "params": [float(v) for v in physical_params],
             "tr_length": float(self._tr_length),
             "seconds": float(secs),
         }
         self.history.append(rec)
         if self.log_path:
-            # one JSON object per line, flushed, so the file is readable mid-run and
-            # survives an interrupt
             with open(self.log_path, "a") as fh:
                 fh.write(json.dumps(rec) + "\n")
                 fh.flush()
         return value
 
     def _feasible_mask(self, X_norm: torch.Tensor) -> torch.Tensor:
-        """Which rows of a NORMALISED batch satisfy `feasible`. All True without one."""
+        """Which rows of a NORMALISED batch satisfy `feasible`."""
         if self.feasible is None:
             return torch.ones(X_norm.shape[0], dtype=torch.bool, device=self.device)
         phys = self._denormalize(X_norm.detach().cpu().numpy())
@@ -167,13 +149,7 @@ class Optimizer:
                             dtype=torch.bool, device=self.device)
 
     def _get_initial_points(self, n_samples: int) -> torch.Tensor:
-        """Generate initial points using Sobol sequence, rejecting infeasible ones.
-
-        Rejection rather than repair: a repaired point is no longer a Sobol point, and
-        the space-filling property is the only reason to use one here. The cap is
-        generous because the test is free -- at the measured 7% feasible fraction for a
-        3 D separation, ten points need ~140 draws.
-        """
+        """Generate initial points using Sobol sequence, rejecting infeasible ones."""
         sobol = SobolEngine(dimension=self.n_params, scramble=True)
         if self.feasible is None:
             return sobol.draw(n_samples).to(dtype=self.dtype, device=self.device)
@@ -202,10 +178,10 @@ class Optimizer:
             state.success_counter = 0
             state.failure_counter += 1
 
-        if state.success_counter == state.success_tolerance:  # Expand trust region
+        if state.success_counter == state.success_tolerance:
             state.length = min(2.0 * state.length, state.length_max)
             state.success_counter = 0
-        elif state.failure_counter == state.failure_tolerance:  # Shrink trust region
+        elif state.failure_counter == state.failure_tolerance:
             state.length /= 2.0
             state.failure_counter = 0
 
@@ -213,31 +189,25 @@ class Optimizer:
         if state.length < state.length_min:
             state.restart_triggered = True
         return state
-    
+
     def _compute_tr_bounds(self, model: SingleTaskGP, X: torch.Tensor, Y: torch.Tensor, state: 'State') -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute the trust region bounds."""
         x_center = X[Y.argmax(), :].clone()
-        # reshape(-1), not squeeze(): squeeze() collapses the (1, 1) lengthscale of a
-        # ONE-dimensional problem to a 0-d tensor, and len() then raises, so a
-        # single-parameter search could not run at all.
         weights = model.covar_module.base_kernel.lengthscale.reshape(-1).detach()
         weights = weights / weights.mean()
-        # geometric mean via logs: equivalent to prod(w ** (1/d)) but it cannot
-        # over- or underflow while taking a product over many dimensions
         weights = weights / torch.exp(torch.log(weights).mean())
         tr_lb = torch.clamp(x_center - weights * state.length / 2.0, 0.0, 1.0)
         tr_ub = torch.clamp(x_center + weights * state.length / 2.0, 0.0, 1.0)
         return tr_lb, tr_ub, x_center
-    
+
     def _sample_candidates(
-            self, 
-            x_center: 
-            torch.Tensor, tr_lb: 
-            torch.Tensor, tr_ub: 
-            torch.Tensor, 
+            self,
+            x_center:
+            torch.Tensor, tr_lb:
+            torch.Tensor, tr_ub:
+            torch.Tensor,
             n_candidates: int
         ) -> torch.Tensor:
-    
         """Sample candidate points within the trust region."""
         dim = tr_lb.shape[-1]
         sobol = SobolEngine(dim, scramble=True)
@@ -247,13 +217,8 @@ class Optimizer:
         prob_perturb = min(20.0 / dim, 1.0)
         mask = torch.rand(n_candidates, dim, dtype=self.dtype, device=self.device) <= prob_perturb
         ind = torch.where(mask.sum(dim=1) == 0)[0]
-        # randint's upper bound is EXCLUSIVE, so `dim - 1` never selected the last
-        # parameter -- a candidate that perturbed nothing was always repaired along some
-        # other axis, in every dimension, not just d=1 (where `randint(0, 0)` is an
-        # empty range and raises outright).
         mask[ind, torch.randint(0, dim, size=(len(ind),), device=self.device)] = 1
 
-        # Create candidate points from the perturbations and the mask
         X_cand = x_center.expand(n_candidates, dim).clone()
         X_cand[mask] = pert[mask]
 
@@ -262,11 +227,6 @@ class Optimizer:
             if ok.any():
                 X_cand = X_cand[ok]
             else:
-                # x_center came from an evaluated point and is therefore feasible, so
-                # falling back to it keeps the batch admissible. It also means no
-                # progress this round, which the trust region reads as a failure and
-                # answers by shrinking -- the correct response to a region that has
-                # become mostly infeasible.
                 X_cand = x_center.expand(1, dim).clone()
 
         return X_cand
@@ -275,13 +235,13 @@ class Optimizer:
             self,
             state: 'State',
             acqf_type: str,
-            model: SingleTaskGP,  # GP model
-            X: torch.Tensor,  # Evaluated points on the domain [0, 1]^d
-            Y: torch.Tensor,  # Function values
+            model: SingleTaskGP,
+            X: torch.Tensor,
+            Y: torch.Tensor,
             batch_size: int,
-            num_restarts: int = 10, # Number of restarts for qEI optimization
-            raw_samples: int = 512, # Number of raw samples for qEI optimization
-            n_candidates: Optional[int] = None,  # Number of candidates for Thompson sampling
+            num_restarts: int = 10,
+            raw_samples: int = 512,
+            n_candidates: Optional[int] = None,
         ) -> torch.Tensor:
         """Generate a new batch of points."""
         assert acqf_type in ['ts', 'ei'], "acqf_type must be 'ts' or 'ei'"
@@ -291,18 +251,15 @@ class Optimizer:
         if n_candidates is None:
             n_candidates = min(5000, max(2000, 200 * X.shape[-1]))
 
-        # Compute trust region bounds
         tr_lb, tr_ub, x_center = self._compute_tr_bounds(model, X, Y, state)
 
         if acqf_type == 'ts':
-            # Sample candidate points within the trust region
             X_cand = self._sample_candidates(x_center, tr_lb, tr_ub, n_candidates)
 
-            # Sample on the candidate points
             thompson_sampling = MaxPosteriorSampling(model=model, replacement=False)
             with torch.no_grad():
                 X_next = thompson_sampling(X_cand, num_samples=batch_size)
-        
+
         elif acqf_type == 'ei':
             ei = qExpectedImprovement(model=model, best_f=Y.max())
             if self.feasible is None:
@@ -314,11 +271,6 @@ class Optimizer:
                     raw_samples=raw_samples,
                 )
             else:
-                # optimize_acqf searches the box CONTINUOUSLY and cannot respect an
-                # arbitrary nonlinear constraint, so with a feasibility hook EI is
-                # maximised over the FEASIBLE candidate pool instead. Discrete, but
-                # exact about the constraint, which matters more here: a continuous
-                # optimum that overlaps two rotors is not a layout.
                 X_cand = self._sample_candidates(x_center, tr_lb, tr_ub, n_candidates)
                 with torch.no_grad():
                     vals = ei(X_cand.unsqueeze(1))
@@ -326,16 +278,15 @@ class Optimizer:
                 X_next = X_cand[torch.topk(vals, k).indices]
 
         return X_next
-    
-    def _fit_gp(self, 
-            X: torch.Tensor, 
-            Y: torch.Tensor, 
-            dim: int, 
+
+    def _fit_gp(self,
+            X: torch.Tensor,
+            Y: torch.Tensor,
+            dim: int,
         ) -> SingleTaskGP:
-        
         """Fit a GP model to the data."""
         likelihood = GaussianLikelihood(noise_constraint=Interval(1e-6, 1e-2))
-        covar_module = ScaleKernel(  # Use the same lengthscale prior as in the TuRBO paper
+        covar_module = ScaleKernel(
             MaternKernel(nu=2.5, ard_num_dims=dim, lengthscale_constraint=Interval(0.005, 2.0))
         )
         model = SingleTaskGP(X, Y, covar_module=covar_module, likelihood=likelihood)
@@ -343,50 +294,25 @@ class Optimizer:
 
         with gpytorch.settings.max_cholesky_size(self.max_cholesky_size):
             fit_gpytorch_mll(mll)
-        
+
         return model
 
     def optimize(
-            self, 
-            n_init: int = 20, 
+            self,
+            n_init: int = 20,
             max_evals: int = 100,
-            batch_size: int = 1, 
+            batch_size: int = 1,
             n_candidates: int = 5000,
             acquisition_func: str = 'ts',
             log_freq: int = 5,
             verbose: bool = True,
             log_path: Optional[str] = None,
         ) -> Tuple[np.ndarray, float]:
-        
-        """
-        Run the Bayesian Optimization loop with trust region and restarts.
-        
-        Parameters
-        ----------
-        n_init : int
-            Number of initial random samples (only for first run)
-        max_evals : int
-            Maximum number of function evaluations
-        batch_size : int
-            Number of points to evaluate in parallel
-        n_candidates : int
-            Number of candidate points for Thompson Sampling
-        acquisition_func : str
-            Acquisition function type ('ts' or 'ei')
-        verbose : bool
-            Print progress information
-            
-        Returns
-        -------
-        best_params : np.ndarray
-            Best parameters found (in physical space)
-        best_value : float
-            Best objective value achieved
-        """
+        """Run the Bayesian Optimization loop with trust region and restarts."""
         if log_path:
             self.log_path = log_path
             os.makedirs(os.path.dirname(os.path.abspath(log_path)) or ".", exist_ok=True)
-            open(log_path, "w").close()      # truncate, so a rerun does not append
+            open(log_path, "w").close()
             if verbose:
                 print(f"Streaming one JSON record per evaluation to {log_path}")
 
@@ -395,16 +321,11 @@ class Optimizer:
             print(f"Max evaluations: {max_evals}\n")
 
         n_evals = 0
-        
-        # 2. Restart loop
+
         while n_evals < max_evals:
-            # Initialize data storage for this TR
             self._restart()
-            # The first entry is the start of the run, not a restart; the convergence
-            # figure drops it and marks the rest.
             self.restart_evals.append(n_evals)
 
-            # Generate and evaluate initial points
             if verbose:
                 print(f"\n{'='*60}")
                 print(f"Starting new trust region at eval {n_evals}/{max_evals}")
@@ -416,45 +337,37 @@ class Optimizer:
             init_Y = torch.empty((n_init_curr, 1), dtype=self.dtype, device=self.device)
             for i, x in enumerate(init_X):
                 init_Y[i] = torch.tensor(
-                    self._evaluate_objective(x.cpu().numpy()), 
+                    self._evaluate_objective(x.cpu().numpy()),
                     dtype=self.dtype, device=self.device
                 )
                 if verbose and (i + 1) % log_freq == 0:
                     print(f"Evaluated {i + 1}/{n_init_curr} initial points")
 
 
-            # Initialize trust region state
             state = State(
-                dim=self.n_params, 
-                batch_size=batch_size, 
+                dim=self.n_params,
+                batch_size=batch_size,
                 best_value=init_Y.max().item()
             )
 
-            # Convert to local data
             n_evals += n_init_curr
             self._X = init_X.clone()
             self._Y = init_Y.clone()
 
-            # Update global data
             self.X = torch.cat([self.X, init_X.clone()], dim=0)
             self.Y = torch.cat([self.Y, init_Y.clone()], dim=0)
-            
+
             if init_Y.max() > self.best_value:
-                # Initialize best
                 best_idx = self._Y.argmax()
                 self.best_value = self._Y[best_idx].item()
                 self.best_params = self._denormalize(self._X[best_idx].cpu().numpy())
-            
-            # Main optimization loop
+
             while n_evals < max_evals and not state.restart_triggered:
-                self._tr_length = state.length     # logged with each evaluation below
-                # Standardize targets for GP fitting
+                self._tr_length = state.length
                 train_Y = (self._Y - self._Y.mean()) / self._Y.std()
-                
-                # Fit GP model on all accumulated data
+
                 gp = self._fit_gp(self._X, train_Y, dim=self.n_params)
-                
-                # Generate candidates within trust region
+
                 with gpytorch.settings.max_cholesky_size(self.max_cholesky_size):
                     x_next = self._generate_batch(
                         state=state,
@@ -465,22 +378,18 @@ class Optimizer:
                         batch_size=batch_size,
                         n_candidates=n_candidates,
                     )
-                
-                # Evaluate candidates
+
                 y_next = torch.tensor(
                     [self._evaluate_objective(x.cpu().numpy()) for x in x_next],
                     dtype=self.dtype, device=self.device
                 ).unsqueeze(-1)
 
-                # Update global data
                 self._X = torch.cat([self._X, x_next], dim=0)
                 self._Y = torch.cat([self._Y, y_next], dim=0)
                 n_evals += batch_size
 
-                # Update trust region state
                 state = self._update_state(state, y_next.squeeze(-1))
 
-                # Update global best
                 if self._Y.max() > self.best_value:
                     best_idx = self._Y.argmax()
                     self.best_value = self._Y[best_idx].item()
@@ -493,7 +402,6 @@ class Optimizer:
                 self.X = torch.cat([self.X, x_next.clone()], dim=0)
                 self.Y = torch.cat([self.Y, y_next.clone()], dim=0)
 
-        # Store final samples
         self.X_opt = self.X.cpu().numpy().tolist()
         self.Y_opt = self.Y.squeeze(-1).cpu().numpy().tolist()
 
@@ -505,19 +413,9 @@ class Optimizer:
             print(f"{'='*60}")
 
         return self.best_params, self.best_value
-    
+
     def evals_to_within(self, target: float, tol: float = 1e-3) -> Optional[int]:
-        """Evaluations needed to come within `tol` (relative) of `target`.
-
-        The paper's claim is "BO reaches within 0.1% of the grid optimum of the model in
-        N evaluations, against 117 for the grid", so `target` is the MODEL's own optimum
-        over the measured grid -- not the measured optimum. Comparing against the
-        measured one would conflate the optimiser's convergence with the model's error,
-        which is a separate number (\\mSWlostGain).
-
-        Returns None if the run never got there, which is a result and not a failure:
-        say so rather than reporting the budget.
-        """
+        """Evaluations needed to come within `tol` (relative) of `target`."""
         if not self.history:
             return None
         best = np.maximum.accumulate([r["value"] for r in self.history])
@@ -530,14 +428,7 @@ class Optimizer:
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
     def save_results(self, filepath: str):
-        """
-        Save optimization results to a file.
-
-        Parameters:
-        -----------
-        filepath : str
-            Path to save the results
-        """
+        """Save optimization results to a file."""
         import pickle
         self._ensure_save_dir(filepath)
         results = {
@@ -547,31 +438,20 @@ class Optimizer:
             'best_value': self.best_value,
             'bounds': self.bounds.tolist(),
             'param_names': self.param_names,
-            # per-evaluation record: physical params, wall time, TR length, and the
-            # evaluation index each trust region began at
             'history': self.history,
             'restart_evals': self.restart_evals,
         }
         with open(filepath, 'wb') as f:
             pickle.dump(results, f)
         print(f"Optimization results saved to {filepath}")
-    
+
     def plot_optimization_history(self, save_path: Optional[str] = None,
                                   param_label: str = "Parameter"):
-        """Convergence of the run: objective per evaluation, and the parameters tried.
-
-        Reads `self.history`, so it works MID-RUN as well as after, and plots parameters
-        in PHYSICAL units. It used to read X_opt, which is written only when optimize()
-        returns and holds normalised [0,1] coordinates -- panel (b) therefore showed yaw
-        as 0..1 rather than degrees, and nothing could be plotted until the run finished.
-
-        Trust-region restarts are marked. The first entry of `restart_evals` is the start
-        of the run, not a restart, so it is dropped.
-        """
+        """Convergence of the run: objective per evaluation, and the parameters tried."""
         if self.history:
             y = np.array([r["value"] for r in self.history])
             P = np.array([r["params"] for r in self.history])
-        elif self.Y_opt:                       # a run loaded from save_results
+        elif self.Y_opt:
             y = np.asarray(self.Y_opt)
             P = self._denormalize(np.asarray(self.X_opt))
         else:
@@ -600,7 +480,7 @@ class Optimizer:
             ax2.plot(it, P[:, i], "o-", ms=2.5, lw=0.8, alpha=0.75,
                      label=self.param_names[i])
         ax2.set_xlabel("Evaluation", fontsize=9)
-        ax2.xaxis.set_major_locator(MaxNLocator(integer=True))   # evaluations are counts
+        ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
         ax2.set_ylabel(param_label, fontsize=9)
         ax2.legend(frameon=False, fontsize=7.5, ncol=min(4, P.shape[1]))
         ax2.tick_params(labelsize=8)
@@ -618,62 +498,43 @@ class Optimizer:
             print(f"Plot saved to {save_path}")
         else:
             plt.show()
-    
-    def plot_trust_region_snapshots(self, iterations: List[int], param_idx_x: int = 0, 
-                                    param_idx_y: int = 1, 
+
+    def plot_trust_region_snapshots(self, iterations: List[int], param_idx_x: int = 0,
+                                    param_idx_y: int = 1,
                                     save_path: Optional[str] = None):
-        """
-        Plot snapshots of trust region evolution at specified iterations.
-        Shows how the trust region adapts during optimization.
-        
-        Parameters:
-        -----------
-        iterations : List[int]
-            Iteration numbers to plot (e.g., [5, 15, 25, 35])
-        param_idx_x : int
-            Parameter index for x-axis (default: 0)
-        param_idx_y : int
-            Parameter index for y-axis (default: 1)
-        save_path : str, optional
-            Path to save the figure
-        """
+        """Plot snapshots of trust region evolution at specified iterations."""
         if self.n_params < 2:
             print("Warning: Need at least 2 parameters for 2D plot")
             return
-        
+
         n_plots = len(iterations)
         fig, axes = plt.subplots(1, n_plots, figsize=(5*n_plots, 4))
         if n_plots == 1:
             axes = [axes]
-        
+
         for idx, iter_num in enumerate(iterations):
             if iter_num >= len(self.X_opt):
                 print(f"Warning: Iteration {iter_num} not available (only {len(self.X_opt)} samples)")
                 continue
-            
-            # Get data up to this iteration
+
             X_train = np.array(self.X_opt[:iter_num+1])
             y_train = np.array(self.Y_opt[:iter_num+1])
-            
-            # Plot
+
             ax = axes[idx]
-            
-            # Plot all sampled points
-            scatter = ax.scatter(X_train[:, param_idx_x], X_train[:, param_idx_y], 
-                               c=y_train, cmap='viridis', s=100, edgecolors='k', 
+
+            scatter = ax.scatter(X_train[:, param_idx_x], X_train[:, param_idx_y],
+                               c=y_train, cmap='viridis', s=100, edgecolors='k',
                                alpha=0.7, label='Sampled')
-            
-            # Highlight best point
+
             best_idx = np.argmax(y_train)
-            ax.scatter([X_train[best_idx, param_idx_x]], [X_train[best_idx, param_idx_y]], 
-                      c='red', marker='*', s=400, edgecolors='k', 
+            ax.scatter([X_train[best_idx, param_idx_x]], [X_train[best_idx, param_idx_y]],
+                      c='red', marker='*', s=400, edgecolors='k',
                       linewidths=2, label='Best', zorder=5)
-            
-            # Highlight most recent point
-            ax.scatter([X_train[-1, param_idx_x]], [X_train[-1, param_idx_y]], 
-                      c='cyan', marker='o', s=200, edgecolors='k', 
+
+            ax.scatter([X_train[-1, param_idx_x]], [X_train[-1, param_idx_y]],
+                      c='cyan', marker='o', s=200, edgecolors='k',
                       linewidths=2, label='Latest', zorder=5)
-            
+
             ax.set_xlabel(self.param_names[param_idx_x], fontsize=10)
             ax.set_ylabel(self.param_names[param_idx_y], fontsize=10)
             ax.set_title(f'Iteration {iter_num}\nBest={np.max(y_train):.3f}', fontsize=11)
@@ -683,7 +544,7 @@ class Optimizer:
             if idx == 0:
                 ax.legend(fontsize=8, loc='upper right')
             ax.grid(True, alpha=0.3)
-        
+
         plt.tight_layout()
         if save_path:
             self._ensure_save_dir(save_path)
@@ -691,92 +552,66 @@ class Optimizer:
             print(f"Trust region snapshots saved to {save_path}")
         else:
             plt.show()
-    
+
     def plot_acquisition_function(self, iterations: List[int], param_idx_x: int = 0,
                                  param_idx_y: int = 1, n_points: int = 50,
                                  acqf_type: str = 'ei',
                                  save_path: Optional[str] = None):
-        """
-        Plot the acquisition function surface at specified iterations.
-        Only works with 'ei' acquisition function (cannot visualize Thompson Sampling).
-        
-        Parameters:
-        -----------
-        iterations : List[int]
-            Iteration numbers to plot
-        param_idx_x : int
-            Parameter index for x-axis
-        param_idx_y : int
-            Parameter index for y-axis
-        n_points : int
-            Grid resolution
-        acqf_type : str
-            Acquisition function type ('ei' only for visualization)
-        save_path : str, optional
-            Path to save the figure
-        """
+        """Plot the acquisition function surface at specified iterations."""
 
         assert acqf_type in ['ei'], "Error: Acquisition function visualization only supports 'ei' (Expected Improvement)"
         assert self.n_params >= 2, "Error: Need at least 2 parameters for 2D acquisition function plot"
-        
+
         n_plots = len(iterations)
         fig, axes = plt.subplots(1, n_plots, figsize=(5*n_plots, 4))
         if n_plots == 1:
             axes = [axes]
-        
-        # Create meshgrid
+
         x_vals = np.linspace(0, 1, n_points)
         y_vals = np.linspace(0, 1, n_points)
         X_grid, Y_grid = np.meshgrid(x_vals, y_vals)
-        
+
         for idx, iter_num in enumerate(iterations):
             if iter_num >= len(self.X_opt):
                 print(f"Warning: Iteration {iter_num} not available")
                 continue
-            
-            # Fit GP up to this iteration
+
             X_train = torch.tensor(self.X_opt[:iter_num+1], dtype=self.dtype, device=self.device)
             y_train = torch.tensor(self.Y_opt[:iter_num+1], dtype=self.dtype, device=self.device).unsqueeze(-1)
-            
-            # Fit model
+
             gp = self._fit_gp(X_train, y_train, dim=self.n_params)
             gp.eval()
-            
-            # Compute acquisition on grid
+
             Z_acq = np.zeros_like(X_grid)
             best_params = X_train[y_train.argmax()].cpu().numpy()
             best_f = y_train.max().item()
-            
-            # Create EI acquisition function
+
             ei = qExpectedImprovement(model=gp, best_f=best_f)
-            
+
             for i in range(n_points):
                 for j in range(n_points):
                     x_test = best_params.copy()
                     x_test[param_idx_x] = X_grid[i, j]
                     x_test[param_idx_y] = Y_grid[i, j]
                     x_test_t = torch.tensor(x_test, dtype=self.dtype, device=self.device).unsqueeze(0)
-                    
+
                     with torch.no_grad():
-                        acq_value = ei(x_test_t.unsqueeze(0))  # Add batch dimension
+                        acq_value = ei(x_test_t.unsqueeze(0))
                         Z_acq[i, j] = acq_value.item()
-            
-            # Plot
+
             ax = axes[idx]
             c = ax.contourf(X_grid, Y_grid, Z_acq, levels=20, cmap='viridis')
-            
-            # Overlay sampled points
+
             X_train_np = X_train.cpu().numpy()
             ax.scatter(X_train_np[:, param_idx_x], X_train_np[:, param_idx_y],
                       c='red', marker='x', s=80, alpha=0.7, label='Sampled', linewidths=2)
-            
-            # Highlight next point if available
+
             if iter_num < len(self.X_opt) - 1:
                 next_x = self.X_opt[iter_num + 1]
                 ax.scatter([next_x[param_idx_x]], [next_x[param_idx_y]],
                           c='cyan', marker='*', s=300, edgecolors='k',
                           linewidths=2, label='Next', zorder=5)
-            
+
             ax.set_xlabel(self.param_names[param_idx_x], fontsize=10)
             ax.set_ylabel(self.param_names[param_idx_y], fontsize=10)
             ax.set_title(f'Iteration {iter_num}\nMax EI={np.max(Z_acq):.3e}', fontsize=11)
@@ -786,7 +621,7 @@ class Optimizer:
             if idx == 0:
                 ax.legend(fontsize=8, loc='upper right')
             ax.grid(True, alpha=0.3)
-        
+
         plt.tight_layout()
         if save_path:
             self._ensure_save_dir(save_path)
@@ -794,79 +629,58 @@ class Optimizer:
             print(f"Acquisition function plot saved to {save_path}")
         else:
             plt.show()
-    
-    def plot_gp_posterior_snapshots(self, iterations: List[int], param_idx_x: int = 0, 
-                                   param_idx_y: int = 1, n_points: int = 50, 
+
+    def plot_gp_posterior_snapshots(self, iterations: List[int], param_idx_x: int = 0,
+                                   param_idx_y: int = 1, n_points: int = 50,
                                    save_path: Optional[str] = None):
-        """
-        Plot snapshots of GP posterior mean and uncertainty at specified iterations.
-        Shows how the surrogate model learns the objective landscape.
-        
-        Parameters:
-        -----------
-        iterations : List[int]
-            Iteration numbers to plot (e.g., [10, 20, 30, 40])
-        param_idx_x : int
-            Parameter index for x-axis
-        param_idx_y : int
-            Parameter index for y-axis
-        n_points : int
-            Grid resolution
-        save_path : str, optional
-            Path to save the figure
-        """
+        """Plot snapshots of GP posterior mean and uncertainty at specified iterations."""
         if self.n_params < 2:
             print("Warning: Need at least 2 parameters for 2D posterior plot")
             return
-        
+
         n_plots = len(iterations)
         fig, axes = plt.subplots(2, n_plots, figsize=(5*n_plots, 8))
         if n_plots == 1:
             axes = axes.reshape(2, 1)
-        
-        # Create meshgrid
+
         x_vals = np.linspace(0, 1, n_points)
         y_vals = np.linspace(0, 1, n_points)
         X_grid, Y_grid = np.meshgrid(x_vals, y_vals)
-        
+
         for idx, iter_num in enumerate(iterations):
             if iter_num >= len(self.X_opt):
                 print(f"Warning: Iteration {iter_num} not available")
                 continue
-            
-            # Fit GP up to this iteration
+
             X_train = torch.tensor(self.X_opt[:iter_num+1], dtype=self.dtype, device=self.device)
             y_train = torch.tensor(self.Y_opt[:iter_num+1], dtype=self.dtype, device=self.device).unsqueeze(-1)
-            
-            # Fit model
+
             gp = self._fit_gp(X_train, y_train, dim=self.n_params)
             gp.eval()
-            
-            # Compute posterior on grid
+
             Z_mean = np.zeros_like(X_grid)
             Z_std = np.zeros_like(X_grid)
-            
+
             best_params = X_train[y_train.argmax()].cpu().numpy()
-            
+
             for i in range(n_points):
                 for j in range(n_points):
                     x_test = best_params.copy()
                     x_test[param_idx_x] = X_grid[i, j]
                     x_test[param_idx_y] = Y_grid[i, j]
                     x_test_t = torch.tensor(x_test, dtype=self.dtype, device=self.device).unsqueeze(0)
-                    
+
                     with torch.no_grad(), gpytorch.settings.fast_pred_var():
                         pred = gp.posterior(x_test_t)
                         Z_mean[i, j] = pred.mean.cpu().numpy()[0, 0]
                         Z_std[i, j] = pred.variance.sqrt().cpu().numpy()[0, 0]
-            
-            # Plot mean
+
             ax_mean = axes[0, idx]
             c1 = ax_mean.contourf(X_grid, Y_grid, Z_mean, levels=20, cmap='coolwarm')
             X_train_np = X_train.cpu().numpy()
             y_train_np = y_train.squeeze(-1).cpu().numpy()
-            ax_mean.scatter(X_train_np[:, param_idx_x], X_train_np[:, param_idx_y], 
-                           c=y_train_np, cmap='coolwarm', edgecolors='k', 
+            ax_mean.scatter(X_train_np[:, param_idx_x], X_train_np[:, param_idx_y],
+                           c=y_train_np, cmap='coolwarm', edgecolors='k',
                            s=50, marker='o', label='Sampled', zorder=5)
             ax_mean.set_xlabel(self.param_names[param_idx_x], fontsize=10)
             ax_mean.set_ylabel(self.param_names[param_idx_y], fontsize=10)
@@ -874,12 +688,11 @@ class Optimizer:
             ax_mean.set_xlim(0, 1)
             ax_mean.set_ylim(0, 1)
             plt.colorbar(c1, ax=ax_mean, label='Predicted Value')
-            
-            # Plot uncertainty (std)
+
             ax_std = axes[1, idx]
             c2 = ax_std.contourf(X_grid, Y_grid, Z_std, levels=20, cmap='plasma')
-            ax_std.scatter(X_train_np[:, param_idx_x], X_train_np[:, param_idx_y], 
-                          c='white', edgecolors='k', s=50, marker='o', 
+            ax_std.scatter(X_train_np[:, param_idx_x], X_train_np[:, param_idx_y],
+                          c='white', edgecolors='k', s=50, marker='o',
                           alpha=0.7, zorder=5)
             ax_std.set_xlabel(self.param_names[param_idx_x], fontsize=10)
             ax_std.set_ylabel(self.param_names[param_idx_y], fontsize=10)
@@ -887,7 +700,7 @@ class Optimizer:
             ax_std.set_xlim(0, 1)
             ax_std.set_ylim(0, 1)
             plt.colorbar(c2, ax=ax_std, label='Std Dev')
-        
+
         plt.tight_layout()
         if save_path:
             self._ensure_save_dir(save_path)

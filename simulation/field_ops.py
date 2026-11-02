@@ -1,5 +1,4 @@
-"""Interpolation of a turbine's marched wake field onto arbitrary grids.
-"""
+"""Interpolation of a turbine's marched wake field onto arbitrary grids."""
 import numpy as np
 import jax.numpy as jnp
 from scipy.interpolate import RegularGridInterpolator
@@ -7,12 +6,7 @@ from scipy.interpolate import RegularGridInterpolator
 from .data_structures import VortexField
 
 def interpolate_vec_data(stacked, t):
-    """
-    Interpolate vortex field at time t from `stacked`, a VortexField whose every array leaf
-    has a leading (total_steps,) frame-index axis (Loop 1's raw, UNTRIMMED jit output -- see
-    vortex_model._simulate_vortex_evolution_jit) instead of a Python list of VortexField
-    objects. `stacked.t` must be non-decreasing along that axis.
-    """
+    """Interpolate vortex field at time t from `stacked`, a VortexField whose every array leaf has a..."""
     t_stack = stacked.t
     n = t_stack.shape[0]
 
@@ -39,9 +33,6 @@ def interpolate_vec_data(stacked, t):
     return VortexField(
         Y=gather(stacked.Y), Z=gather(stacked.Z), Rv=gather(stacked.Rv), Circ=gather(stacked.Circ),
         age=gather(stacked.age), active=gather(stacked.active),
-        # yloc/zloc are the cross-plane grid and carry no frame axis -- they are identical
-        # at every step, so the vortex march stores one copy rather than total_steps of
-        # them. Passing them through is exactly what gathering used to return.
         yloc=stacked.yloc, zloc=stacked.zloc,
         V=interp_pair(stacked.V), W=interp_pair(stacked.W),
         OmegaX=gather(stacked.OmegaX),
@@ -49,20 +40,7 @@ def interpolate_vec_data(stacked, t):
     )
 
 def interpolate_local_velocity_field(turbine, X, yloc, zloc, default):
-    """
-    Interpolate wake velocity field at streamwise position X onto target grid.
-    
-    Args:
-        turbine: Turbine object containing wake_field data
-        X: Streamwise position (global coordinates) where to interpolate
-        yloc: Target lateral grid coordinates (2D array)
-        zloc: Target vertical grid coordinates (2D array)
-        default: Default velocity field for points outside interpolation bounds
-    
-    Returns:
-        Uinterp: Interpolated streamwise velocity field on target grid (yloc, zloc)
-        Uin_interp: Interpolated local input velocity field on target grid (yloc, zloc)
-    """
+    """Interpolate wake velocity field at streamwise position X onto target grid."""
     vortex_data_list = turbine.wake_field
 
     positions = np.array([v.X for v in vortex_data_list])
@@ -90,7 +68,6 @@ def interpolate_local_velocity_field(turbine, X, yloc, zloc, default):
 
     d0, d1 = vortex_data_list[i0], vortex_data_list[i1]
 
-    # linear interp of arrays
     U = (1 - alpha) * d0.U + alpha * d1.U
 
     Uinterp = _interp_field(U, source_yloc, source_zloc, yloc, zloc, default=default)
@@ -99,10 +76,7 @@ def interpolate_local_velocity_field(turbine, X, yloc, zloc, default):
     return Uinterp, Uin_interp
 
 def interpolate_local_lateral_field(turbine, X, yloc, zloc):
-    """Interpolate the marched LATERAL velocity V at X onto a target grid, exactly as
-    interpolate_local_velocity_field does for U. A downstream rotor's aerodynamic yaw is
-    measured against the local flow direction, which an upstream steered wake has turned.
-    """
+    """Interpolate the marched LATERAL velocity V at X onto a target grid, exactly as..."""
     vortex_data_list = turbine.wake_field
     positions = np.array([v.X for v in vortex_data_list])
     source_yloc = turbine.yloc + turbine.pos[1]
@@ -135,7 +109,6 @@ def interpolate_vortex_field(turbine, target_pos, yloc, zloc, default):
     target_yloc = yloc + target_pos[1]
     target_zloc = zloc + target_pos[2]
 
-    # Determine which wake field to use
     if X <= positions[0]:
         d = vortex_data_list[0]
         U, V, W = d.U, d.V, d.W
@@ -143,7 +116,6 @@ def interpolate_vortex_field(turbine, target_pos, yloc, zloc, default):
         d = vortex_data_list[-1]
         U, V, W = d.U, d.V, d.W
     else:
-        # Interpolate in X direction
         idx = np.searchsorted(positions, X)
         i0 = idx - 1
         i1 = idx
@@ -158,7 +130,7 @@ def interpolate_vortex_field(turbine, target_pos, yloc, zloc, default):
     Uinterp = _interp_field(U, source_yloc, source_zloc, target_yloc, target_zloc, default=default)
     Vinterp = _interp_field(V, source_yloc, source_zloc, target_yloc, target_zloc)
     Winterp = _interp_field(W, source_yloc, source_zloc, target_yloc, target_zloc)
-    
+
     return VortexField(
         yloc=target_yloc,
         zloc=target_zloc,
@@ -178,19 +150,12 @@ def _interp_field(field, y_source, z_source, target_yloc, target_zloc, default=N
     points = np.vstack([target_yloc.ravel(), target_zloc.ravel()]).T
     result = interp(points).reshape(target_yloc.shape)
     if default is not None:
-        # fill points outside original grid with freestream (default)
         mask = np.isnan(result)
         result[mask] = default[mask]
     else:
-        # If no default, replace NaNs with 0.0
         result = np.nan_to_num(result, nan=0.0)
     return result
 
-
-# ------------------------------------------------------------------ field read-out
-# In a single marched field the velocity at any station is whatever the nearest upstream
-# rotor's march carried there -- no combination step, so these replace what used to be
-# superpose() over every turbine's wake.
 
 def _source_turbine(turbines, x_m):
     return max((t for t in turbines if t.pos[0] < x_m), key=lambda t: t.pos[0], default=None)
@@ -201,7 +166,7 @@ def _log_profile(fp, Z):
 
 
 def extract_cross_plane(wind_farm, x_m, y_grid, z_grid):
-    """Streamwise velocity on a (Y, Z) plane at one station. 1-D y/z vectors in."""
+    """Streamwise velocity on a (Y, Z) plane at one station."""
     fp = wind_farm.field_params
     Y, Z = np.meshgrid(y_grid, z_grid, indexing='ij')
     U_in = _log_profile(fp, Z)
