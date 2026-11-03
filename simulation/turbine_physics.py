@@ -10,7 +10,7 @@ from jax.scipy.special import erf as jerf
 from .turbine_state import LocalConditions, VortexSimConfig, DeficitFieldConfig
 from .utils import (smooth_2d, du_nu_t, advance_kw, velocity_floor, du_eps_coef,
                     advect_incident_ti, IU_TO_TI)
-from .vortex_model import _simulate_vortex_evolution_jit, _UNSTACKED
+from .vortex_model import _simulate_vortex_evolution_jit, _UNSTACKED, march_until_stopped
 from .model_solver import advance_wake_field, representative_velocity
 from .field_ops import interpolate_vec_data
 
@@ -338,7 +338,9 @@ def initialize_wake_field(params, stacked, local, companions=(), kw0=None, wage0
 
 
 def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companions=(),
-                            carried=(), n_slots=None):
+                            carried=(), n_slots=None, read_at=None):
+    """March the deficit field; return its frames, all of them or, given `read_at`, only those
+    that reading the march at those streamwise positions touches (see _frames_read_at)."""
     yloc = np.asarray(params.yloc)
     zloc = np.asarray(params.zloc)
     rotors = (((params, 0.0, 0.0),)
@@ -376,71 +378,100 @@ def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companio
     dt_cap = min(dl / local.Uhub, 0.25 * params.D / local.Uhub)
 
     seed = _frame(stacked, 0, unstacked=_UNSTACKED_MEMBERS + ("U", "kw", "wage", "ti"))
+    grid = (np.asarray(seed.yloc), np.asarray(seed.zloc))
+    head = _vortex_field_to_numpy(seed, grid)
+    if read_at is not None:
+        if len(read_at) > 1:
+            raise ValueError("a lean march keeps the frames for one read position at most")
+        x_read = float(read_at[0]) if read_at else np.inf
+        X, slots, rows, was_active = _calculate_deficit_field_lean_jit(
+            stacked, seed, adapter, params.field_params.WV, dl, dt_cap,
+            local.calculation_domain, max_steps, _below_threshold(x_read, jnp.result_type(seed.X)))
+        return _frames_read_at(head, X, slots, rows, int(jnp.sum(was_active)), grid, x_read)
+
     stacked_out, was_active = _calculate_deficit_field_jit(
         stacked, seed, adapter, params.field_params.WV,
         dl, dt_cap,
         local.calculation_domain, max_steps,
     )
     kept_count = int(jnp.sum(was_active)) + 1
+    return [head] + _stacked_frames_to_numpy(stacked_out, kept_count - 1, grid)
 
-    grid = (np.asarray(seed.yloc), np.asarray(seed.zloc))
-    return ([_vortex_field_to_numpy(seed, grid)]
-            + _stacked_frames_to_numpy(stacked_out, kept_count - 1, grid))
+
+def _deficit_advance(stacked, adapter, WV, dl, dt_cap, calculation_domain):
+    """One deficit-march step, `(current, active) -> ((new, still_active), frame)`."""
+    def advance(carry):
+        current, _ = carry
+
+        age_D = jnp.maximum(current.wage / adapter.D, 1e-6)
+        NuT = du_nu_t(current.ti, age_D, adapter.U0, adapter.D)
+        nut_bud = NuT
+        _dz = current.zloc[0, 1] - current.zloc[0, 0]
+        _inv2d = 1.0 / dl ** 2 + 1.0 / _dz ** 2
+        _Urep = representative_velocity(current.U, adapter.Uin)
+        _ratio = NuT / jnp.maximum(current.U, velocity_floor(adapter.Uin))
+        _nu_over_u = jnp.max(_ratio[1:-1, 1:-1])
+        dt = jnp.minimum(dt_cap, DIFFUSIVE_CFL
+                         / (2.0 * _inv2d * _Urep * _nu_over_u + 1e-12))
+
+        new = interpolate_vec_data(stacked, current.t + dt)
+        U, X_new, V_tot, W_tot = advance_wake_field(current, dt, NuT, adapter, WV)
+        kw_new = advance_kw(current.kw, current.U, adapter.Uin, current.yloc,
+                            current.zloc, X_new - current.X, nut_bud,
+                            du_eps_coef(current.ti, adapter.D), V_tot, W_tot)
+        ti_new = advect_incident_ti(current.ti, current.U, adapter.Uin, current.yloc,
+                                    current.zloc, X_new - current.X, V_tot, W_tot,
+                                    nu_t=nut_bud)
+
+        age_old = (current.X + adapter.x_off) / adapter.D
+        age_new = (X_new + adapter.x_off) / adapter.D
+        a_old = axial_induction_ramped(adapter.Ct_eff, age_old)
+        a_new = axial_induction_ramped(adapter.Ct_eff, age_new)
+        ramp = (1.0 - 2.0 * a_new) / jnp.maximum(1.0 - 2.0 * a_old, 1e-6)
+        U = U * jnp.prod(1.0 + (ramp[:, None, None] - 1.0) * adapter.rotor_mask,
+                         axis=0)
+
+        wage_new = current.wage + (X_new - current.X)
+        new = dataclasses.replace(new, U=U, kw=kw_new, wage=wage_new, ti=ti_new,
+                                  X=X_new, t=current.t + dt)
+
+        still_active = new.X <= calculation_domain
+        emitted = dataclasses.replace(new, yloc=_UNSTACKED, zloc=_UNSTACKED)
+        return (new, still_active), emitted
+
+    return advance
 
 
 @partial(jax.jit, static_argnames=("max_steps",))
 def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
                                   dl, dt_cap, calculation_domain, max_steps):
-    def scan_step(carry, _):
-        current, active = carry
-
-        def when_active(_):
-            age_D = jnp.maximum(current.wage / adapter.D, 1e-6)
-            NuT = du_nu_t(current.ti, age_D, adapter.U0, adapter.D)
-            nut_bud = NuT
-            _dz = current.zloc[0, 1] - current.zloc[0, 0]
-            _inv2d = 1.0 / dl ** 2 + 1.0 / _dz ** 2
-            _Urep = representative_velocity(current.U, adapter.Uin)
-            _ratio = NuT / jnp.maximum(current.U, velocity_floor(adapter.Uin))
-            _nu_over_u = jnp.max(_ratio[1:-1, 1:-1])
-            dt = jnp.minimum(dt_cap, DIFFUSIVE_CFL
-                             / (2.0 * _inv2d * _Urep * _nu_over_u + 1e-12))
-
-            new = interpolate_vec_data(stacked, current.t + dt)
-            U, X_new, V_tot, W_tot = advance_wake_field(current, dt, NuT, adapter, WV)
-            kw_new = advance_kw(current.kw, current.U, adapter.Uin, current.yloc,
-                                current.zloc, X_new - current.X, nut_bud,
-                                du_eps_coef(current.ti, adapter.D), V_tot, W_tot)
-            ti_new = advect_incident_ti(current.ti, current.U, adapter.Uin, current.yloc,
-                                        current.zloc, X_new - current.X, V_tot, W_tot,
-                                        nu_t=nut_bud)
-
-            age_old = (current.X + adapter.x_off) / adapter.D
-            age_new = (X_new + adapter.x_off) / adapter.D
-            a_old = axial_induction_ramped(adapter.Ct_eff, age_old)
-            a_new = axial_induction_ramped(adapter.Ct_eff, age_new)
-            ramp = (1.0 - 2.0 * a_new) / jnp.maximum(1.0 - 2.0 * a_old, 1e-6)
-            U = U * jnp.prod(1.0 + (ramp[:, None, None] - 1.0) * adapter.rotor_mask,
-                             axis=0)
-
-            wage_new = current.wage + (X_new - current.X)
-            new = dataclasses.replace(new, U=U, kw=kw_new, wage=wage_new, ti=ti_new,
-                                      X=X_new, t=current.t + dt)
-
-            still_active = new.X <= calculation_domain
-            return new, still_active
-
-        def when_inactive(_):
-            return current, active
-
-        next_state, next_active = lax.cond(active, when_active, when_inactive, operand=None)
-        emitted = dataclasses.replace(next_state, yloc=_UNSTACKED, zloc=_UNSTACKED)
-        return (next_state, next_active), (emitted, active)
-
-    init_carry = (seed, True)
-    _, (stacked_out, was_active) = lax.scan(scan_step, init_carry, xs=None, length=max_steps)
+    advance = _deficit_advance(stacked, adapter, WV, dl, dt_cap, calculation_domain)
+    # The caller reads only the active prefix, so the unused tail is left as zeros.
+    stacked_out, was_active, _ = march_until_stopped(advance, (seed, True), max_steps)
     stacked_out = dataclasses.replace(stacked_out, yloc=seed.yloc, zloc=seed.zloc)
     return stacked_out, was_active
+
+
+@partial(jax.jit, static_argnames=("max_steps",))
+def _calculate_deficit_field_lean_jit(stacked, seed, adapter, WV,
+                                       dl, dt_cap, calculation_domain, max_steps, x_read):
+    """The same march, keeping every step's X but only three frames: the latest short of
+    `x_read`, the first at or past it, and the latest after that -- with the march's last
+    frame always among them. A full stack is ~7 GB on an 80-rotor farm's grid."""
+    advance = _deficit_advance(stacked, adapter, WV, dl, dt_cap, calculation_domain)
+    frame_aval = jax.eval_shape(lambda c: advance(c)[1], (seed, True))
+
+    def advance_lean(carry):
+        current, slots, rows, row, _ = carry
+        (new, still_active), frame = advance((current, True))
+        s = jnp.where(frame.X < x_read, 0, jnp.where(rows[1] < 0, 1, 2))
+        slots = jax.tree.map(lambda buf, x: buf.at[s].set(x), slots, frame)
+        return (new, slots, rows.at[s].set(row), row + 1, still_active), frame.X
+
+    init = (seed, jax.tree.map(lambda a: jnp.zeros((3,) + a.shape, a.dtype), frame_aval),
+            jnp.full(3, -1, jnp.int32), jnp.int32(0), True)
+    X, was_active, (_, slots, rows, _, _) = march_until_stopped(advance_lean, init, max_steps)
+    return X, slots, rows, was_active
 
 
 def _vortex_field_to_numpy(vortex_field, grid=None):
@@ -462,11 +493,18 @@ def _vortex_field_to_numpy(vortex_field, grid=None):
     )
 
 
+FRAME_BUCKET = 256
+
+
 def _stacked_frames_to_numpy(stacked, n, grid):
     """The first `n` frames of a stacked march as numpy VortexFields, in ONE transfer."""
-    host = jax.device_get({f.name: getattr(stacked, f.name)[:n]
+    # Slice on the device to `n` rounded up to a bucket and trim on the host: `n` changes on
+    # every evaluation, and an exact [:n] compiles a fresh slice per field every time.
+    m = -(-n // FRAME_BUCKET) * FRAME_BUCKET
+    host = jax.device_get({f.name: getattr(stacked, f.name)[:m]
                            for f in dataclasses.fields(stacked)
                            if f.name not in _UNSTACKED_MEMBERS})
+    host = {k: v[:n] for k, v in host.items()}
     yloc, zloc = grid
     scalars = ("t", "X")
     return [dataclasses.replace(
@@ -474,3 +512,42 @@ def _stacked_frames_to_numpy(stacked, n, grid):
                 t=float(host["t"][i]), X=float(host["X"][i]),
                 **{k: v[i] for k, v in host.items() if k not in scalars})
             for i in range(n)]
+
+
+def _below_threshold(x, dtype):
+    """The value that splits frames at `x` in the march's own precision: for an X of that dtype,
+    X < result exactly when X < x in float64, which is how the host picks frames."""
+    dtype = np.dtype(dtype)
+    if not np.isfinite(x) or dtype == np.float64:
+        return np.asarray(x, dtype)
+    c = np.float32(x)
+    return np.nextafter(c, np.float32(np.inf)) if c < x else c
+
+
+def _frames_read_at(head, X_steps, slots, slot_rows, n, grid, x):
+    """`head` and the frames of an `n`-step lean march that reading it at `x` touches, in order:
+    the first and last, the pair bracketing x and the one nearest it -- chosen exactly as
+    field_ops.interpolate_* and the carried-cloud argmin choose them in the full list, so every
+    lookup the solve makes lands on the same frames. A frame the march did not keep is an
+    error, not a silent difference: it can only happen if X ever went backwards.
+    """
+    X = np.concatenate([[float(head.X)], np.asarray(jax.device_get(X_steps))[:n].astype(float)])
+    keep = {0, len(X) - 1}
+    if np.isfinite(x):
+        i1 = int(np.searchsorted(X, x))
+        keep |= {min(max(i, 0), len(X) - 1) for i in (i1 - 1, i1)}
+        keep.add(int(np.argmin(np.abs(X - x))))
+    rows = sorted(i - 1 for i in keep if i > 0)
+    host, slot_rows = jax.device_get((slots, slot_rows))
+    slot_of = {int(r): k for k, r in enumerate(slot_rows) if r >= 0}
+    missing = [r for r in rows if r not in slot_of]
+    if missing:
+        raise RuntimeError(f"lean deficit march did not keep step(s) {missing} that a read at "
+                           f"x={x:.4f} needs; run with all_frames=True")
+    yloc, zloc = grid
+    return [head] + [dataclasses.replace(
+                host, yloc=yloc, zloc=zloc,
+                t=float(host.t[slot_of[r]]), X=float(host.X[slot_of[r]]),
+                **{f.name: getattr(host, f.name)[slot_of[r]] for f in dataclasses.fields(host)
+                   if f.name not in _UNSTACKED_MEMBERS + ("t", "X")})
+            for r in rows]

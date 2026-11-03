@@ -121,7 +121,7 @@ class Optimizer:
 
         t0 = time.perf_counter()
         sim = Simulation(temp_config)
-        sim.run()
+        sim.run(all_frames=False)
         value = sim.calculate_objective()
         secs = time.perf_counter() - t0
 

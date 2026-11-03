@@ -42,5 +42,8 @@ class Simulation:
     def calculate_objective(self, verbose=False):
         return self.wind_farm.calculate_efficiency(verbose=verbose)
 
-    def run(self):
-        self.wind_farm.solve()
+    def run(self, all_frames=True):
+        """Solve the farm. all_frames=False keeps only the march frames the solve itself
+        reads: the objective is unchanged, bit for bit, but wake fields are not there to plot
+        or save. It is for optimisers, for which copying every frame back dominates a large farm."""
+        self.wind_farm.solve(all_frames=all_frames)

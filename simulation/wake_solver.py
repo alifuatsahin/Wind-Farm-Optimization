@@ -39,7 +39,7 @@ def _concat_vortices(carried, fresh, V_bg, W_bg):
 
 
 def _march_segment(t, seed, need_m, U0, Uin_global, companions=(),
-                   carried=(), n_slots=None, kw0=None, wage0=None, ti0=None):
+                   carried=(), n_slots=None, kw0=None, wage0=None, ti0=None, read_at=None):
     """March one turbine only as far as its field is actually read."""
     if TRUNCATE_DOMAIN:
         t.calculation_domain = need_m
@@ -50,7 +50,8 @@ def _march_segment(t, seed, need_m, U0, Uin_global, companions=(),
     t.initialize_wake_field(companions, kw0=kw0, wage0=wage0, ti0=ti0)
     t.Uin = Uin_global
     t.calculate_deficit_field(max_steps=_deficit_steps(t),
-                              companions=companions, carried=carried, n_slots=n_slots)
+                              companions=companions, carried=carried, n_slots=n_slots,
+                              read_at=read_at)
     if float(t.wake_field[-1].X) < need_m * 0.999:
         raise RuntimeError(f"march at x={t.pos[0]:.0f} reached only "
                            f"{float(t.wake_field[-1].X):.1f} m of {need_m:.1f} m")
@@ -154,7 +155,7 @@ def _x_stations(ts, tol):
     return stations
 
 
-def solve_single_field(wf, verbose=False):
+def solve_single_field(wf, verbose=False, all_frames=True):
     """March one field and one vortex cloud through the farm, station by station."""
     ts = wf.turbines
     _assert_turbulence_admissible(wf.field_params)
@@ -221,13 +222,20 @@ def solve_single_field(wf, verbose=False):
                         for t in shed_before)
         need_m = (stations[g + 1][0].pos[0] - lead.pos[0] + 0.5 * lead.D
                   if g + 1 < len(stations) else lead.calculation_domain)
+        # The next station reads this march at one x: its distance from here.
+        read_at = None if all_frames else (
+            (stations[g + 1][0].pos[0] - lead.pos[0],) if g + 1 < len(stations) else ())
         _march_segment(lead, seed, need_m, U0, Uin_global, companions,
-                       carried, n_slots, kw0, wage0, ti0)
+                       carried, n_slots, kw0, wage0, ti0, read_at)
         shed_before.extend(group)
 
         for t in group:
             if t is not lead:
                 t.vortex_field, t.dl, t.wake_field = lead.vortex_field, lead.dl, lead.wake_field
+            if not all_frames:
+                # Only this station's deficit march reads its vortex stack, and holding every
+                # station's on the device is ~1 GB each on an 80-rotor farm's grid.
+                t.vortex_field = None
 
         if verbose:
             audit.append(dict(i=g + 1, x_D=lead.pos[0] / lead.D, n=len(group),

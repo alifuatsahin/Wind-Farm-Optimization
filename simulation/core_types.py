@@ -100,11 +100,12 @@ class Turbine:
             kw0=kw0, wage0=wage0, ti0=ti0)
 
     def calculate_deficit_field(self, max_steps=1500, companions=(), carried=(),
-                                n_slots=None):
+                                n_slots=None, read_at=None):
         """`carried` are rotors shed at EARLIER stations whose near wake may still be developing, as..."""
         self.wake_field = tp.calculate_deficit_field(
             self._params, self._current_local(), self.vortex_field, self.dl,
-            max_steps=max_steps, companions=companions, carried=carried, n_slots=n_slots
+            max_steps=max_steps, companions=companions, carried=carried, n_slots=n_slots,
+            read_at=read_at
         )
 
 class WindFarm:
@@ -207,9 +208,9 @@ class WindFarm:
             print(f"Wind Farm Power Ratio: {total_eff * 100:.2f} %")
         return total_eff
 
-    def solve(self, verbose=False):
+    def solve(self, verbose=False, all_frames=True):
         """March one field and one vortex cloud through the farm; see wake_solver."""
-        return solve_single_field(self, verbose=verbose)
+        return solve_single_field(self, verbose=verbose, all_frames=all_frames)
 
     def save_results(self, out_path, limit_frames=None):
         os.makedirs(out_path, exist_ok=True)

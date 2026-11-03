@@ -22,52 +22,86 @@ def _simulate_vortex_evolution_jit(config, merge_threshold, cfl_factor, total_st
         seed = _define_location(config)[0]
     seed = dataclasses.replace(seed, yloc=config.yloc, zloc=config.zloc, OmegaX=jnp.zeros_like(config.yloc))
 
-    def scan_step(carry, _):
-        current_state, t, active = carry
+    def step(current_state, t):
+        current2 = _vortex2velocity(current_state, config)
+        dY, dZ, dist2 = _get_relative_geometry(current2.Y, current2.Z, current2.active)
+        Circ, Rv = current2.Circ, current2.Rv
+        V_induced, W_induced = _compute_mutual_induction(Circ, Rv, dY, dZ, dist2)
+        dt = _calculate_time_step(V_induced, W_induced, cfl_factor, dist2)
+        t_next = t + dt
+        would_stop = t_next * Uhub / D > t_limit
 
-        def when_active(_):
-            current2 = _vortex2velocity(current_state, config)
-            dY, dZ, dist2 = _get_relative_geometry(current2.Y, current2.Z, current2.active)
-            Circ, Rv = current2.Circ, current2.Rv
-            V_induced, W_induced = _compute_mutual_induction(Circ, Rv, dY, dZ, dist2)
-            dt = _calculate_time_step(V_induced, W_induced, cfl_factor, dist2)
-            t_next = t + dt
-            would_stop = t_next * Uhub / D > t_limit
+        def do_advance(_):
+            new_Y, new_Z = RK4_step(current2.Y, current2.Z, V_induced, W_induced, Circ, Rv, dt, current2.active)
+            new_age = current2.age + config.U_conv * dt
+            nu = config.nu_const + config.nu_slope * 0.5 * (current2.age + new_age)
+            new_Rv = jnp.sqrt(Rv**2 + 4 * nu * dt)
+            new_vf = VortexField(
+                Y=new_Y, Z=new_Z, Rv=new_Rv, age=new_age,
+                Circ=current2.Circ, active=current2.active, t=t_next,
+                yloc=current2.yloc, zloc=current2.zloc,
+                V=jnp.zeros_like(current2.V), W=jnp.zeros_like(current2.W), OmegaX=current2.OmegaX
+            )
+            merged = _merge_close_vortices(new_vf, merge_threshold, dist2)
+            merged = dataclasses.replace(merged, t=t_next)
+            return merged, t_next, True
 
-            def do_advance(_):
-                new_Y, new_Z = RK4_step(current2.Y, current2.Z, V_induced, W_induced, Circ, Rv, dt, current2.active)
-                new_age = current2.age + config.U_conv * dt
-                nu = config.nu_const + config.nu_slope * 0.5 * (current2.age + new_age)
-                new_Rv = jnp.sqrt(Rv**2 + 4 * nu * dt)
-                new_vf = VortexField(
-                    Y=new_Y, Z=new_Z, Rv=new_Rv, age=new_age,
-                    Circ=current2.Circ, active=current2.active, t=t_next,
-                    yloc=current2.yloc, zloc=current2.zloc,
-                    V=jnp.zeros_like(current2.V), W=jnp.zeros_like(current2.W), OmegaX=current2.OmegaX
-                )
-                merged = _merge_close_vortices(new_vf, merge_threshold, dist2)
-                merged = dataclasses.replace(merged, t=t_next)
-                return merged, t_next, True
+        def do_freeze(_):
+            return current2, t_next, False
 
-            def do_freeze(_):
-                return current2, t_next, False
+        return lax.cond(would_stop, do_freeze, do_advance, operand=None), current2
 
-            next_state, next_t, next_active = lax.cond(would_stop, do_freeze, do_advance, operand=None)
-            return (next_state, next_t, next_active), current2
+    def unstack(frame):
+        return dataclasses.replace(frame, yloc=_UNSTACKED, zloc=_UNSTACKED, U=_UNSTACKED)
 
-        def when_inactive(_):
-            return (current_state, t, active), current_state
+    def advance(carry):
+        current_state, t, _ = carry
+        next_carry, emitted = step(current_state, t)
+        return next_carry, unstack(emitted)
 
-        next_carry, emitted = lax.cond(active, when_active, when_inactive, operand=None)
-        emitted = dataclasses.replace(emitted, yloc=_UNSTACKED, zloc=_UNSTACKED,
-                                      U=_UNSTACKED)
-        return next_carry, (emitted, active)
-
-    init_carry = (seed, 0.0, True)
-    _, (stacked, was_active) = lax.scan(scan_step, init_carry, xs=None, length=total_steps)
+    stacked, was_active, _ = march_until_stopped(
+        advance, (seed, 0.0, True), total_steps, idle_frame=lambda carry: unstack(carry[0]))
     stacked = dataclasses.replace(stacked, yloc=config.yloc, zloc=config.zloc,
                                   U=_UNSTACKED)
     return stacked, was_active
+
+
+def march_until_stopped(advance, init, total_steps, idle_frame=None):
+    """A `total_steps`-long march that stops computing once it reports itself inactive.
+
+    `advance(carry) -> (next_carry, frame)`, with the carry's LAST member the active flag.
+    Returns the frames stacked along a leading axis of length `total_steps`, the per-step
+    active flags and the final carry -- what a lax.scan of `total_steps` gives when its inactive steps emit
+    `idle_frame(carry)` and pass the carry through, but without running those idle steps: the
+    march uses as few as 4% of its allotted steps. `idle_frame` fills the unused tail, which
+    matters to a reader of the whole stack (interpolate_vec_data searchsorts its t, so a zero
+    tail would be read as frames at t=0); with None the tail is left as zeros, for a caller
+    that only ever reads the active prefix.
+    """
+    frame_aval = jax.eval_shape(lambda c: advance(c)[1], init)
+    frames = jax.tree.map(lambda a: jnp.zeros((total_steps,) + a.shape, a.dtype), frame_aval)
+
+    def body(loop):
+        i, carry, frames, was_active = loop
+        # The loop has already stopped by the time the flag is False, so this cond never
+        # takes its idle side. It is kept because it is what the scan this replaced compiled:
+        # on the CPU backend the same step compiled outside a conditional sums the PM
+        # scatter in a different order (objective ~1e-8 off on a 16-rotor farm), and inside
+        # one the results stay bit-identical to the scan's.
+        carry, frame = lax.cond(carry[-1], advance,
+                                lambda c: (c, jax.tree.map(jnp.zeros_like, frame_aval)), carry)
+        frames = jax.tree.map(lambda buf, x: buf.at[i].set(x), frames, frame)
+        return i + 1, carry, frames, was_active.at[i].set(True)
+
+    n, carry, frames, was_active = lax.while_loop(
+        lambda loop: loop[1][-1] & (loop[0] < total_steps), body,
+        (0, init, frames, jnp.zeros(total_steps, dtype=bool)))
+    if idle_frame is not None:
+        tail = jnp.arange(total_steps) >= n
+        frames = jax.tree.map(
+            lambda buf, x: jnp.where(tail.reshape((-1,) + (1,) * jnp.ndim(x)), x, buf),
+            frames, idle_frame(carry))
+    return frames, was_active, carry
 
 def _vortex2velocity(data, config):
     """Returns a NEW VortexField (dataclasses.replace) instead of mutating `data` in place..."""
@@ -238,12 +272,13 @@ def _merge_close_vortices(vortex_field, threshold, dist_matrix):
 
     def _merge_pass(carry):
         i_idx, j_idx, qualifies_all = _candidates()
-
-        def _scan_merges(c):
-            out, _ = lax.scan(merge_step, c, (i_idx, j_idx, qualifies_all))
-            return out
-
-        return lax.cond(jnp.any(qualifies_all), _scan_merges, lambda c: c, carry)
+        # merge_step is an exact no-op on a pair that does not qualify, so walk only the ones
+        # that do, in the same order. The candidate list is 12 pairs per vortex and the walk
+        # is sequential: over all of it, this pass was ~99% of a step for an 80-rotor cloud.
+        order = jnp.argsort((~qualifies_all).astype(jnp.int32), stable=True)
+        i_q, j_q = i_idx[order], j_idx[order]
+        return lax.fori_loop(0, jnp.sum(qualifies_all),
+                             lambda k, c: merge_step(c, (i_q[k], j_q[k], True))[0], carry)
 
     (Y, Z, Rv, age, Circ, claimed, _locked) = lax.cond(
         jnp.min(real_dist) <= r_max2, _merge_pass, lambda carry: carry, init_carry)
