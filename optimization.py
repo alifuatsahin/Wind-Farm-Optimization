@@ -41,7 +41,14 @@ class State:
     failure_counter: int = 0
     failure_tolerance: int = float("nan")
     success_counter: int = 0
-    success_tolerance: int = 10
+    # Eriksson et al. (2019) use 3. BoTorch's tutorial uses 10, under which a q=1 run needs ten
+    # improvements in a row to grow the region, and in practice it only ever shrinks.
+    success_tolerance: int = 3
+    # Relative improvement that counts as a success. The tutorial's 1e-3 is the same size as the
+    # 0.1% this objective is judged at, so real progress near an optimum counted as failure and
+    # shrank the region towards a restart. 1e-4 is 10x finer than that and still ~100x above the
+    # solver's float32 resolution (~1e-6).
+    success_rel_tol: float = 1e-4
     best_value: float = -float("inf")
     restart_triggered: bool = False
 
@@ -171,7 +178,7 @@ class Optimizer:
 
     def _update_state(self, state: 'State', Y_next: torch.Tensor) -> 'State':
         """Update the state of the trust region based on the new function values."""
-        if max(Y_next) > state.best_value + 1e-3 * math.fabs(state.best_value):
+        if max(Y_next) > state.best_value + state.success_rel_tol * math.fabs(state.best_value):
             state.success_counter += 1
             state.failure_counter = 0
         else:
@@ -307,8 +314,14 @@ class Optimizer:
             log_freq: int = 5,
             verbose: bool = True,
             log_path: Optional[str] = None,
+            x0: Optional[np.ndarray] = None,
         ) -> Tuple[np.ndarray, float]:
-        """Run the Bayesian Optimization loop with trust region and restarts."""
+        """Run the Bayesian Optimization loop with trust region and restarts.
+
+        `x0` is one or more PHYSICAL points known to be good (a heuristic yaw schedule, say); they
+        replace the first Sobol points of the first trust region's initial design, so the region
+        can start from them. Later restarts are pure Sobol, to explore.
+        """
         if log_path:
             self.log_path = log_path
             os.makedirs(os.path.dirname(os.path.abspath(log_path)) or ".", exist_ok=True)
@@ -334,6 +347,12 @@ class Optimizer:
 
             n_init_curr = min(n_init, max_evals - n_evals)
             init_X = self._get_initial_points(n_init_curr)
+            if x0 is not None and n_evals == 0:
+                seeds = torch.tensor(self._normalize(np.atleast_2d(np.asarray(x0, float))),
+                                     dtype=self.dtype, device=self.device)[:n_init_curr]
+                if not bool(((seeds >= 0) & (seeds <= 1)).all() & self._feasible_mask(seeds).all()):
+                    raise ValueError("x0 must lie inside the bounds and be feasible")
+                init_X[:seeds.shape[0]] = seeds
             init_Y = torch.empty((n_init_curr, 1), dtype=self.dtype, device=self.device)
             for i, x in enumerate(init_X):
                 init_Y[i] = torch.tensor(

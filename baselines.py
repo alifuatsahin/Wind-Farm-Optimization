@@ -83,6 +83,52 @@ def genetic_algorithm(evaluate: Callable, bounds: np.ndarray, max_evals: int,
     return history
 
 
+def heuristic_yaw(bounds: np.ndarray, beta_max: float = 25.0, sign: float = 1.0) -> np.ndarray:
+    """Zong & Porte-Agel's start: yaw falling linearly from beta_max to 0 at the last rotor."""
+    b = np.asarray(bounds, float)
+    dim = len(b)
+    i = np.arange(dim, 0, -1) - 1.0
+    return np.clip(sign * beta_max * i / max(dim, 1), b[:, 0], b[:, 1])
+
+
+def cma_es(evaluate: Callable, bounds: np.ndarray, max_evals: int, seed: int = 0,
+           x0: Optional[np.ndarray] = None, sigma0: float = 0.2,
+           log_path: Optional[str] = None) -> List[dict]:
+    """CMA-ES (pycma) on the box scaled to [0, 1], default population, IPOP restarts.
+
+    `x0` (physical; default the heuristic start) is the first mean and `sigma0` the step in the
+    scaled box. A run that stops on its own before the budget restarts from a uniform random
+    mean with the population doubled. The last generation is cut short at `max_evals`.
+    """
+    import cma
+
+    b = np.asarray(bounds, float)
+    lo, hi = b[:, 0], b[:, 1]
+    rng = np.random.default_rng(seed)
+    history: List[dict] = []
+    mean = (np.asarray(heuristic_yaw(b) if x0 is None else x0, float) - lo) / (hi - lo)
+    popsize = None
+    while len(history) < max_evals:
+        # pycma treats a seed of 0 as "seed from the clock".
+        opts = {"bounds": [0.0, 1.0], "seed": int(rng.integers(1, 2**31 - 1)), "verbose": -9}
+        if popsize is not None:
+            opts["popsize"] = popsize
+        es = cma.CMAEvolutionStrategy(mean, sigma0, opts)
+        while not es.stop() and len(history) < max_evals:
+            X = es.ask()
+            f = []
+            for x in X:
+                if len(history) >= max_evals:
+                    break
+                f.append(-_run(evaluate, lo + np.clip(x, 0.0, 1.0) * (hi - lo), history, log_path))
+            if len(f) < len(X):
+                break
+            es.tell(X, f)
+        popsize = 2 * es.popsize
+        mean = rng.uniform(0.0, 1.0, len(lo))
+    return history
+
+
 def zong_gradient_ascent(evaluate: Callable, bounds: np.ndarray, max_evals: int,
                          beta_max: float = 25.0, sign: float = 1.0,
                          step0: float = 5.0, step_min: float = 0.1,
@@ -94,9 +140,7 @@ def zong_gradient_ascent(evaluate: Callable, bounds: np.ndarray, max_evals: int,
     dim = len(lo)
     history: List[dict] = []
 
-    i = np.arange(dim, 0, -1) - 1.0
-    x = (np.clip(sign * beta_max * i / max(dim, 1), lo, hi) if heuristic_start
-         else np.zeros(dim))
+    x = heuristic_yaw(b, beta_max, sign) if heuristic_start else np.zeros(dim)
     f = _run(evaluate, x, history, log_path)
 
     step = step0

@@ -20,6 +20,7 @@ matplotlib>=3.4           # validated with 3.10.7
 # --- yaw / layout optimisation (optional: only run_optimization.py needs these) ---
 torch>=2.0                # validated with 2.13.0
 botorch>=0.9              # validated with 0.18.1
+cma>=3.3                  # validated with 4.5.0 (CMA-ES baseline)
 gpytorch>=1.11            # validated with 1.15.2
 
 # --- validation against reference datasets (optional) ---
