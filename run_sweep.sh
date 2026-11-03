@@ -25,11 +25,22 @@
 # them back, so a killed or preempted job loses at most the curve in flight. Copy that
 # file back and forth to move progress between machines.
 #
+# The sweep can run in PARALLEL. --workers "gpu:0 gpu:1 cpu cpu" starts one process per
+# entry, each pinned to its own physical cores, that claim uncached curves from a shared
+# queue; the figure is drawn from the finished cache once all of them exit. The curves
+# are independent and seed themselves, so this changes when each one is computed and
+# not what it computes. A killed worker's curve is taken over by the next run. Narrow
+# CPU workers get more out of the box than wide ones: filling 24 cores with 4-, 2- and
+# 1-core workers gave 3500, 4700 and 4900 evaluations an hour, so the default is 2
+# (--cpu-cores), which keeps most of that without doubling the longest curve's time.
+#
 # Usage:
 #   ./run_sweep.sh --bundle sweep.tar.gz  # ON THIS MACHINE: pack what the box needs
 #   ./run_sweep.sh --install --gpu        # set up a venv with CUDA jax, then sweep
 #   ./run_sweep.sh --check-only           # verify and benchmark, run nothing
 #   ./run_sweep.sh --nt "2 3 4 6" --seeds-b 3 --yes
+#   ./run_sweep.sh --workers "gpu:0 gpu:1 cpu cpu cpu cpu" --yes
+#   ./run_sweep.sh --workers "gpu:0 gpu:1 cpu cpu cpu cpu cpu cpu cpu cpu cpu cpu" --yes
 #
 # A GIT CLONE IS NOT ENOUGH. Four of the files this sweep runs are in .gitignore --
 # make_paper_figures.py, baselines.py, validation.py and validation_fullwake.py -- because
@@ -54,6 +65,15 @@ ASSUME_YES=0
 VENV="$REPO/.venv"
 PYTHON="${PYTHON:-python3}"
 BUNDLE=""
+WORKERS=""
+# Physical cores pinned per --workers entry (--cpu-cores, --gpu-cores). A CPU march keeps
+# ~6 threads busy; a GPU worker's host side only needs the optimiser's own GP fits.
+CPU_WORKER_CORES=2
+GPU_WORKER_CORES=2
+# Threads for the optimiser's torch GP fits, the SAME in every worker whatever its width:
+# a TuRBO curve is bit-reproducible only at a fixed torch thread count. XLA ignores this
+# and sizes its own pool to the pinned cores.
+TORCH_THREADS=4
 
 # Gitignored, and the sweep cannot run without them. tools/sweep_precheck.py is listed
 # too: it is new, so a clone made before it was committed will not have it either.
@@ -62,7 +82,11 @@ REQUIRED="make_paper_figures.py baselines.py validation.py validation_fullwake.p
 while [ $# -gt 0 ]; do
   case "$1" in
     --bundle)        BUNDLE="$2"; shift 2 ;;
-    --nt)            NT="$2"; shift 2 ;;
+    --workers)       WORKERS="$2"; shift 2 ;;
+    --cpu-cores)     CPU_WORKER_CORES="$2"; shift 2 ;;
+    --gpu-cores)     GPU_WORKER_CORES="$2"; shift 2 ;;
+    --torch-threads) TORCH_THREADS="$2"; shift 2 ;;
+    --nt)           NT="$2"; shift 2 ;;
     --seeds)         SEEDS="$2"; shift 2 ;;
     --seeds-b)       SEEDS_B="$2"; shift 2 ;;
     --budget)        BUDGET="$2"; shift 2 ;;
@@ -73,7 +97,7 @@ while [ $# -gt 0 ]; do
     --gpu)           USE_GPU=1; shift ;;
     --check-only)    CHECK_ONLY=1; shift ;;
     --yes|-y)        ASSUME_YES=1; shift ;;
-    -h|--help)       sed -n '2,42p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)       sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -129,9 +153,10 @@ if [ "$DO_INSTALL" = 1 ]; then
   pip install --upgrade pip wheel >/dev/null
   if [ "$USE_GPU" = 1 ]; then
     # The CUDA wheels bundle their own runtime, so no system CUDA install is needed --
-    # only a driver new enough for CUDA 12.
-    say "installing jax with CUDA 12 support"
-    pip install "jax[cuda12]>=0.11"
+    # only a driver new enough for CUDA 13. Not CUDA 12: its jax 0.11 build emits PTX 8.4,
+    # which cannot target Blackwell (sm_120, RTX 50xx) and aborts on the first jit.
+    say "installing jax with CUDA 13 support"
+    pip install "jax[cuda13]>=0.11"
   else
     say "installing CPU jax"
     pip install "jax>=0.11" "jaxlib>=0.11"
@@ -153,6 +178,9 @@ export MPLBACKEND=Agg
 # JAX grabs 75% of GPU memory on first use by default, which collides with anything else
 # on a shared box and buys nothing here -- the arrays are small.
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
+# Without this a GPU march differs between processes by ~4e-7, so a seeded optimiser run
+# is not repeatable. It costs nothing measurable here, and the CPU backend ignores it.
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_deterministic_ops=true"
 
 say "environment"
 python - <<'PY'
@@ -170,6 +198,17 @@ python "$REPO/tools/sweep_precheck.py" --verify || {
   echo "VERIFICATION FAILED -- not starting a multi-hour sweep on this build." >&2
   exit 1
 }
+# Workers can run on a backend the check above did not: verify each one they use.
+for w in $(printf '%s\n' $WORKERS | sed 's/^gpu:.*/gpu/' | sort -u); do
+  case "$w" in
+    cpu) say "verifying the CPU backend the workers use"
+         JAX_PLATFORMS=cpu python "$REPO/tools/sweep_precheck.py" --verify ;;
+    gpu) g=$(printf '%s\n' $WORKERS | grep '^gpu:' | head -1); g="${g#gpu:}"
+         say "verifying the GPU backend the workers use (GPU $g)"
+         CUDA_VISIBLE_DEVICES="$g" python "$REPO/tools/sweep_precheck.py" --verify ;;
+    *)   echo "unknown --workers entry '$w': use gpu:N or cpu" >&2; exit 2 ;;
+  esac || { echo "VERIFICATION FAILED on the $w backend." >&2; exit 1; }
+done
 
 # ----------------------------------------------------------------- 3. cost
 say "timing one evaluation at each end of the sweep"
@@ -200,6 +239,45 @@ echo "  (safe to kill and re-run: finished curves are cached in bo_efficiency_ru
 # by set -e right here and never print where its partial results landed -- which is the
 # one moment the paths matter most.
 set +e
+if [ -n "$WORKERS" ]; then
+  # Logical CPUs of physical cores [first, first + n), SMT siblings included, so no two
+  # workers share a core.
+  cpus_of_cores() {
+    lscpu -p=CORE,CPU | grep -v '^#' | awk -F, -v a="$1" -v b="$(($1 + $2))" \
+      '$1 >= a && $1 < b { printf "%s%s", s, $2; s = "," }'
+  }
+  n_phys=$(lscpu -p=CORE | grep -v '^#' | sort -u | wc -l)
+  core=0; pids=""; i=0
+  for w in $WORKERS; do
+    case "$w" in
+      gpu:*) n=$GPU_WORKER_CORES; dev="CUDA_VISIBLE_DEVICES=${w#gpu:}" ;;
+      cpu)   n=$CPU_WORKER_CORES; dev="JAX_PLATFORMS=cpu" ;;
+    esac
+    if [ $((core + n)) -gt "$n_phys" ]; then
+      echo "--workers needs more than the $n_phys physical cores here; drop an entry" >&2
+      for p in $pids; do kill "$p" 2>/dev/null; done
+      exit 2
+    fi
+    cpus=$(cpus_of_cores "$core" "$n")
+    wlog="${LOG%.log}_w${i}_${w/:/}.log"
+    echo "  worker $i  $w  cpus $cpus  -> $wlog"
+    # shellcheck disable=SC2086
+    env $dev OMP_NUM_THREADS="$TORCH_THREADS" MKL_NUM_THREADS="$TORCH_THREADS" \
+      taskset -c "$cpus" python -u make_paper_figures.py --only bo_efficiency --worker \
+        --nt $NT --seeds "$SEEDS" --seeds-b "$SEEDS_B" \
+        --budget "$BUDGET" --evals-per-dim "$EVALS_PER_DIM" > "$wlog" 2>&1 &
+    pids="$pids $!"
+    core=$((core + n)); i=$((i + 1))
+  done
+  wstatus=0
+  for p in $pids; do wait "$p" || wstatus=1; done
+  if [ "$wstatus" != 0 ]; then
+    # Not drawing: the draw would compute whatever the failed worker left, serially.
+    echo "  a worker failed -- see its log, then re-run: finished curves are kept" >&2
+    exit 1
+  fi
+  say "all workers done; drawing the figure from the cache"
+fi
 # shellcheck disable=SC2086
 python -u make_paper_figures.py --only bo_efficiency \
     --nt $NT --seeds "$SEEDS" --seeds-b "$SEEDS_B" \
