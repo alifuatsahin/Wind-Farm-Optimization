@@ -54,7 +54,6 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
 
 NT="2 3 4 6 8"
-SEEDS=8
 SEEDS_B=5
 BUDGET=120
 EVALS_PER_DIM=50
@@ -87,7 +86,6 @@ while [ $# -gt 0 ]; do
     --gpu-cores)     GPU_WORKER_CORES="$2"; shift 2 ;;
     --torch-threads) TORCH_THREADS="$2"; shift 2 ;;
     --nt)           NT="$2"; shift 2 ;;
-    --seeds)         SEEDS="$2"; shift 2 ;;
     --seeds-b)       SEEDS_B="$2"; shift 2 ;;
     --budget)        BUDGET="$2"; shift 2 ;;
     --evals-per-dim) EVALS_PER_DIM="$2"; shift 2 ;;
@@ -264,7 +262,7 @@ if [ -n "$WORKERS" ]; then
     # shellcheck disable=SC2086
     env $dev OMP_NUM_THREADS="$TORCH_THREADS" MKL_NUM_THREADS="$TORCH_THREADS" \
       taskset -c "$cpus" python -u make_paper_figures.py --only bo_efficiency --worker \
-        --nt $NT --seeds "$SEEDS" --seeds-b "$SEEDS_B" \
+        --nt $NT --seeds-b "$SEEDS_B" \
         --budget "$BUDGET" --evals-per-dim "$EVALS_PER_DIM" > "$wlog" 2>&1 &
     pids="$pids $!"
     core=$((core + n)); i=$((i + 1))
@@ -280,7 +278,7 @@ if [ -n "$WORKERS" ]; then
 fi
 # shellcheck disable=SC2086
 python -u make_paper_figures.py --only bo_efficiency \
-    --nt $NT --seeds "$SEEDS" --seeds-b "$SEEDS_B" \
+    --nt $NT --seeds-b "$SEEDS_B" \
     --budget "$BUDGET" --evals-per-dim "$EVALS_PER_DIM" 2>&1 | tee "$LOG"
 status="${PIPESTATUS[0]}"
 set -e

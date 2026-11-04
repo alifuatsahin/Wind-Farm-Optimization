@@ -50,7 +50,7 @@ def verify():
     return ok
 
 
-def benchmark(nt_list, seeds_b, budget, evals_per_dim, seeds):
+def benchmark(nt_list, seeds_b, budget, evals_per_dim):
     """Extrapolate the sweep from one timed evaluation at each end of the N_t range."""
     import jax
 
@@ -82,10 +82,7 @@ def benchmark(nt_list, seeds_b, budget, evals_per_dim, seeds):
         total += t
         print("  %-5d %8d %10d %10.2f" % (n_t, bud, e, t / 3600.0))
 
-    a_evals = 3 * seeds * budget + 2 * (budget // 3)
-    print("\n  panel (b) total: %d evaluations, %.1f hours" % (n_evals, total / 3600.0))
-    print("  panel (a) would add %d evaluations (%.1f h) if not already cached"
-          % (a_evals, a_evals * secs(3) / 3600.0))
+    print("\n  sweep total: %d evaluations, %.1f hours" % (n_evals, total / 3600.0))
     print("  backend %s" % jax.default_backend())
     cached = os.path.join("runs", "paper_figures", "bo_efficiency_runs.json")
     if os.path.exists(cached):
@@ -103,7 +100,6 @@ def main():
     p.add_argument("--verify", action="store_true")
     p.add_argument("--benchmark", action="store_true")
     p.add_argument("--nt", default="2 3 4 6 8")
-    p.add_argument("--seeds", type=int, default=8)
     p.add_argument("--seeds-b", type=int, default=5, dest="seeds_b")
     p.add_argument("--budget", type=int, default=120)
     p.add_argument("--evals-per-dim", type=int, default=50, dest="evals_per_dim")
@@ -113,7 +109,7 @@ def main():
         return 1
     if a.benchmark:
         benchmark([int(v) for v in a.nt.split()], a.seeds_b, a.budget,
-                  a.evals_per_dim, a.seeds)
+                  a.evals_per_dim)
     return 0
 
 

@@ -1,5 +1,34 @@
 """Shared plot styling: a single-hue sequential colormap for magnitude fields (replacing the..."""
+import matplotlib as mpl
 from matplotlib.colors import LinearSegmentedColormap
+
+#: Serif stack for the paper figures; the fallbacks are the Linux metric-compatibles.
+PAPER_SERIF = ["Times New Roman", "Nimbus Roman", "Liberation Serif",
+               "Tinos", "DejaVu Serif"]
+
+#: Base text size in points. Figures are drawn at their printed width, so this is
+#: the size the reader sees; the paper body is 12 pt.
+BASE_PT = 9.5
+
+
+def apply_paper_style():
+    """Set the serif family and the base text sizes for every figure in the paper."""
+    mpl.rcParams.update({
+        "font.family": "serif",
+        "font.serif": PAPER_SERIF,
+        "mathtext.fontset": "stix",
+        "font.size": BASE_PT,
+        "axes.titlesize": BASE_PT,
+        "axes.labelsize": BASE_PT,
+        "xtick.labelsize": BASE_PT - 1.0,
+        "ytick.labelsize": BASE_PT - 1.0,
+        "legend.fontsize": BASE_PT - 1.0,
+        "figure.titlesize": BASE_PT + 1.0,
+        "axes.formatter.use_mathtext": True,
+    })
+
+
+apply_paper_style()
 
 SEQ_BLUE = LinearSegmentedColormap.from_list("seq_blue", [
     "#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7",

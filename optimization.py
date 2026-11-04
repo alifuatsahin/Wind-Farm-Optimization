@@ -490,24 +490,24 @@ class Optimizer:
 
         ax1.plot(it, y, "o", ms=3.5, alpha=0.65, color="#1c5cab", label="Evaluation")
         ax1.plot(it, best, "-", lw=1.6, color=INK_PRIMARY, label="Best so far")
-        ax1.set_ylabel("Farm efficiency", fontsize=9)
-        ax1.legend(frameon=False, fontsize=7.5, loc="lower right", ncol=3)
-        ax1.tick_params(labelsize=8)
+        ax1.set_ylabel("Farm efficiency", fontsize=11)
+        ax1.legend(frameon=False, fontsize=9.5, loc="lower right", ncol=3)
+        ax1.tick_params(labelsize=10)
         style_axes(ax1)
 
         for i in range(P.shape[1]):
             ax2.plot(it, P[:, i], "o-", ms=2.5, lw=0.8, alpha=0.75,
                      label=self.param_names[i])
-        ax2.set_xlabel("Evaluation", fontsize=9)
+        ax2.set_xlabel("Evaluation", fontsize=11)
         ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
-        ax2.set_ylabel(param_label, fontsize=9)
-        ax2.legend(frameon=False, fontsize=7.5, ncol=min(4, P.shape[1]))
-        ax2.tick_params(labelsize=8)
+        ax2.set_ylabel(param_label, fontsize=11)
+        ax2.legend(frameon=False, fontsize=9.5, ncol=min(4, P.shape[1]))
+        ax2.tick_params(labelsize=10)
         style_axes(ax2)
 
         for ax, L in zip((ax1, ax2), "ab"):
             ax.text(0.008, 0.97, f"({L})", transform=ax.transAxes, ha="left", va="top",
-                    fontsize=9, color=INK_PRIMARY,
+                    fontsize=11, color=INK_PRIMARY,
                     bbox=dict(facecolor=SURFACE, edgecolor="none", alpha=0.75, pad=1.5))
 
         fig.tight_layout()
@@ -554,14 +554,14 @@ class Optimizer:
                       c='cyan', marker='o', s=200, edgecolors='k',
                       linewidths=2, label='Latest', zorder=5)
 
-            ax.set_xlabel(self.param_names[param_idx_x], fontsize=10)
-            ax.set_ylabel(self.param_names[param_idx_y], fontsize=10)
-            ax.set_title(f'Iteration {iter_num}\nBest={np.max(y_train):.3f}', fontsize=11)
+            ax.set_xlabel(self.param_names[param_idx_x], fontsize=12.5)
+            ax.set_ylabel(self.param_names[param_idx_y], fontsize=12.5)
+            ax.set_title(f'Iteration {iter_num}\nBest={np.max(y_train):.3f}', fontsize=14)
             ax.set_xlim(0, 1)
             ax.set_ylim(0, 1)
             plt.colorbar(scatter, ax=ax, label='Objective Value')
             if idx == 0:
-                ax.legend(fontsize=8, loc='upper right')
+                ax.legend(fontsize=10, loc='upper right')
             ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
@@ -631,14 +631,14 @@ class Optimizer:
                           c='cyan', marker='*', s=300, edgecolors='k',
                           linewidths=2, label='Next', zorder=5)
 
-            ax.set_xlabel(self.param_names[param_idx_x], fontsize=10)
-            ax.set_ylabel(self.param_names[param_idx_y], fontsize=10)
-            ax.set_title(f'Iteration {iter_num}\nMax EI={np.max(Z_acq):.3e}', fontsize=11)
+            ax.set_xlabel(self.param_names[param_idx_x], fontsize=12.5)
+            ax.set_ylabel(self.param_names[param_idx_y], fontsize=12.5)
+            ax.set_title(f'Iteration {iter_num}\nMax EI={np.max(Z_acq):.3e}', fontsize=14)
             ax.set_xlim(0, 1)
             ax.set_ylim(0, 1)
             plt.colorbar(c, ax=ax, label='Expected Improvement')
             if idx == 0:
-                ax.legend(fontsize=8, loc='upper right')
+                ax.legend(fontsize=10, loc='upper right')
             ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
@@ -701,9 +701,9 @@ class Optimizer:
             ax_mean.scatter(X_train_np[:, param_idx_x], X_train_np[:, param_idx_y],
                            c=y_train_np, cmap='coolwarm', edgecolors='k',
                            s=50, marker='o', label='Sampled', zorder=5)
-            ax_mean.set_xlabel(self.param_names[param_idx_x], fontsize=10)
-            ax_mean.set_ylabel(self.param_names[param_idx_y], fontsize=10)
-            ax_mean.set_title(f'Iter {iter_num}: Posterior Mean', fontsize=11)
+            ax_mean.set_xlabel(self.param_names[param_idx_x], fontsize=12.5)
+            ax_mean.set_ylabel(self.param_names[param_idx_y], fontsize=12.5)
+            ax_mean.set_title(f'Iter {iter_num}: Posterior Mean', fontsize=14)
             ax_mean.set_xlim(0, 1)
             ax_mean.set_ylim(0, 1)
             plt.colorbar(c1, ax=ax_mean, label='Predicted Value')
@@ -713,9 +713,9 @@ class Optimizer:
             ax_std.scatter(X_train_np[:, param_idx_x], X_train_np[:, param_idx_y],
                           c='white', edgecolors='k', s=50, marker='o',
                           alpha=0.7, zorder=5)
-            ax_std.set_xlabel(self.param_names[param_idx_x], fontsize=10)
-            ax_std.set_ylabel(self.param_names[param_idx_y], fontsize=10)
-            ax_std.set_title(f'Iter {iter_num}: Uncertainty (σ)', fontsize=11)
+            ax_std.set_xlabel(self.param_names[param_idx_x], fontsize=12.5)
+            ax_std.set_ylabel(self.param_names[param_idx_y], fontsize=12.5)
+            ax_std.set_title(f'Iter {iter_num}: Uncertainty (σ)', fontsize=14)
             ax_std.set_xlim(0, 1)
             ax_std.set_ylim(0, 1)
             plt.colorbar(c2, ax=ax_std, label='Std Dev')
