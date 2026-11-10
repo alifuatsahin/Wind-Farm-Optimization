@@ -10,10 +10,24 @@ PAPER_SERIF = ["Times New Roman", "Nimbus Roman", "Liberation Serif",
 #: the size the reader sees; the paper body is 12 pt.
 BASE_PT = 9.5
 
+#: Page white. The figures sit on the white of a journal page, so anything off-white
+#: reads as a grey panel once the PDF is printed; it is set in the rcParams below as
+#: well as passed explicitly, so a figure that forgets `facecolor=SURFACE` still
+#: comes out white rather than reverting to this module's old warm tint.
+SURFACE = "#ffffff"
+INK_PRIMARY = "#0b0b0b"
+INK_SECONDARY = "#52514e"
+INK_MUTED = "#898781"
+GRID = "#e1e0d9"
+BASELINE = "#c3c2b7"
+
 
 def apply_paper_style():
     """Set the serif family and the base text sizes for every figure in the paper."""
     mpl.rcParams.update({
+        "figure.facecolor": SURFACE,
+        "axes.facecolor": SURFACE,
+        "savefig.facecolor": SURFACE,
         "font.family": "serif",
         "font.serif": PAPER_SERIF,
         "mathtext.fontset": "stix",
@@ -37,16 +51,9 @@ SEQ_BLUE = LinearSegmentedColormap.from_list("seq_blue", [
 
 DIV_BLUE_RUST = LinearSegmentedColormap.from_list("div_blue_rust", [
     "#0d366b", "#184f95", "#256abf", "#5598e7", "#9ec5f4", "#cde2fb",
-    "#fcfcfb",
+    SURFACE,
     "#f7ddc8", "#efc09b", "#e2a271", "#d0804b", "#b0562a", "#7d3a17",
 ])
-
-SURFACE = "#fcfcfb"
-INK_PRIMARY = "#0b0b0b"
-INK_SECONDARY = "#52514e"
-INK_MUTED = "#898781"
-GRID = "#e1e0d9"
-BASELINE = "#c3c2b7"
 
 
 def style_figure(fig):
