@@ -177,24 +177,23 @@ def extract_cross_plane(wind_farm, x_m, y_grid, z_grid):
     return np.asarray(U)
 
 
-def extract_hub_height_slice(wind_farm, x_m_target, y_m_target, nz=41):
-    """Hub-height (x, y) map of streamwise velocity, plus the reference Uh."""
+def extract_hub_height_slice(wind_farm, x_m_target, y_m_target, z_m=None):
+    """(x, y) map of streamwise velocity at height z_m (default: hub height), plus the reference Uh.
+    Sampled exactly at z_m: a nearest level of a grid spanning the domain height would move with max_Z."""
     ts = wind_farm.turbines
     fp = wind_farm.field_params
-    D, Zhub = ts[0].D, ts[0].Zhub
+    z_m = ts[0].Zhub if z_m is None else float(z_m)
     x_global, y_global = np.asarray(x_m_target), np.asarray(y_m_target)
 
-    z_vec = np.linspace(0.0, max(t.Zhub + t.pos[2] for t in ts) + fp.max_Z * D, nz)
-    Y, Z = np.meshgrid(y_global, z_vec, indexing='ij')
-    k_hub = int(np.argmin(np.abs(z_vec - Zhub)))
+    Y, Z = np.meshgrid(y_global, np.array([z_m]), indexing='ij')
     U_in = _log_profile(fp, Z)
 
     U_map = np.zeros((len(y_global), len(x_global)))
     for i, xg in enumerate(x_global):
         src = _source_turbine(ts, xg)
         if src is None:
-            U_map[:, i] = U_in[:, k_hub]
+            U_map[:, i] = U_in[:, 0]
             continue
         U, _ = interpolate_local_velocity_field(src, xg - src.pos[0], Y, Z, default=U_in)
-        U_map[:, i] = np.asarray(U)[:, k_hub]
+        U_map[:, i] = np.asarray(U)[:, 0]
     return {'U': U_map, 'Uh': float(fp.Uh)}

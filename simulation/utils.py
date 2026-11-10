@@ -85,10 +85,14 @@ def du_eps_coef(TI, D):
 
 
 def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, eps_coef, V, W):
-    """One march step of Du et al. (2025) Eq (13), the wake-added TKE budget:"""
+    """One march step of Du et al. (2025) Eq (13), the wake-added TKE budget, with the shear production
+    taken against the FULL mean gradient, nu_t dDu/dx_j dU/dx_j (Klemmer & Howland 2025, Eq 8; the
+    dominant term of Du's own LES budget, Eq 9, before his azimuthal averaging): the inflow shear adds
+    TKE above the hub and removes some below it."""
     Uw = Uin - U
     dWdY, dWdZ = jnp.gradient(Uw, yloc[:, 0], zloc[0, :])
-    prod = nu_t * (dWdY ** 2 + dWdZ ** 2)
+    dUindZ = jnp.gradient(Uin, zloc[0, :], axis=1)
+    prod = nu_t * (dWdY ** 2 + dWdZ ** 2 - dWdZ * dUindZ)
     dif = div_nu_grad(nu_t, kw, yloc[1, 0] - yloc[0, 0], zloc[0, 1] - zloc[0, 0])
     dkdY, dkdZ = jnp.gradient(kw, yloc[:, 0], zloc[0, :])
     rhs = dif - eps_coef * jnp.maximum(kw, 0.0) ** 1.5 + prod - V * dkdY - W * dkdZ

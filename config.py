@@ -154,7 +154,7 @@ class FieldConfig:
     z0: float = 0.03 # Surface roughness length (Open sea 0.0002, Flat land 0.03)
     min_X: float = 7.0 # Minimum downstream distance to simulate (in rotor diameters)
     max_Y: float = 3.0 # Maximum lateral distance to simulate (in rotor diameters)
-    max_Z: float = 2.0 # Maximum vertical distance to simulate (in rotor diameters)
+    max_Z: float = 3.0 # Height of the vertical domain (in rotor diameters); converged from 3, not at 2
     n_grids: int = 20 # Number of grids in each direction
     cfl_factor: float = 0.125 # CFL factor for adaptive time stepping
     merge_threshold: float = 0.05 # Vortex merging distance, IN ROTOR DIAMETERS.

@@ -40,8 +40,12 @@ def genetic_algorithm(evaluate: Callable, bounds: np.ndarray, max_evals: int,
                       seed: int = 0, pop_size: Optional[int] = None, n_elite: int = 2,
                       p_crossover: float = 0.9, p_mutate: float = 0.2,
                       blx_alpha: float = 0.5, log_path: Optional[str] = None,
-                      sigma_frac: float = 0.1) -> List[dict]:
-    """Real-coded GA: tournament selection, BLX-alpha crossover, Gaussian mutation."""
+                      sigma_frac: float = 0.1, x0: Optional[np.ndarray] = None) -> List[dict]:
+    """Real-coded GA: tournament selection, BLX-alpha crossover, Gaussian mutation.
+
+    `x0` (physical) replaces the first member of the uniform initial population, the way
+    TuRBO's x0 replaces the first point of its initial design.
+    """
     rng = np.random.default_rng(seed)
     b = np.asarray(bounds, float)
     lo, hi = b[:, 0], b[:, 1]
@@ -53,6 +57,8 @@ def genetic_algorithm(evaluate: Callable, bounds: np.ndarray, max_evals: int,
     history: List[dict] = []
 
     pop = rng.uniform(lo, hi, size=(pop_size, dim))
+    if x0 is not None:
+        pop[0] = np.clip(np.asarray(x0, float), lo, hi)
     fit = np.array([_run(evaluate, x, history, log_path) for x in pop])
 
     while len(history) < max_evals:
