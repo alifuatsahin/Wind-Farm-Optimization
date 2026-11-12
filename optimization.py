@@ -16,6 +16,7 @@ from gpytorch.mlls import ExactMarginalLogLikelihood
 from botorch.generation import MaxPosteriorSampling
 from botorch.utils.sampling import SobolEngine
 from botorch.fit import fit_gpytorch_mll
+from botorch.exceptions.errors import ModelFittingError
 from botorch.models import SingleTaskGP
 from botorch.acquisition import qExpectedImprovement
 from botorch.optim import optimize_acqf
@@ -300,7 +301,20 @@ class Optimizer:
         mll = ExactMarginalLogLikelihood(model.likelihood, model)
 
         with gpytorch.settings.max_cholesky_size(self.max_cholesky_size):
-            fit_gpytorch_mll(mll)
+            try:
+                fit_gpytorch_mll(mll)
+            except ModelFittingError:
+                # Once the trust region has collapsed onto the optimum, the targets inside
+                # it differ by ~1e-4 and standardising them leaves an ill-conditioned
+                # problem that no restart recovers; BoTorch then raises. The run has
+                # already converged at that point, so returning the model on its PRIOR
+                # hyperparameters lets the remaining budget be spent instead of losing the
+                # whole optimisation. Thompson sampling inside a collapsed region is
+                # nearly uniform either way, and the trust-region logic still restarts.
+                self.n_fit_failures = getattr(self, "n_fit_failures", 0) + 1
+                print("  GP fit failed on a collapsed trust region (target range %.2g);"
+                      " continuing on prior hyperparameters"
+                      % float(Y.max() - Y.min()))
 
         return model
 

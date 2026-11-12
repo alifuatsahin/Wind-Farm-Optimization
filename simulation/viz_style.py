@@ -1,5 +1,6 @@
 """Shared plot styling: a single-hue sequential colormap for magnitude fields (replacing the..."""
 import matplotlib as mpl
+import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
 
 #: Serif stack for the paper figures; the fallbacks are the Linux metric-compatibles.
@@ -54,6 +55,19 @@ DIV_BLUE_RUST = LinearSegmentedColormap.from_list("div_blue_rust", [
     SURFACE,
     "#f7ddc8", "#efc09b", "#e2a271", "#d0804b", "#b0562a", "#7d3a17",
 ])
+
+
+def wake_cmap(cut=0.10):
+    """`turbo` with its darkest end removed, for wake velocity fields.
+
+    turbo's first ~10% runs through near-black, so a deep wake core reads as a flat dark
+    patch even when the scale is not saturated at all. Dropping that segment keeps every
+    value distinguishable -- it changes which colour a value gets, never which values are
+    shown -- and the deep wake comes out blue instead of black.
+    """
+    base = mpl.colormaps["turbo"]
+    return LinearSegmentedColormap.from_list(
+        "turbo_wake", base(np.linspace(cut, 1.0, 256)))
 
 
 def style_figure(fig):

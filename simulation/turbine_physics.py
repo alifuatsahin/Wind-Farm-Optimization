@@ -84,24 +84,26 @@ def compute_gamma0(params, Uhub):
     return np.pi * Uhub ** 2 * params.Ct_yawed / omega
 
 
-def compute_Ut(params, Uhub, beta=None):
-    """Blade-tip velocity around the azimuth."""
+def compute_Ut(params, Uhub, beta=None, a=None):
+    """Blade-tip velocity around the azimuth. `a` defaults to the induction of a rotor
+    yawed by `beta` in a flow aligned with it; the yawed shape passes the rotor's own
+    induction (params.a, eq. 8), which accounts for a turned inflow."""
     beta = params.beta if beta is None else beta
     omega = compute_omega(params, Uhub)
     z = params.Zhub + params.D / 2.0 * np.sin(params.phi)
     zsafe = np.maximum(z, params.field_params.z0 + 1e-6)
     Utbl = params.Uh * (np.log(zsafe / params.field_params.z0) / np.log(params.Zh / params.field_params.z0))
     cb = np.cos(beta)
-    a = params.a_at(beta)
+    a = params.a_at(beta) if a is None else a
     U_tx = (1 - a) * Utbl - omega * params.R * np.sin(params.phi) * np.sin(beta)
     U_ty = -omega * params.R * np.sin(params.phi) * cb
     U_tz = omega * params.R * np.cos(params.phi)
     return np.array([U_tx, U_ty, U_tz]).T
 
 
-def _shed_shape(params, Uhub, beta):
+def _shed_shape(params, Uhub, beta, a=None):
     """Unnormalised azimuthal distribution of shed circulation, Zong Eq (4.4)."""
-    Ut = compute_Ut(params, Uhub, beta)
+    Ut = compute_Ut(params, Uhub, beta, a)
     alpha = np.arcsin(Ut[:, 0] / np.sqrt(np.sum(Ut ** 2, axis=1)))
     return np.sin(alpha) * params.dphi
 
@@ -113,7 +115,7 @@ def compute_dgamma(params, Uhub):
     """Shed circulation per azimuthal element, with the torque- and force-driven parts scaled..."""
     gamma_ref = -compute_gamma0(params, Uhub) * GAMMA_TRAILING_K
 
-    shape_b = _shed_shape(params, Uhub, params.beta_aero)
+    shape_b = _shed_shape(params, Uhub, params.beta_aero, params.a)
     shape_0 = _shed_shape(params, Uhub, 0.0)
     dgamma_b = gamma_ref / np.sum(shape_b) * shape_b
     dgamma_0 = gamma_ref / np.sum(shape_0) * shape_0
@@ -125,6 +127,13 @@ def compute_dgamma(params, Uhub):
                 * np.sin(params.beta_aero) * np.cos(params.beta_aero) ** 2)
     if abs(M_yaw) > 1e-12:
         asym_yaw = asym_yaw * (M_target / M_yaw)
+    # An unyawed rotor carries no lateral force, so its shed system must carry no lateral
+    # impulse; in a sheared inflow the baseline shape has a first azimuthal (sin phi) moment
+    # that would. It is removed here (it sums to zero round the ring, so the torque-derived
+    # total is unchanged), and the total impulse of the ring is then exactly M_target.
+    # Fixing the yaw part to M_target - (baseline impulse) instead would diverge as
+    # beta -> 0, where M_yaw -> 0 but the baseline impulse does not.
+    dgamma_0 = dgamma_0 - z_rel * (float(np.sum(dgamma_0 * z_rel)) / float(np.sum(z_rel ** 2)))
     return dgamma_0 + asym_yaw
 
 
@@ -194,7 +203,7 @@ def vortex_adapter(params, local):
         Zhub=params.Zhub,
         nu_slope=nu_slope,
         nu_const=nu_const,
-        U_conv=float(local.Uhub * (1.0 - params.a_at(params.beta))),
+        U_conv=float(local.Uhub * (1.0 - params.a)),
         Nv=params.Nv,
         V=jnp.asarray(local.V),
         W=jnp.asarray(local.W),
