@@ -162,6 +162,9 @@ def _source_turbine(turbines, x_m):
 
 
 def _log_profile(fp, Z):
+    """Undisturbed profile for the extraction routines; honours FieldConfig.inflow so a uniform-inflow..."""
+    if str(getattr(fp, "inflow", "log")).lower() == "uniform":
+        return np.full_like(np.asarray(Z, dtype=float), float(fp.Uh))
     return fp.Uh * (np.log(np.maximum(Z, fp.z0 + 1e-3) / fp.z0) / np.log(fp.Zh / fp.z0))
 
 
@@ -178,8 +181,7 @@ def extract_cross_plane(wind_farm, x_m, y_grid, z_grid):
 
 
 def extract_hub_height_slice(wind_farm, x_m_target, y_m_target, z_m=None):
-    """(x, y) map of streamwise velocity at height z_m (default: hub height), plus the reference Uh.
-    Sampled exactly at z_m: a nearest level of a grid spanning the domain height would move with max_Z."""
+    """(x, y) map of streamwise velocity at height z_m (default: hub height), plus the reference Uh."""
     ts = wind_farm.turbines
     fp = wind_farm.field_params
     z_m = ts[0].Zhub if z_m is None else float(z_m)

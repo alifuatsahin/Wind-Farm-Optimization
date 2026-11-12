@@ -85,10 +85,7 @@ def du_eps_coef(TI, D):
 
 
 def advance_kw(kw, U, Uin, yloc, zloc, dx, nu_t, eps_coef, V, W):
-    """One march step of Du et al. (2025) Eq (13), the wake-added TKE budget, with the shear production
-    taken against the FULL mean gradient, nu_t dDu/dx_j dU/dx_j (Klemmer & Howland 2025, Eq 8; the
-    dominant term of Du's own LES budget, Eq 9, before his azimuthal averaging): the inflow shear adds
-    TKE above the hub and removes some below it."""
+    """One march step of Du et al. (2025) Eq (13), the wake-added TKE budget, with the shear..."""
     Uw = Uin - U
     dWdY, dWdZ = jnp.gradient(Uw, yloc[:, 0], zloc[0, :])
     dUindZ = jnp.gradient(Uin, zloc[0, :], axis=1)

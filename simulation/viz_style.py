@@ -7,14 +7,11 @@ from matplotlib.colors import LinearSegmentedColormap
 PAPER_SERIF = ["Times New Roman", "Nimbus Roman", "Liberation Serif",
                "Tinos", "DejaVu Serif"]
 
-#: Base text size in points. Figures are drawn at their printed width, so this is
-#: the size the reader sees; the paper body is 12 pt.
+#: Base text size in points; figures are drawn at their printed width.
 BASE_PT = 9.5
 
-#: Page white. The figures sit on the white of a journal page, so anything off-white
-#: reads as a grey panel once the PDF is printed; it is set in the rcParams below as
-#: well as passed explicitly, so a figure that forgets `facecolor=SURFACE` still
-#: comes out white rather than reverting to this module's old warm tint.
+#: Page white. Set in the rcParams below as well as passed explicitly, so a figure that
+#: forgets `facecolor=SURFACE` still comes out white rather than off-white.
 SURFACE = "#ffffff"
 INK_PRIMARY = "#0b0b0b"
 INK_SECONDARY = "#52514e"
@@ -58,13 +55,7 @@ DIV_BLUE_RUST = LinearSegmentedColormap.from_list("div_blue_rust", [
 
 
 def wake_cmap(cut=0.10):
-    """`turbo` with its darkest end removed, for wake velocity fields.
-
-    turbo's first ~10% runs through near-black, so a deep wake core reads as a flat dark
-    patch even when the scale is not saturated at all. Dropping that segment keeps every
-    value distinguishable -- it changes which colour a value gets, never which values are
-    shown -- and the deep wake comes out blue instead of black.
-    """
+    """`turbo` with its darkest end removed, for wake velocity fields."""
     base = mpl.colormaps["turbo"]
     return LinearSegmentedColormap.from_list(
         "turbo_wake", base(np.linspace(cut, 1.0, 256)))

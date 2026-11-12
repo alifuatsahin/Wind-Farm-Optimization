@@ -67,27 +67,16 @@ def _simulate_vortex_evolution_jit(config, merge_threshold, cfl_factor, total_st
 
 
 def march_until_stopped(advance, init, total_steps, idle_frame=None):
-    """A `total_steps`-long march that stops computing once it reports itself inactive.
-
-    `advance(carry) -> (next_carry, frame)`, with the carry's LAST member the active flag.
-    Returns the frames stacked along a leading axis of length `total_steps`, the per-step
-    active flags and the final carry -- what a lax.scan of `total_steps` gives when its inactive steps emit
-    `idle_frame(carry)` and pass the carry through, but without running those idle steps: the
-    march uses as few as 4% of its allotted steps. `idle_frame` fills the unused tail, which
-    matters to a reader of the whole stack (interpolate_vec_data searchsorts its t, so a zero
-    tail would be read as frames at t=0); with None the tail is left as zeros, for a caller
-    that only ever reads the active prefix.
-    """
+    """A `total_steps`-long march that stops computing once it reports itself inactive."""
     frame_aval = jax.eval_shape(lambda c: advance(c)[1], init)
     frames = jax.tree.map(lambda a: jnp.zeros((total_steps,) + a.shape, a.dtype), frame_aval)
 
     def body(loop):
         i, carry, frames, was_active = loop
-        # The loop has already stopped by the time the flag is False, so this cond never
-        # takes its idle side. It is kept because it is what the scan this replaced compiled:
-        # on the CPU backend the same step compiled outside a conditional sums the PM
-        # scatter in a different order (objective ~1e-8 off on a 16-rotor farm), and inside
-        # one the results stay bit-identical to the scan's.
+        # The loop has already stopped when the flag is False, so this cond never takes its idle
+        # side. It is kept because on the CPU backend the same step compiled outside a conditional
+        # sums the PM scatter in a different order (~1e-8 on a 16-rotor farm); inside one it is
+        # bit-identical to the scan this replaced.
         carry, frame = lax.cond(carry[-1], advance,
                                 lambda c: (c, jax.tree.map(jnp.zeros_like, frame_aval)), carry)
         frames = jax.tree.map(lambda buf, x: buf.at[i].set(x), frames, frame)

@@ -199,7 +199,7 @@ def solve_single_field(wf, verbose=False, all_frames=True):
                 sk = float(np.arctan2(Vbar, max(Ubar, 1e-6)))
                 t._params = dataclasses.replace(
                     t._params, skew=sk,
-                    Cp=float(t._params.config.Cp) * np.cos(t._params.beta - sk) ** CP_YAW_EXP)
+                    Cp=float(t._params.config.Cp) * np.cos(t._params.beta + sk) ** CP_YAW_EXP)
 
         for t in group:
             dy = lead.pos[1] - t.pos[1]

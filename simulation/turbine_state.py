@@ -38,7 +38,10 @@ class TurbineParams:
     @property
     def beta_aero(self):
         """Misalignment against the LOCAL flow, which an upstream steered wake has already turned by..."""
-        return self.beta - self.skew
+        # beta is positive CLOCKWISE seen from above and skew = arctan(Vbar/Ubar) positive
+        # ANTICLOCKWISE, so the misalignment is their SUM: a +y cross-flow on a +beta rotor
+        # increases it, and an inflow along the rotor axis (skew = -beta) gives zero.
+        return self.beta + self.skew
 
     @property
     def R(self):

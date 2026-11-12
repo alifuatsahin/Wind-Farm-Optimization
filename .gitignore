@@ -9,6 +9,7 @@ analytical_baseline.py
 floris_baseline.py
 make_graphical_abstract.py
 analytical_compare.py
+analytical_retune.py
 make_paper_figures.py
 make_validation_figures.py
 paper_metrics.py

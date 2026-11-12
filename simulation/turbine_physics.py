@@ -15,10 +15,17 @@ from .model_solver import advance_wake_field, representative_velocity
 from .field_ops import interpolate_vec_data
 
 
+def inflow_profile(field_params, Uh, Zh, Z):
+    """Undisturbed streamwise velocity at height Z: logarithmic, or uniform at Uh."""
+    if str(getattr(field_params, "inflow", "log")).lower() == "uniform":
+        return np.full_like(np.asarray(Z, dtype=float), float(Uh))
+    z0 = field_params.z0
+    zsafe = np.maximum(Z, z0 + 1e-6)
+    return Uh * (np.log(zsafe / z0) / np.log(Zh / z0))
+
+
 def init_Uin(params):
-    zsafe = np.maximum(params.zloc, params.field_params.z0 + 1e-6)
-    Uin = params.Uh * (np.log(zsafe / params.field_params.z0) / np.log(params.Zh / params.field_params.z0))
-    return Uin
+    return inflow_profile(params.field_params, params.Uh, params.Zh, params.zloc)
 
 
 def rotor_disc_mask(params):
@@ -85,14 +92,11 @@ def compute_gamma0(params, Uhub):
 
 
 def compute_Ut(params, Uhub, beta=None, a=None):
-    """Blade-tip velocity around the azimuth. `a` defaults to the induction of a rotor
-    yawed by `beta` in a flow aligned with it; the yawed shape passes the rotor's own
-    induction (params.a, eq. 8), which accounts for a turned inflow."""
+    """Blade-tip velocity around the azimuth."""
     beta = params.beta if beta is None else beta
     omega = compute_omega(params, Uhub)
     z = params.Zhub + params.D / 2.0 * np.sin(params.phi)
-    zsafe = np.maximum(z, params.field_params.z0 + 1e-6)
-    Utbl = params.Uh * (np.log(zsafe / params.field_params.z0) / np.log(params.Zh / params.field_params.z0))
+    Utbl = inflow_profile(params.field_params, params.Uh, params.Zh, z)
     cb = np.cos(beta)
     a = params.a_at(beta) if a is None else a
     U_tx = (1 - a) * Utbl - omega * params.R * np.sin(params.phi) * np.sin(beta)
@@ -113,7 +117,10 @@ GAMMA_TRAILING_K = 0.45
 
 def compute_dgamma(params, Uhub):
     """Shed circulation per azimuthal element, with the torque- and force-driven parts scaled..."""
-    gamma_ref = -compute_gamma0(params, Uhub) * GAMMA_TRAILING_K
+    # The spin direction enters here and nowhere else: asym_yaw below is rescaled to M_target,
+    # whose sign comes from the yaw, so the yaw-driven lateral impulse is left untouched.
+    rot = float(np.ravel(getattr(params.config, "rotation", 1.0))[0])
+    gamma_ref = -compute_gamma0(params, Uhub) * GAMMA_TRAILING_K * rot
 
     shape_b = _shed_shape(params, Uhub, params.beta_aero, params.a)
     shape_0 = _shed_shape(params, Uhub, 0.0)
@@ -127,12 +134,9 @@ def compute_dgamma(params, Uhub):
                 * np.sin(params.beta_aero) * np.cos(params.beta_aero) ** 2)
     if abs(M_yaw) > 1e-12:
         asym_yaw = asym_yaw * (M_target / M_yaw)
-    # An unyawed rotor carries no lateral force, so its shed system must carry no lateral
-    # impulse; in a sheared inflow the baseline shape has a first azimuthal (sin phi) moment
-    # that would. It is removed here (it sums to zero round the ring, so the torque-derived
-    # total is unchanged), and the total impulse of the ring is then exactly M_target.
-    # Fixing the yaw part to M_target - (baseline impulse) instead would diverge as
-    # beta -> 0, where M_yaw -> 0 but the baseline impulse does not.
+    # An unyawed rotor carries no lateral force, so the first azimuthal moment a sheared inflow
+    # puts in the baseline shape is removed here (it sums to zero round the ring, so the
+    # torque-derived total is unchanged); fixing the yaw part instead would diverge as beta -> 0.
     dgamma_0 = dgamma_0 - z_rel * (float(np.sum(dgamma_0 * z_rel)) / float(np.sum(z_rel ** 2)))
     return dgamma_0 + asym_yaw
 
@@ -348,8 +352,7 @@ def initialize_wake_field(params, stacked, local, companions=(), kw0=None, wage0
 
 def calculate_deficit_field(params, local, stacked, dl, max_steps=1500, companions=(),
                             carried=(), n_slots=None, read_at=None):
-    """March the deficit field; return its frames, all of them or, given `read_at`, only those
-    that reading the march at those streamwise positions touches (see _frames_read_at)."""
+    """March the deficit field; return its frames, all of them or, given `read_at`, only those that..."""
     yloc = np.asarray(params.yloc)
     zloc = np.asarray(params.zloc)
     rotors = (((params, 0.0, 0.0),)
@@ -464,9 +467,7 @@ def _calculate_deficit_field_jit(stacked, seed, adapter, WV,
 @partial(jax.jit, static_argnames=("max_steps",))
 def _calculate_deficit_field_lean_jit(stacked, seed, adapter, WV,
                                        dl, dt_cap, calculation_domain, max_steps, x_read):
-    """The same march, keeping every step's X but only three frames: the latest short of
-    `x_read`, the first at or past it, and the latest after that -- with the march's last
-    frame always among them. A full stack is ~7 GB on an 80-rotor farm's grid."""
+    """The same march, keeping every step's X but only three frames:"""
     advance = _deficit_advance(stacked, adapter, WV, dl, dt_cap, calculation_domain)
     frame_aval = jax.eval_shape(lambda c: advance(c)[1], (seed, True))
 
@@ -524,8 +525,7 @@ def _stacked_frames_to_numpy(stacked, n, grid):
 
 
 def _below_threshold(x, dtype):
-    """The value that splits frames at `x` in the march's own precision: for an X of that dtype,
-    X < result exactly when X < x in float64, which is how the host picks frames."""
+    """The value that splits frames at `x` in the march's own precision:"""
     dtype = np.dtype(dtype)
     if not np.isfinite(x) or dtype == np.float64:
         return np.asarray(x, dtype)
@@ -534,12 +534,7 @@ def _below_threshold(x, dtype):
 
 
 def _frames_read_at(head, X_steps, slots, slot_rows, n, grid, x):
-    """`head` and the frames of an `n`-step lean march that reading it at `x` touches, in order:
-    the first and last, the pair bracketing x and the one nearest it -- chosen exactly as
-    field_ops.interpolate_* and the carried-cloud argmin choose them in the full list, so every
-    lookup the solve makes lands on the same frames. A frame the march did not keep is an
-    error, not a silent difference: it can only happen if X ever went backwards.
-    """
+    """`head` and the frames of an `n`-step lean march that reading it at `x` touches, in order:"""
     X = np.concatenate([[float(head.X)], np.asarray(jax.device_get(X_steps))[:n].astype(float)])
     keep = {0, len(X) - 1}
     if np.isfinite(x):

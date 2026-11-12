@@ -41,11 +41,7 @@ def genetic_algorithm(evaluate: Callable, bounds: np.ndarray, max_evals: int,
                       p_crossover: float = 0.9, p_mutate: float = 0.2,
                       blx_alpha: float = 0.5, log_path: Optional[str] = None,
                       sigma_frac: float = 0.1, x0: Optional[np.ndarray] = None) -> List[dict]:
-    """Real-coded GA: tournament selection, BLX-alpha crossover, Gaussian mutation.
-
-    `x0` (physical) replaces the first member of the uniform initial population, the way
-    TuRBO's x0 replaces the first point of its initial design.
-    """
+    """Real-coded GA: tournament selection, BLX-alpha crossover, Gaussian mutation."""
     rng = np.random.default_rng(seed)
     b = np.asarray(bounds, float)
     lo, hi = b[:, 0], b[:, 1]
@@ -100,12 +96,7 @@ def heuristic_yaw(bounds: np.ndarray, beta_max: float = 25.0, sign: float = 1.0)
 def cma_es(evaluate: Callable, bounds: np.ndarray, max_evals: int, seed: int = 0,
            x0: Optional[np.ndarray] = None, sigma0: float = 0.2,
            log_path: Optional[str] = None) -> List[dict]:
-    """CMA-ES (pycma) on the box scaled to [0, 1], default population, IPOP restarts.
-
-    `x0` (physical; default the heuristic start) is the first mean and `sigma0` the step in the
-    scaled box. A run that stops on its own before the budget restarts from a uniform random
-    mean with the population doubled. The last generation is cut short at `max_evals`.
-    """
+    """CMA-ES (pycma) on the box scaled to [0, 1], default population, IPOP restarts."""
     import cma
 
     b = np.asarray(bounds, float)

@@ -21,6 +21,8 @@ class TurbineConfig:
     overhang_D: float = 0.2
     #: Nacelle/hub diameter as a fraction of D, for the co-located bluff-body disc.
     nacelle_D: float = 0.0
+    #: Spin direction, +1 anticlockwise and -1 clockwise seen from upstream.
+    rotation: float = 1.0
 
 @dataclass
 class WindFarmConfig:
@@ -31,6 +33,9 @@ class WindFarmConfig:
     Cp: np.ndarray = field(default_factory=lambda: np.array([0.47])) # Power coefficient(s)
     yaw: np.ndarray = field(default_factory=lambda: np.array([0.0])) # Yaw angle(s)
     TSR: np.ndarray = field(default_factory=lambda: np.array([7.02])) # Tip speed ratio(s)
+    #: Spin direction, +1 anticlockwise and -1 clockwise seen from upstream; it flips the
+    #: torque-derived shed circulation only, never the yaw-driven lateral impulse.
+    rotation: np.ndarray = field(default_factory=lambda: np.array([1.0]))
     overhang_D: np.ndarray = field(default_factory=lambda: np.array([0.2])) # Rotor overhang / D
     nacelle_D: np.ndarray = field(default_factory=lambda: np.array([0.0])) # Nacelle diameter / D
 
@@ -109,6 +114,7 @@ class WindFarmConfig:
             TSR = float(self._pick(self.TSR, idx)),
             overhang_D = float(self._pick(self.overhang_D, idx)),
             nacelle_D = float(self._pick(self.nacelle_D, idx)),
+            rotation = float(self._pick(self.rotation, idx)),
         )
 
     def _broadcast(self, arr):
@@ -152,6 +158,8 @@ class FieldConfig:
     #: Ring elements shed per rotor.
     Nv: int = 40
     z0: float = 0.03 # Surface roughness length (Open sea 0.0002, Flat land 0.03)
+    #: Inflow profile: 'log' through (Zh, Uh) with roughness z0, or 'uniform' at U = Uh.
+    inflow: str = 'log'
     min_X: float = 7.0 # Minimum downstream distance to simulate (in rotor diameters)
     max_Y: float = 3.0 # Maximum lateral distance to simulate (in rotor diameters)
     max_Z: float = 3.0 # Height of the vertical domain (in rotor diameters); converged from 3, not at 2
@@ -160,8 +168,7 @@ class FieldConfig:
     merge_threshold: float = 0.05 # Vortex merging distance, IN ROTOR DIAMETERS.
     #: Vortex-core diffusivity model: 'abl' (sheared, u*-based) or 'squire'.
     vortex_nu: str = 'abl'
-    #: Rotor count at or above which the cloud's induction on the field grid is evaluated by the
-    #: particle-mesh solver instead of the direct pairwise sum.
+    #: Rotor count at or above which the cloud's induction is evaluated by particle mesh.
     pm_min_rotors: int | None = 16
     #: Relative width of the geometric core ladder the PM solver bins vortices onto.
     pm_tol: float = 0.05
